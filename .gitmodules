@@ -1,3 +1,6 @@
 [submodule "tools/autodock-vina"]
 	path = tools/autodock-vina/repo
 	url = https://github.com/ccsb-scripps/AutoDock-Vina
+[submodule "tools/qvina"]
+	path = tools/qvina/repo
+	url = https://github.com/QVina/qvina
