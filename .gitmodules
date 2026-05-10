@@ -4,3 +4,6 @@
 [submodule "tools/qvina"]
 	path = tools/qvina/repo
 	url = https://github.com/QVina/qvina
+[submodule "tools/openbabel/repo"]
+	path = tools/openbabel/repo
+	url = https://github.com/openbabel/openbabel
