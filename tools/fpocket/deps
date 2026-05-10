@@ -1,0 +1,3 @@
+dev libnetcdf-dev
+dev gcc
+dev libqhull-dev

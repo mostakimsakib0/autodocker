@@ -7,3 +7,6 @@
 [submodule "tools/openbabel/repo"]
 	path = tools/openbabel/repo
 	url = https://github.com/openbabel/openbabel
+[submodule "tools/fpocket/repo"]
+	path = tools/fpocket/repo
+	url = https://github.com/Discngine/fpocket
