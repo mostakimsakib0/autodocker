@@ -1,4 +1,10 @@
 #!/bin/bash
+for arg in "$@"; do
+	case "$arg" in
+		-s | --shell | --debug) exec bash -i ;;
+	esac
+done
+
 set -euo pipefail
 
 DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
@@ -9,7 +15,7 @@ SCRIPT="$DIR/runner.py"
 mkdir -p "$OUT"
 
 if [ -n "${PDB:-}" ]; then
-	:  # Use PDB from the environment.
+	: # Use PDB from the environment.
 elif [ -f "$WORK/protein.pdb" ]; then
 	PDB="$WORK/protein.pdb"
 elif [ -f "$WORK/protein_clean.pdb" ]; then
@@ -26,22 +32,22 @@ echo "======================================"
 
 # Check if required files exist
 if [ ! -f "$PDB" ]; then
-	echo  "[!] Protein file not found: $PDB"
-	echo  "[!] Please place protein.pdb in workspace/ or set PDB=/path/to/file.pdb"
-	exit  1
+	echo "[!] Protein file not found: $PDB"
+	echo "[!] Please place protein.pdb in workspace/ or set PDB=/path/to/file.pdb"
+	exit 1
 fi
 
 if [ ! -d "$LIGS" ]; then
-	echo  "[!] Ligands directory not found: $LIGS"
-	echo  "[!] Please create workspace/ligs/ and add .sdf files"
-	exit  1
+	echo "[!] Ligands directory not found: $LIGS"
+	echo "[!] Please create workspace/ligs/ and add .sdf files"
+	exit 1
 fi
 
 # Check for ligand files
 LIG_COUNT=$(find "$LIGS" -name "*.sdf" | wc -l)
 if [ "$LIG_COUNT" -eq 0 ]; then
-	echo  "[!] No .sdf files found in $LIGS"
-	exit  1
+	echo "[!] No .sdf files found in $LIGS"
+	exit 1
 fi
 
 echo "[*] Found $LIG_COUNT ligand(s)"
