@@ -10,3 +10,6 @@
 [submodule "tools/fpocket/repo"]
 	path = tools/fpocket/repo
 	url = https://github.com/Discngine/fpocket
+[submodule "tools/smina/repo"]
+	path = tools/smina/repo
+	url = https://git.code.sf.net/p/smina/code

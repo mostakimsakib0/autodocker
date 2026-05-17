@@ -25,6 +25,18 @@ RUN make -j"$(nproc)" -C autodock-vina/repo/build/linux/release
 RUN strip autodock-vina/repo/build/linux/release/vina
 
 # ============================================================
+# Stage 1 — Build SMINA
+# ============================================================
+FROM builder AS smina_builder
+
+WORKDIR /src
+COPY tools/smina ./smina
+RUN /scripts/apt.sh dev smina/deps
+RUN cmake -S smina/repo -B smina/build
+RUN make -j"$(nproc)" -C smina/build
+RUN strip smina/build/fromsmina smina/build/tosmina smina/build/smina
+
+# ============================================================
 # Stage 1 — Build QuickVina2
 # ============================================================
 FROM builder AS qvina_builder
@@ -40,30 +52,30 @@ EOF
 # ============================================================
 # Stage 1 — Build OpenBabel
 # ============================================================
-FROM builder AS obabel_builder
-WORKDIR /src
-COPY tools/openbabel ./openbabel
-RUN /scripts/apt.sh dev openbabel/deps
-RUN cmake -S openbabel/repo -B openbabel/build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DBUILD_GUI=OFF \
-    -DBUILD_SHARED=OFF \
-    -DWITH_COORDGEN=OFF \
-    -DWITH_MAEPARSER=OFF \
-    -DWITH_AVALON=OFF \
-    -DWITH_SWIG=OFF \
-    -DWITH_PYTHON=OFF \
-    -DWITH_OPENMP=ON \
-    -DCMAKE_INSTALL_PREFIX=/usr/local
-RUN make -j"$(nproc)" -C openbabel/build
-RUN strip openbabel/build/bin/obabel
-RUN <<EOF
-make -C openbabel/build DESTDIR=/src/openbabel/pfx install
-mkdir /src/openbabel/pfx/share
-mv /src/openbabel/pfx/usr/local/bin /src/openbabel/pfx/bin
-mv /src/openbabel/pfx/usr/local/share/openbabel /src/openbabel/pfx/share/openbabel
-rm -rf /src/openbabel/pfx/usr
-EOF
+#FROM builder AS obabel_builder
+#WORKDIR /src
+#COPY tools/openbabel ./openbabel
+#RUN /scripts/apt.sh dev openbabel/deps
+#RUN cmake -S openbabel/repo -B openbabel/build \
+#    -DCMAKE_BUILD_TYPE=Release \
+#    -DBUILD_GUI=OFF \
+#    -DBUILD_SHARED=OFF \
+#    -DWITH_COORDGEN=OFF \
+#    -DWITH_MAEPARSER=OFF \
+#    -DWITH_AVALON=OFF \
+#    -DWITH_SWIG=OFF \
+#    -DWITH_PYTHON=OFF \
+#    -DWITH_OPENMP=ON \
+#    -DCMAKE_INSTALL_PREFIX=/usr/local
+#RUN make -j"$(nproc)" -C openbabel/build
+#RUN strip openbabel/build/bin/obabel
+#RUN <<EOF
+#make -C openbabel/build DESTDIR=/src/openbabel/pfx install
+#mkdir /src/openbabel/pfx/share
+#mv /src/openbabel/pfx/usr/local/bin /src/openbabel/pfx/bin
+#mv /src/openbabel/pfx/usr/local/share/openbabel /src/openbabel/pfx/share/openbabel
+#rm -rf /src/openbabel/pfx/usr
+#EOF
 # ============================================================
 # Stage 1 — Build FPocket
 # ============================================================
@@ -80,8 +92,16 @@ RUN strip fpocket/repo/bin/*
 # ============================================================
 FROM docker.io/python:3.12-slim-bookworm
 
-COPY requirements.txt /requirements.txt
+COPY deps /deps
+COPY scripts/apt.sh /apt.sh
+RUN <<EOF
+export DEBIAN_FRONTEND=noninteractive
+apt update
+/apt.sh run /deps
+rm -f /apt.sh
+EOF
 
+COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir --root-user-action=ignore -r /requirements.txt
 
 COPY autodocker /autodocker
@@ -90,13 +110,20 @@ COPY --from=vina_builder \
     /src/autodock-vina/repo/build/linux/release/vina \
     /usr/local/bin/vina
 
+
+COPY --from=smina_builder \
+    /src/smina/build/smina \
+    /src/smina/build/tosmina \
+    /src/smina/build/fromsmina \
+    /usr/local/bin/
+
 COPY --from=qvina_builder \
     /src/qvina/repo/build/linux/release/qvina \
     /usr/local/bin/qvina
 
-COPY --from=obabel_builder \
-    /src/openbabel/pfx/ \
-    /usr/local/
+#COPY --from=obabel_builder \
+#    /src/openbabel/pfx/ \
+#    /usr/local/
 
 COPY --from=fpocket_builder \
     /src/fpocket/repo/bin/fpocket \

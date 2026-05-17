@@ -1,0 +1,4 @@
+dev libboost-all-dev
+dev libopenbabel-dev
+dev libeigen3-dev
+dev cmake
