@@ -2343,7 +2343,7 @@ class ProteinPreparation:
         self.pdb_clean = os.path.join(outdir, "protein_clean.pdb")
         self.receptor_pdbqt = os.path.join(outdir, "receptor.pdbqt")
         self.grid_conf = os.path.join(outdir, "grid.conf")
-        self.grid_box_script = os.path.join(outdir, "grid_box.py")
+        self.grid_box_script = os.path.join(outdir, "grid_box.pml")
         self.pocket_summary_file = os.path.join(outdir, "pocket_summary.csv")
 
     def validate(self):
@@ -2719,6 +2719,9 @@ size_z = {sz}
     def write_grid_box_script(self, cx: float, cy: float, cz: float,
                               sx: float, sy: float, sz: float):
         """Write a PyMOL script that visualizes the final docking box."""
+        _dir = os.path.dirname(os.path.abspath(self.grid_box_script))
+        pdb_relpath = os.path.relpath(self.receptor_pdbqt, _dir)
+
         x0, x1 = cx - sx / 2, cx + sx / 2
         y0, y1 = cy - sy / 2, cy + sy / 2
         z0, z1 = cz - sz / 2, cz + sz / 2
@@ -2732,28 +2735,49 @@ size_z = {sz}
             (0, 4), (1, 5), (2, 6), (3, 7),
         ]
 
+        generate_box = lambda: ',\n       '.join(
+            map(lambda x: ', '.join(x), (
+                ('COLOR', '0.0', '1.0'),
+                ('LINEWIDTH', '3.0'),
+                ('BEGIN', 'LINES'),
+                *(
+                    vertex
+                    for edge in edges
+                    for vertex in map(
+                        lambda points: (
+                            'VERTEX',
+                            f'{points[0]:7.3f}',
+                            f'{points[1]:7.3f}',
+                            f'{points[2]:7.3f}',
+                        ),
+                        (vertices[edge[0]], vertices[edge[1]])
+                    )
+                ),
+                ('END',),
+            ))
+        )
+
+        pml_lines = (
+            f'load {pdb_relpath}, receptor',
+            r'show cartoon, receptor',
+            r'',
+            r'python',
+            r'from pymol import cmd',
+            r'from pymol.cgo import *',
+            r'',
+            f'box = [{generate_box()}]',
+            r'cmd.load_cgo(box, "docking_grid")',
+            r'python end',
+            r'',
+            r'zoom all',
+            r''
+        )
+
         try:
             with open(self.grid_box_script, "w") as f:
-
-                f.write("import os\n\n")
-                f.write("from pymol import cmd\n")
-                f.write(
-                    "from pymol.cgo import BEGIN, LINES, VERTEX, END, COLOR, LINEWIDTH\n\n")
-                f.write("os.chdir(os.path.dirname(os.path.abspath(__file__)))\n")
-                f.write(
-                    f"cmd.load(r'{os.path.relpath(self.receptor_pdbqt, os.path.dirname(os.path.abspath(self.grid_box_script)))}', 'receptor')\n")
-                f.write(
-                    "box = [COLOR, 0.0, 0.35, 1.0, LINEWIDTH, 3.0, BEGIN, LINES,\n")
-                for a, b in edges:
-                    ax, ay, az = vertices[a]
-                    bx, by, bz = vertices[b]
-                    f.write(
-                        f"       VERTEX, {ax:.3f}, {ay:.3f}, {az:.3f}, VERTEX, {bx:.3f}, {by:.3f}, {bz:.3f},\n")
-                f.write("       END]\n")
-                f.write("cmd.load_cgo(box, 'docking_grid')\n")
-                f.write("cmd.zoom('receptor or docking_grid')\n")
-            logger.info(
-                f"[✔] Grid visualization script saved: {self.grid_box_script}")
+                f.write('\n'.join(pml_lines))
+                logger.info(
+                    f"[✔] Grid visualization script saved: {self.grid_box_script}")
         except IOError as e:
             logger.warning(f"Could not write grid visualization script: {e}")
 
@@ -4153,3 +4177,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+# vim: ts=4:et
