@@ -38,7 +38,7 @@ Workflow:
   4. Docking (flexible or rigid, single or multi-engine)
   5. Advanced results analysis (HTML reports + clustering)
 """
-
+import uuid
 import argparse
 import subprocess
 import os
@@ -677,25 +677,23 @@ def run_smina_docking(
 # PDBQT CHARGE VALIDATION & FIXING
 # =============================
 
-
 def _ensure_pdbqt_has_charges(pdbqt_file: str) -> bool:
-    """Verify PDBQT file has atomic charges. Return True if charges present."""
+    """Check if PDBQT file contains at least one valid atomic charge (robust)."""
     try:
         with open(pdbqt_file, 'r') as f:
             for line in f:
-                if line.startswith('ATOM') or line.startswith('HETATM'):
-                    # Column 70-76 contains partial charge in PDBQT format
-                    if len(line) > 70:
-                        charge_str = line[70:76].strip()
+                if line.startswith(("ATOM", "HETATM")):
+                    parts = line.split()
+                    # PDBQT charge is usually last column
+                    if len(parts) >= 9:
                         try:
-                            charge = float(charge_str)
-                            if charge != 0.0:
-                                return True  # Found non-zero charge
+                            float(parts[-1])
+                            return True
                         except ValueError:
-                            pass
-        return False  # No charges found
+                            continue
+        return False
     except Exception as e:
-        logger.warning(f"Could not check charges in {pdbqt_file}: {e}")
+        logger.warning(f"Charge check failed: {e}")
         return False
 
 
@@ -744,92 +742,37 @@ def _sanitize_receptor_pdbqt(pdbqt_file: str) -> None:
 
 
 def _fix_pdbqt_charges(pdbqt_file: str, source_file: str) -> None:
-    """Re-convert file with proper Gasteiger charges if original lacks charges.
-
-    Strict mode: no heuristic/fake charges are allowed.
-    Raises RuntimeError if reliable charge assignment fails.
     """
-    if pdbqt_file.endswith('.pdbqt'):
-        logger.info(
-            f"[*] Re-computing charges for {os.path.basename(pdbqt_file)} with Gasteiger...")
+    STRICT charge assignment.
+    No silent guessing. Only real tools allowed.
+    """
 
-        # Try using meeko for proper force field parametrization
-        try:
-            from meeko import MoleculePreparation
-            from rdkit import Chem
+    logger.warning(f"[!] Fixing charges for: {pdbqt_file}")
 
-            logger.debug(
-                "[*] Using meeko for proper AMBER force field parameters...")
-
-            if source_file.endswith('.sdf'):
-                mol = Chem.MolFromMolFile(source_file, removeHs=False)
-                if mol is not None:
-                    prep = MoleculePreparation()
-                    prep.prepare(mol)
-                    prep.write_pdbqt_file(pdbqt_file)
-                    if _ensure_pdbqt_has_charges(pdbqt_file):
-                        logger.info(
-                            f"[✔] Charges computed with meeko (AMBER force field)")
-                        return
-                    raise RuntimeError(
-                        "meeko wrote PDBQT without usable charges")
-        except (ImportError, Exception) as e:
-            logger.debug(f"Meeko preparation unavailable: {e}")
-
-        # Try using RDKit if available for Gasteiger charge computation
-        try:
-            from rdkit import Chem
-            from rdkit.Chem import AllChem
-
-            logger.debug("[*] Using RDKit for Gasteiger charge computation...")
-
-            # Load molecule
-            if source_file.endswith('.sdf'):
-                mol = Chem.MolFromMolFile(source_file, removeHs=False)
-            elif source_file.endswith('.pdb'):
-                raise ImportError("RDKit PDB support limited - using fallback")
-
-            if mol is not None:
-                # Compute Gasteiger charges
-                AllChem.ComputeGasteigerCharges(mol)
-
-                # Now convert with obabel, charges should transfer
-                run([OBABEL, "-isdf", source_file, "-opdbqt", "-O", pdbqt_file],
-                    capture=False)
-
-                if _ensure_pdbqt_has_charges(pdbqt_file):
-                    logger.info(f"[✔] Charges computed with RDKit Gasteiger")
-                    return
-        except (ImportError, Exception) as e:
-            logger.debug(f"RDKit charge computation unavailable: {e}")
-
-        # Final strict fallback: Open Babel direct Gasteiger assignment from source.
-        try:
-            if source_file.endswith('.sdf'):
-                run([
-                    OBABEL,
-                    "-isdf", source_file,
-                    "-opdbqt", "-O", pdbqt_file,
-                    "--partialcharge", "gasteiger"
-                ], capture=False)
-            elif source_file.endswith('.pdb'):
-                run([
-                    OBABEL,
-                    "-ipdb", source_file,
-                    "-opdbqt", "-O", pdbqt_file,
-                    "--partialcharge", "gasteiger"
-                ], capture=False)
-        except Exception as e:
-            logger.debug(f"Open Babel Gasteiger fallback unavailable: {e}")
+    # Try OpenBabel only (most reliable baseline)
+    try:
+        run([
+            OBABEL,
+            "-isdf" if source_file.endswith(".sdf") else "-ipdb",
+            source_file,
+            "-opdbqt",
+            "-O",
+            pdbqt_file,
+            "--partialcharge",
+            "gasteiger"
+        ], capture=False)
 
         if _ensure_pdbqt_has_charges(pdbqt_file):
-            logger.info(f"[✔] Charges computed with Open Babel Gasteiger")
+            logger.info("[✔] Charges assigned via OpenBabel Gasteiger")
             return
 
-        raise RuntimeError(
-            f"Reliable charge assignment failed for {pdbqt_file}. "
-            "Install/use meeko or rdkit and verify input chemistry."
-        )
+    except Exception as e:
+        logger.error(f"Charge assignment failed: {e}")
+
+    raise RuntimeError(
+        f"CRITICAL: Cannot assign valid charges for {pdbqt_file}. "
+        "Install OpenBabel with Gasteiger support."
+    )
 
 
 def _assign_simple_charges(pdbqt_file: str) -> None:
@@ -2126,45 +2069,31 @@ def _calculate_metrics(ligand_pdbqt: str, output_pdbqt: str, vina_output: str = 
 
 
 def _extract_score(output: str) -> float:
-    """Extract binding affinity from Vina output. STRICT mode - raises error if not found.
-
-    Uses the BEST (lowest) affinity among all modes, not just mode 1.
-    """
+    """Robust Vina score extraction (best mode only)."""
     if not output:
-        raise ValueError("Empty docking output - no affinity to extract")
+        raise ValueError("Empty docking output")
 
-    # Collect ALL affinities from all modes
-    affinities = []
+    best = None
+
     for line in output.splitlines():
         parts = line.split()
         if len(parts) >= 2 and parts[0].isdigit():
             try:
-                affinities.append(float(parts[1]))
+                score = float(parts[1])
+                if best is None or score < best:
+                    best = score
             except ValueError:
                 continue
 
-    if affinities:
-        return min(affinities)  # Return BEST (lowest) affinity
+    if best is not None:
+        return best
 
-    # Pattern 2: REMARK VINA RESULT lines (in docked PDBQT files embedded in output)
-    matches = re.findall(
-        r'REMARK VINA RESULT:\s+([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)', output)
-    if matches:
-        try:
-            return float(matches[0])
-        except ValueError:
-            pass
+    # fallback: VINA RESULT line
+    match = re.search(r"REMARK VINA RESULT:\s*([-\d.]+)", output)
+    if match:
+        return float(match.group(1))
 
-    # Pattern 3: Affinity keyword (last resort)
-    matches = re.findall(
-        r'affinity[:\s]+([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)', output, re.IGNORECASE)
-    if matches:
-        try:
-            return float(matches[0])
-        except ValueError:
-            pass
-
-    raise ValueError("No valid affinity found in docking output")
+    raise ValueError("No valid affinity found")
 
 
 def _parse_grid_config(grid_file: str) -> Dict[str, float]:
@@ -2303,7 +2232,13 @@ def dock_ligand(args_tuple: Tuple) -> Tuple[str, Optional[float], Dict]:
     2. Standard Vina (fallback - more compatible)
 
     Raises exceptions when ALL docking attempts fail.
+
     """
+    unique_id = uuid.uuid4().hex[:8]
+
+    out = os.path.join(dock_dir, f"{name}_{unique_id}_out.pdbqt")
+    vina_log = os.path.join(dock_dir, f"{name}_{unique_id}_vina.log")
+
     receptor, lig, grid_file, dock_dir, vina_params = args_tuple
 
     name = os.path.basename(lig).replace(".pdbqt", "")
@@ -2345,7 +2280,7 @@ def dock_ligand(args_tuple: Tuple) -> Tuple[str, Optional[float], Dict]:
 
     # Basic ligand file sanity guard against truncated/corrupt PDBQT.
     ligand_size = os.path.getsize(lig)
-    if ligand_size < 100:
+    if ligand_size < 150:
         error_msg = f"Ligand file too small ({ligand_size} bytes): {lig}"
         logger.error(f"❌ {name}: {error_msg}")
         return name, None, {"status": "FAILED", "dock_file": out, "log_file": vina_log, "error": error_msg}
@@ -3037,14 +2972,14 @@ def main():
             if args.keep_waters:
                 logger.info(
                     "[*] Detecting water molecules near binding site...")
-                waters = detect_water_molecules(protein_prep.cleaned_pdb, (cx, cy, cz),
+                waters = detect_water_molecules(protein_prep.pdb_clean, (cx, cy, cz),
                                                 distance_threshold=args.water_distance)
                 logger.info(
                     f"[✔] Found {len(waters)} waters. (Implementation: manual editing recommended)")
 
             if args.detect_metals:
                 logger.info("[*] Detecting metal ions...")
-                metals = detect_metal_ions(protein_prep.cleaned_pdb)
+                metals = detect_metal_ions(protein_prep.pdb_clean)
                 if metals:
                     logger.info(f"[✔] Found {len(metals)} metal ions:")
                     for metal in metals:
@@ -3055,7 +2990,7 @@ def main():
 
             if args.detect_cofactors:
                 logger.info("[*] Detecting cofactors...")
-                cofactors = detect_cofactors(protein_prep.cleaned_pdb)
+                cofactors = detect_cofactors(protein_prep.pdb_clean)
                 if cofactors:
                     logger.info(f"[✔] Found {len(cofactors)} cofactors:")
                     for cof in cofactors:

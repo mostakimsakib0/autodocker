@@ -14,6 +14,15 @@ SCRIPT="$DIR/runner.py"
 
 mkdir -p "$OUT"
 
+if [ -n "$INPUT" ] && [ -f "$INPUT" ]; then
+    echo "[INFO] Single ligand mode detected: $INPUT"
+    LIGAND_MODE="single"
+else
+    echo "[INFO] Batch mode: scanning $LIGS"
+    LIGAND_MODE="batch"
+fi
+
+
 if [ -n "${PDB:-}" ]; then
 	: # Use PDB from the environment.
 elif [ -f "$WORK/protein.pdb" ]; then
@@ -24,6 +33,7 @@ else
 	PDB="$WORK/protein.pdb"
 fi
 
+INPUT="${1:-}"
 LIGS="$WORK/ligs"
 
 echo "======================================"
@@ -44,14 +54,23 @@ if [ ! -d "$LIGS" ]; then
 fi
 
 # Check for ligand files
-LIG_COUNT=$(find "$LIGS" -name "*.sdf" | wc -l)
-if [ "$LIG_COUNT" -eq 0 ]; then
-	echo "[!] No .sdf files found in $LIGS"
-	exit 1
+SDF_COUNT=$(find "$LIGS" -type f -name "*.sdf" | wc -l)
+PDBQT_COUNT=$(find "$LIGS" -type f -name "*.pdbqt" | wc -l)
+MOL2_COUNT=$(find "$LIGS" -type f -name "*.mol2" | wc -l)
+PDB_COUNT=$(find "$LIGS" -type f -name "*.pdb" | wc -l)
+
+TOTAL_LIGS=$((SDF_COUNT + PDBQT_COUNT + MOL2_COUNT + PDB_COUNT))
+
+if [ "$TOTAL_LIGS" -eq 0 ]; then
+    echo "[!] No ligand files (.sdf/.pdbqt) found in $LIGS"
+    exit 1
 fi
 
-echo "[*] Found $LIG_COUNT ligand(s)"
-echo "[*] Protein: $PDB"
+echo "[*] Found $TOTAL_LIGS ligands"
+echo "    - SDF: $SDF_COUNT"
+echo "    - PDBQT: $PDBQT_COUNT"
+echo "[*] Found $TOTAL_LIGS ligand(s)"
+echo "[*] Protein loaded: $(basename "$PDB")"
 
 # Run the pipeline
 CHAIN="${CHAIN:-A}"
@@ -88,7 +107,7 @@ if [ "${NO_MINIMIZE:-0}" = "1" ]; then
 	CMD+=(--no-minimize)
 fi
 
-python3 "${CMD[@]}"
+"${CMD[@]}"
 
 echo "======================================"
 echo " Pipeline Completed Successfully"
