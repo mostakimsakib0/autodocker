@@ -1417,81 +1417,98 @@ class LibraryManager:
         except IOError as e:
             logger.warning(f"Could not save ligand metadata: {e}")
 
-    def _prepare_local_sdf(self, apply_admet: bool = True) -> List[str]:
-        """Convert local SDF files to PDBQT with ADMET filtering."""
-        ligands_input = self.ligands_input_dir
+def _prepare_local_sdf(self, apply_admet: bool = True) -> List[str]:
+    """Convert local SDF files to PDBQT with ADMET filtering."""
 
-        if not os.path.exists(ligands_input):
-            raise FileNotFoundError(
-                f"Ligands directory not found: {ligands_input}\n"
-                "Place your SDF files here for conversion."
-            )
+    ligands_input = self.ligands_input_dir
 
-        if os.path.isfile(ligands_input) and ligands_input.endswith(".sdf"):
-            sdf_files = [os.path.basename(ligands_input)]
-            ligands_base_dir = os.path.dirname(ligands_input) or "."
-        else:
-            ligand_files = []
-            for f in os.listdir(ligands_input):
-                if f.lower().endswith((".sdf", ".pdbqt", ".mol2")):
-                    ligand_files.append(f)
+    if not os.path.exists(ligands_input):
+        raise FileNotFoundError(
+            f"Ligands directory not found: {ligands_input}\n"
+            "Place your SDF files here for conversion."
+        )
 
-            ligands_base_dir = ligands_input
+    # -----------------------------
+    # Collect ligand files safely
+    # -----------------------------
+    ligand_files = []
 
-        if not sdf_files:
-            raise FileNotFoundError(f"No SDF files found in {ligands_input}")
+    if os.path.isfile(ligands_input):
+        ligand_files = [ligands_input]
+        ligands_base_dir = os.path.dirname(ligands_input) or "."
+    else:
+        for f in os.listdir(ligands_input):
+            if f.lower().endswith((".sdf", ".pdbqt", ".mol2")):
+                ligand_files.append(os.path.join(ligands_input, f))
+        ligands_base_dir = None
 
-        logger.info(f"[*] Preparing {len(sdf_files)} ligands...")
+    if not ligand_files:
+        raise FileNotFoundError(f"No ligand files found in {ligands_input}")
 
-        admet = ADMETFilter()
-        out_files = []
-        failed_ligands = []
+    logger.info(f"[*] Preparing {len(ligand_files)} ligands...")
 
-        for lig in ligand_files:
-            inp = os.path.join(ligands_base_dir, lig)
-            out = os.path.join(self.lib_dir, Path(lig).stem + ".pdbqt")
-            ligand_id = Path(inp).stem
+    admet = ADMETFilter()
+    out_files = []
+    failed_ligands = []
 
-            try:
-                # Parse and validate properties
-                props = admet.parse_sdf_properties(inp)
-                if props is None:
+    # -----------------------------
+    # Processing loop
+    # -----------------------------
+    for lig_path in ligand_files:
+
+        inp = lig_path
+        lig_name = Path(inp).name
+        ligand_id = Path(inp).stem
+
+        out = os.path.join(self.lib_dir, ligand_id + ".pdbqt")
+
+        try:
+            # Parse properties (only valid for SDF)
+            props = admet.parse_sdf_properties(inp)
+
+            if props is None:
+                failed_ligands.append((lig_name, "Invalid SDF or missing properties"))
+                continue
+
+            # ADMET filtering
+            if apply_admet:
+                passes, violations = admet.check_lipinski(props)
+                if not passes:
                     failed_ligands.append(
-                        (sdf, "Invalid SDF file or missing molecular properties"))
+                        (lig_name, f"ADMET violations: {', '.join(violations)}")
+                    )
                     continue
 
-                # Check ADMET compliance
-                if apply_admet:
-                    passes, violations = admet.check_lipinski(props)
-                    if not passes:
-                        failed_ligands.append(
-                            (sdf, f"ADMET violations: {', '.join(violations)}"))
-                        continue
+            # Convert to PDBQT
+            self._prepare_sdf_to_pdbqt(inp, out, ligand_id)
 
-                # Prepare PDBQT
-                self._prepare_sdf_to_pdbqt(inp, out, ligand_id)
-                out_files.append(out)
-                logger.info(f"  [✓] {sdf} → prepared")
+            out_files.append(out)
+            logger.info(f"  [✓] {lig_name} → prepared")
 
-            except Exception as e:
-                failed_ligands.append((sdf, str(e)))
-                logger.error(f"  [✗] {sdf}: {e}")
+        except Exception as e:
+            failed_ligands.append((lig_name, str(e)))
+            logger.error(f"  [✗] {lig_name}: {e}")
 
-        # Report results
-        self._save_metadata()
-        logger.info(
-            f"[✔] {len(out_files)}/{len(sdf_files)} ligands prepared successfully")
+    # -----------------------------
+    # Reporting
+    # -----------------------------
+    self._save_metadata()
 
-        if failed_ligands:
-            logger.warning(f"[!] {len(failed_ligands)} ligands skipped:")
-            for failed_sdf, reason in failed_ligands:
-                logger.warning(f"    - {failed_sdf}: {reason}")
+    logger.info(
+        f"[✔] {len(out_files)}/{len(ligand_files)} ligands prepared successfully"
+    )
 
-        if not out_files:
-            raise RuntimeError(
-                f"No valid ligands to prepare. All {len(sdf_files)} ligands failed.")
+    if failed_ligands:
+        logger.warning(f"[!] {len(failed_ligands)} ligands skipped:")
+        for name, reason in failed_ligands:
+            logger.warning(f"    - {name}: {reason}")
 
-        return out_files
+    if not out_files:
+        raise RuntimeError(
+            f"No valid ligands to prepare. All {len(ligand_files)} ligands failed."
+        )
+
+    return out_files
 
 # =============================
 # UTILITIES
