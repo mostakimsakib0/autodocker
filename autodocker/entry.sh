@@ -12,9 +12,15 @@ WORK="/workspace"
 OUT="$WORK/output"
 SCRIPT="$DIR/runner.py"
 
+LIGS="${LIGS:-/workspace/ligs}"
+PDB="${PDB:-}"
+
+
 mkdir -p "$OUT"
 
-if [ -n "$INPUT" ] && [ -f "$INPUT" ]; then
+INPUT="${INPUT:-}"
+
+if [ -n "${INPUT}" ] && [ -f "${INPUT}" ]; then
     echo "[INFO] Single ligand mode detected: $INPUT"
     LIGAND_MODE="single"
 else
@@ -32,9 +38,6 @@ elif [ -f "$WORK/protein_clean.pdb" ]; then
 else
 	PDB="$WORK/protein.pdb"
 fi
-
-INPUT="${1:-}"
-LIGS="$WORK/ligs"
 
 echo "======================================"
 echo " PenDrive Virtual Screening Engine"
