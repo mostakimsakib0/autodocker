@@ -1431,8 +1431,11 @@ class LibraryManager:
             sdf_files = [os.path.basename(ligands_input)]
             ligands_base_dir = os.path.dirname(ligands_input) or "."
         else:
-            sdf_files = [f for f in os.listdir(
-                ligands_input) if f.endswith(".sdf")]
+            ligand_files = []
+            for f in os.listdir(ligands_input):
+                if f.lower().endswith((".sdf", ".pdbqt", ".mol2")):
+                    ligand_files.append(f)
+
             ligands_base_dir = ligands_input
 
         if not sdf_files:
@@ -1444,9 +1447,9 @@ class LibraryManager:
         out_files = []
         failed_ligands = []
 
-        for sdf in sdf_files:
-            inp = os.path.join(ligands_base_dir, sdf)
-            out = os.path.join(self.lib_dir, sdf.replace(".sdf", ".pdbqt"))
+        for lig in ligand_files:
+            inp = os.path.join(ligands_base_dir, lig)
+            out = os.path.join(self.lib_dir, Path(lig).stem + ".pdbqt")
             ligand_id = Path(inp).stem
 
             try:
