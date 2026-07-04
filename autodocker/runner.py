@@ -1417,117 +1417,117 @@ class LibraryManager:
         except IOError as e:
             logger.warning(f"Could not save ligand metadata: {e}")
 
-  def _prepare_local_sdf(self, apply_admet: bool = True) -> List[str]:
-      """Convert local SDF/PDBQT files to ready docking inputs with smart auto-detection."""
-  
-      ligands_input = self.ligands_input_dir
-  
-      if not os.path.exists(ligands_input):
-          raise FileNotFoundError(
-              f"Ligands directory not found: {ligands_input}"
-          )
-  
-      # -----------------------------
-      # STEP 1: COLLECT FILES
-      # -----------------------------
-      sdf_files = []
-      pdbqt_files = []
-  
-      if os.path.isfile(ligands_input):
-          if ligands_input.lower().endswith(".sdf"):
-              sdf_files = [ligands_input]
-          elif ligands_input.lower().endswith(".pdbqt"):
-              pdbqt_files = [ligands_input]
-      else:
-          for f in os.listdir(ligands_input):
-              path = os.path.join(ligands_input, f)
-  
-              if f.lower().endswith(".sdf"):
-                  sdf_files.append(path)
-              elif f.lower().endswith(".pdbqt"):
-                  pdbqt_files.append(path)
-  
-      # -----------------------------
-      # STEP 2: DECIDE MODE
-      # -----------------------------
-      if sdf_files:
-          mode = "sdf"
-          ligands = sdf_files
-          logger.info(f"[*] SDF mode detected: {len(sdf_files)} ligands")
-  
-      elif pdbqt_files:
-          mode = "pdbqt"
-          ligands = pdbqt_files
-          logger.info(f"[*] PDBQT mode detected: {len(pdbqt_files)} ligands")
-  
-      else:
-          raise FileNotFoundError("No ligands found (.sdf or .pdbqt)")
-  
-      # -----------------------------
-      # STEP 3: PROCESS
-      # -----------------------------
-      admet = ADMETFilter()
-      out_files = []
-      failed_ligands = []
-  
-      logger.info(f"[*] Preparing {len(ligands)} ligands...")
-  
-      for lig in ligands:
-  
-          try:
-              # -------------------------
-              # CASE A: SDF pipeline
-              # -------------------------
-              if mode == "sdf":
-                  inp = lig
-                  name = Path(lig).stem
-                  out = os.path.join(self.lib_dir, f"{name}.pdbqt")
-  
-                  props = admet.parse_sdf_properties(inp)
-                  if props is None:
-                      failed_ligands.append((lig, "Invalid SDF properties"))
-                      continue
-  
-                  if apply_admet:
-                      ok, violations = admet.check_lipinski(props)
-                      if not ok:
-                          failed_ligands.append((lig, f"ADMET: {violations}"))
-                          continue
-  
-                  self._prepare_sdf_to_pdbqt(inp, out, name)
-                  out_files.append(out)
-  
-                  logger.info(f"  [✓] {name} (SDF) → PDBQT")
-  
-              # -------------------------
-              # CASE B: PDBQT direct
-              # -------------------------
-              else:
-                  out_files.append(lig)
-                  logger.info(f"  [✓] {Path(lig).stem} (PDBQT direct)")
-  
-          except Exception as e:
-              failed_ligands.append((lig, str(e)))
-              logger.error(f"  [✗] {lig}: {e}")
-  
-      # -----------------------------
-      # STEP 4: FINAL REPORT
-      # -----------------------------
-      self._save_metadata()
-  
-      logger.info(
-          f"[✔] Success: {len(out_files)}/{len(ligands)} ligands ready"
-      )
-  
-      if failed_ligands:
-          logger.warning(f"[!] Skipped {len(failed_ligands)} ligands:")
-          for lig, reason in failed_ligands:
-              logger.warning(f"   - {Path(lig).name}: {reason}")
-  
-      if not out_files:
-          raise RuntimeError("No valid ligands prepared")
-  
-      return out_files
+    def _prepare_local_sdf(self, apply_admet: bool = True) -> List[str]:
+        """Convert local SDF/PDBQT files to ready docking inputs with smart auto-detection."""
+    
+        ligands_input = self.ligands_input_dir
+    
+        if not os.path.exists(ligands_input):
+            raise FileNotFoundError(
+                f"Ligands directory not found: {ligands_input}"
+            )
+    
+        # -----------------------------
+        # STEP 1: COLLECT FILES
+        # -----------------------------
+        sdf_files = []
+        pdbqt_files = []
+    
+        if os.path.isfile(ligands_input):
+            if ligands_input.lower().endswith(".sdf"):
+                sdf_files = [ligands_input]
+            elif ligands_input.lower().endswith(".pdbqt"):
+                pdbqt_files = [ligands_input]
+        else:
+            for f in os.listdir(ligands_input):
+                path = os.path.join(ligands_input, f)
+    
+                if f.lower().endswith(".sdf"):
+                    sdf_files.append(path)
+                elif f.lower().endswith(".pdbqt"):
+                    pdbqt_files.append(path)
+    
+        # -----------------------------
+        # STEP 2: DECIDE MODE
+        # -----------------------------
+        if sdf_files:
+            mode = "sdf"
+            ligands = sdf_files
+            logger.info(f"[*] SDF mode detected: {len(sdf_files)} ligands")
+    
+        elif pdbqt_files:
+            mode = "pdbqt"
+            ligands = pdbqt_files
+            logger.info(f"[*] PDBQT mode detected: {len(pdbqt_files)} ligands")
+    
+        else:
+            raise FileNotFoundError("No ligands found (.sdf or .pdbqt)")
+    
+        # -----------------------------
+        # STEP 3: PROCESS
+        # -----------------------------
+        admet = ADMETFilter()
+        out_files = []
+        failed_ligands = []
+    
+        logger.info(f"[*] Preparing {len(ligands)} ligands...")
+    
+        for lig in ligands:
+    
+            try:
+                # -------------------------
+                # CASE A: SDF pipeline
+                # -------------------------
+                if mode == "sdf":
+                    inp = lig
+                    name = Path(lig).stem
+                    out = os.path.join(self.lib_dir, f"{name}.pdbqt")
+    
+                    props = admet.parse_sdf_properties(inp)
+                    if props is None:
+                        failed_ligands.append((lig, "Invalid SDF properties"))
+                        continue
+    
+                    if apply_admet:
+                        ok, violations = admet.check_lipinski(props)
+                        if not ok:
+                            failed_ligands.append((lig, f"ADMET: {violations}"))
+                            continue
+    
+                    self._prepare_sdf_to_pdbqt(inp, out, name)
+                    out_files.append(out)
+    
+                    logger.info(f"  [✓] {name} (SDF) → PDBQT")
+    
+                # -------------------------
+                # CASE B: PDBQT direct
+                # -------------------------
+                else:
+                    out_files.append(lig)
+                    logger.info(f"  [✓] {Path(lig).stem} (PDBQT direct)")
+    
+            except Exception as e:
+                failed_ligands.append((lig, str(e)))
+                logger.error(f"  [✗] {lig}: {e}")
+    
+        # -----------------------------
+        # STEP 4: FINAL REPORT
+        # -----------------------------
+        self._save_metadata()
+    
+        logger.info(
+            f"[✔] Success: {len(out_files)}/{len(ligands)} ligands ready"
+        )
+    
+        if failed_ligands:
+            logger.warning(f"[!] Skipped {len(failed_ligands)} ligands:")
+            for lig, reason in failed_ligands:
+                logger.warning(f"   - {Path(lig).name}: {reason}")
+    
+        if not out_files:
+            raise RuntimeError("No valid ligands prepared")
+    
+        return out_files
 
 # =============================
 # UTILITIES
