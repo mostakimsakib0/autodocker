@@ -686,10 +686,20 @@ def _ensure_pdbqt_has_charges(pdbqt_file: str) -> bool:
             for line in f:
                 if line.startswith(("ATOM", "HETATM")):
                     parts = line.split()
-                    # PDBQT charge is usually last column
-                    if len(parts) >= 9:
+                    # PDBQT charge placement varies by OpenBabel/Vina build.
+                    # Prefer the trailing atom-type/charge fields, then fall back to
+                    # scanning the line tail for the first numeric token.
+                    if len(parts) >= 2:
+                        for token in reversed(parts[-3:]):
+                            try:
+                                float(token)
+                                return True
+                            except ValueError:
+                                continue
+                    tail = line[54:].strip().split()
+                    for token in reversed(tail):
                         try:
-                            float(parts[-1])
+                            float(token)
                             return True
                         except ValueError:
                             continue
@@ -1778,8 +1788,12 @@ class ProteinPreparation:
 
         try:
             # Use basic obabel conversion; QuickVina-compatible PDBQT format
-            run([OBABEL, "-ipdb", self.pdb_clean, "-opdbqt", "-O", self.receptor_pdbqt,
-                 "-xr", "-c"])
+            run([
+                OBABEL,
+                "-ipdb", self.pdb_clean,
+                "-opdbqt", "-O", self.receptor_pdbqt,
+                "-xr", "-c", "--partialcharge", "gasteiger",
+            ])
 
             # Receptor PDBQT must not contain ligand torsion tags (ROOT/BRANCH/TORSDOF).
             _sanitize_receptor_pdbqt(self.receptor_pdbqt)
