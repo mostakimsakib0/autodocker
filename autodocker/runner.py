@@ -1463,6 +1463,14 @@ class LibraryManager:
         # -----------------------------
         # STEP 2: DECIDE MODE
         # -----------------------------
+        # Diagnostic: log what we found to help debug empty-result cases
+        try:
+            logger.info(f"[DEBUG] Local ligands found - SDF: {len(sdf_files)}, PDBQT: {len(pdbqt_files)}, MOL2: {len(mol2_files)}, PDB: {len(pdb_files)}")
+            sample = (sdf_files or pdbqt_files or mol2_files or pdb_files)[:5]
+            if sample:
+                logger.info(f"[DEBUG] Sample files: {', '.join([os.path.basename(s) for s in sample])}")
+        except Exception:
+            pass
         if sdf_files:
             mode = "sdf"
             ligands = sdf_files
