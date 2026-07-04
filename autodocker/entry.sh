@@ -23,6 +23,7 @@ INPUT="${INPUT:-}"
 if [ -n "${INPUT}" ] && [ -f "${INPUT}" ]; then
     echo "[INFO] Single ligand mode detected: $INPUT"
     LIGAND_MODE="single"
+	LIGS="$INPUT"
 else
     echo "[INFO] Batch mode: scanning $LIGS"
     LIGAND_MODE="batch"
@@ -50,19 +51,38 @@ if [ ! -f "$PDB" ]; then
 	exit 1
 fi
 
-if [ ! -d "$LIGS" ]; then
-	echo "[!] Ligands directory not found: $LIGS"
-	echo "[!] Please create workspace/ligs/ and add .sdf files"
-	exit 1
+if [ "$LIGAND_MODE" = "single" ]; then
+	if [ ! -f "$LIGS" ]; then
+		echo "[!] Ligand file not found: $LIGS"
+		exit 1
+	fi
+
+	case "${LIGS##*.}" in
+		sdf) SDF_COUNT=1; PDBQT_COUNT=0; MOL2_COUNT=0; PDB_COUNT=0 ;;
+		pdbqt) SDF_COUNT=0; PDBQT_COUNT=1; MOL2_COUNT=0; PDB_COUNT=0 ;;
+		mol2) SDF_COUNT=0; PDBQT_COUNT=0; MOL2_COUNT=1; PDB_COUNT=0 ;;
+		pdb) SDF_COUNT=0; PDBQT_COUNT=0; MOL2_COUNT=0; PDB_COUNT=1 ;;
+		*)
+			echo "[!] Unsupported ligand file type: $LIGS"
+			exit 1
+			;;
+	esac
+	TOTAL_LIGS=1
+else
+	if [ ! -d "$LIGS" ]; then
+		echo "[!] Ligands directory not found: $LIGS"
+		echo "[!] Please create workspace/ligs/ and add .sdf files"
+		exit 1
+	fi
+
+	# Check for ligand files
+	SDF_COUNT=$(find "$LIGS" -type f -name "*.sdf" | wc -l)
+	PDBQT_COUNT=$(find "$LIGS" -type f -name "*.pdbqt" | wc -l)
+	MOL2_COUNT=$(find "$LIGS" -type f -name "*.mol2" | wc -l)
+	PDB_COUNT=$(find "$LIGS" -type f -name "*.pdb" | wc -l)
+
+	TOTAL_LIGS=$((SDF_COUNT + PDBQT_COUNT + MOL2_COUNT + PDB_COUNT))
 fi
-
-# Check for ligand files
-SDF_COUNT=$(find "$LIGS" -type f -name "*.sdf" | wc -l)
-PDBQT_COUNT=$(find "$LIGS" -type f -name "*.pdbqt" | wc -l)
-MOL2_COUNT=$(find "$LIGS" -type f -name "*.mol2" | wc -l)
-PDB_COUNT=$(find "$LIGS" -type f -name "*.pdb" | wc -l)
-
-TOTAL_LIGS=$((SDF_COUNT + PDBQT_COUNT + MOL2_COUNT + PDB_COUNT))
 
 if [ "$TOTAL_LIGS" -eq 0 ]; then
 	echo "[!] No ligand files (.sdf/.pdbqt/.mol2/.pdb) found in $LIGS"

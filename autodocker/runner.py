@@ -1448,17 +1448,18 @@ class LibraryManager:
             elif lname.endswith(".pdb"):
                 pdb_files = [ligands_input]
         else:
-            for f in os.listdir(ligands_input):
-                path = os.path.join(ligands_input, f)
+            for root, _, files in os.walk(ligands_input):
+                for f in files:
+                    path = os.path.join(root, f)
 
-                if f.lower().endswith(".sdf"):
-                    sdf_files.append(path)
-                elif f.lower().endswith(".pdbqt"):
-                    pdbqt_files.append(path)
-                elif f.lower().endswith(".mol2"):
-                    mol2_files.append(path)
-                elif f.lower().endswith(".pdb"):
-                    pdb_files.append(path)
+                    if f.lower().endswith(".sdf"):
+                        sdf_files.append(path)
+                    elif f.lower().endswith(".pdbqt"):
+                        pdbqt_files.append(path)
+                    elif f.lower().endswith(".mol2"):
+                        mol2_files.append(path)
+                    elif f.lower().endswith(".pdb"):
+                        pdb_files.append(path)
     
         # -----------------------------
         # STEP 2: DECIDE MODE
