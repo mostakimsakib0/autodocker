@@ -65,13 +65,15 @@ PDB_COUNT=$(find "$LIGS" -type f -name "*.pdb" | wc -l)
 TOTAL_LIGS=$((SDF_COUNT + PDBQT_COUNT + MOL2_COUNT + PDB_COUNT))
 
 if [ "$TOTAL_LIGS" -eq 0 ]; then
-    echo "[!] No ligand files (.sdf/.pdbqt) found in $LIGS"
+	echo "[!] No ligand files (.sdf/.pdbqt/.mol2/.pdb) found in $LIGS"
     exit 1
 fi
 
 echo "[*] Found $TOTAL_LIGS ligands"
 echo "    - SDF: $SDF_COUNT"
 echo "    - PDBQT: $PDBQT_COUNT"
+echo "    - MOL2: $MOL2_COUNT"
+echo "    - PDB: $PDB_COUNT"
 echo "[*] Found $TOTAL_LIGS ligand(s)"
 echo "[*] Protein loaded: $(basename "$PDB")"
 

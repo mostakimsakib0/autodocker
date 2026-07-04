@@ -53,6 +53,7 @@ import shlex
 import time
 import math
 import statistics
+import fnmatch
 from multiprocessing import Pool, cpu_count as mp_cpu_count
 from pathlib import Path
 from datetime import datetime
@@ -133,7 +134,8 @@ def cluster_poses(poses_dir: str, rmsd_threshold: float = 2.0) -> Dict[str, List
     # Group poses by ligand
     ligand_poses = defaultdict(list)
     for file in os.listdir(poses_dir):
-        if file.endswith('_pose_*.pdbqt'):
+        # match pose files like: <ligand>_pose_1_aff_-7.123.pdbqt or <ligand>_pose_1.pdbqt
+        if fnmatch.fnmatch(file, '*_pose_*.pdbqt'):
             ligand = file.split('_pose_')[0]
             ligand_poses[ligand].append(file)
 
@@ -1432,20 +1434,31 @@ class LibraryManager:
         # -----------------------------
         sdf_files = []
         pdbqt_files = []
-    
+        mol2_files = []
+        pdb_files = []
+
         if os.path.isfile(ligands_input):
-            if ligands_input.lower().endswith(".sdf"):
+            lname = ligands_input.lower()
+            if lname.endswith(".sdf"):
                 sdf_files = [ligands_input]
-            elif ligands_input.lower().endswith(".pdbqt"):
+            elif lname.endswith(".pdbqt"):
                 pdbqt_files = [ligands_input]
+            elif lname.endswith(".mol2"):
+                mol2_files = [ligands_input]
+            elif lname.endswith(".pdb"):
+                pdb_files = [ligands_input]
         else:
             for f in os.listdir(ligands_input):
                 path = os.path.join(ligands_input, f)
-    
+
                 if f.lower().endswith(".sdf"):
                     sdf_files.append(path)
                 elif f.lower().endswith(".pdbqt"):
                     pdbqt_files.append(path)
+                elif f.lower().endswith(".mol2"):
+                    mol2_files.append(path)
+                elif f.lower().endswith(".pdb"):
+                    pdb_files.append(path)
     
         # -----------------------------
         # STEP 2: DECIDE MODE
@@ -1454,14 +1467,24 @@ class LibraryManager:
             mode = "sdf"
             ligands = sdf_files
             logger.info(f"[*] SDF mode detected: {len(sdf_files)} ligands")
-    
+
         elif pdbqt_files:
             mode = "pdbqt"
             ligands = pdbqt_files
             logger.info(f"[*] PDBQT mode detected: {len(pdbqt_files)} ligands")
-    
+
+        elif mol2_files:
+            mode = "mol2"
+            ligands = mol2_files
+            logger.info(f"[*] MOL2 mode detected: {len(mol2_files)} ligands")
+
+        elif pdb_files:
+            mode = "pdb"
+            ligands = pdb_files
+            logger.info(f"[*] PDB mode detected: {len(pdb_files)} ligands")
+
         else:
-            raise FileNotFoundError("No ligands found (.sdf or .pdbqt)")
+            raise FileNotFoundError("No ligands found (.sdf/.pdbqt/.mol2/.pdb)")
     
         # -----------------------------
         # STEP 3: PROCESS
@@ -1502,9 +1525,47 @@ class LibraryManager:
                 # -------------------------
                 # CASE B: PDBQT direct
                 # -------------------------
-                else:
+                elif mode == "pdbqt":
                     out_files.append(lig)
                     logger.info(f"  [✓] {Path(lig).stem} (PDBQT direct)")
+
+                # -------------------------
+                # CASE C: MOL2 -> convert to PDBQT
+                # -------------------------
+                elif mode == "mol2":
+                    inp = lig
+                    name = Path(lig).stem
+                    out = os.path.join(self.lib_dir, f"{name}.pdbqt")
+                    try:
+                        run([OBABEL, "-imol2", inp, "-opdbqt", "-O", out])
+                        if not os.path.exists(out) or os.path.getsize(out) == 0:
+                            raise RuntimeError("Conversion produced empty file")
+                        if not _ensure_pdbqt_has_charges(out):
+                            _fix_pdbqt_charges(out, inp)
+                        out_files.append(out)
+                        logger.info(f"  [✓] {name} (MOL2 -> PDBQT)")
+                    except Exception as e:
+                        failed_ligands.append((lig, f"Conversion failed: {e}"))
+                        logger.error(f"  [✗] {lig}: {e}")
+
+                # -------------------------
+                # CASE D: PDB -> convert to PDBQT
+                # -------------------------
+                elif mode == "pdb":
+                    inp = lig
+                    name = Path(lig).stem
+                    out = os.path.join(self.lib_dir, f"{name}.pdbqt")
+                    try:
+                        run([OBABEL, "-ipdb", inp, "-opdbqt", "-O", out])
+                        if not os.path.exists(out) or os.path.getsize(out) == 0:
+                            raise RuntimeError("Conversion produced empty file")
+                        if not _ensure_pdbqt_has_charges(out):
+                            _fix_pdbqt_charges(out, inp)
+                        out_files.append(out)
+                        logger.info(f"  [✓] {name} (PDB -> PDBQT)")
+                    except Exception as e:
+                        failed_ligands.append((lig, f"Conversion failed: {e}"))
+                        logger.error(f"  [✗] {lig}: {e}")
     
             except Exception as e:
                 failed_ligands.append((lig, str(e)))
@@ -2274,10 +2335,6 @@ def dock_ligand(args_tuple: Tuple) -> Tuple[str, Optional[float], Dict]:
 
     """
     unique_id = uuid.uuid4().hex[:8]
-
-    out = os.path.join(dock_dir, f"{name}_{unique_id}_out.pdbqt")
-    vina_log = os.path.join(dock_dir, f"{name}_{unique_id}_vina.log")
-
     receptor, lig, grid_file, dock_dir, vina_params = args_tuple
 
     name = os.path.basename(lig).replace(".pdbqt", "")
