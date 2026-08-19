@@ -106,11 +106,11 @@ COPY --from=fpocket_builder \
 
 # Run as a non-root user for safety
 RUN useradd --create-home --uid 1000 dockuser
-RUN mkdir -p /work && chown -R dockuser:dockuser /work /autodocker
+RUN mkdir -p /workspace && chown -R dockuser:dockuser /workspace /autodocker
 
 USER dockuser
-WORKDIR /work
-VOLUME ["/work"]
+WORKDIR /workspace
+VOLUME ["/workspace"]
 
 # Smallest practical default
 ENTRYPOINT ["/autodocker/entry.sh"]
