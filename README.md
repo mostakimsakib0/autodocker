@@ -110,7 +110,8 @@ Direct use (inside the image or with tools on `PATH`):
 ## Reproducibility
 
 Docking is seeded (`--seed 42`); the same input + seed produces identical
-rankings (verified by the golden determinism test in `tests/test_e2e.py`).
+rankings (verified by the golden determinism test in `tests/test_e2e.py`
+and the standalone `scripts/reproducibility_check.sh` checker).
 
 ## Validation
 
@@ -118,6 +119,13 @@ Scientific results are in `BENCHMARKS.md`: a CASF-2016 re-docking benchmark
 (76.9% top-1 pose success ≤2 Å), a DUD-E enrichment test (AUC 0.59–0.85
 across akt1/braf/aldr), and a raw-Vina parity check (222/222 modes score
 identically). All three are reproducible from `scripts/benchmark_*.py`.
+
+## More docs
+
+- [`docs/installation.md`](docs/installation.md) — Docker and native setup, troubleshooting
+- [`docs/reproducibility.md`](docs/reproducibility.md) — determinism guarantees and how to verify
+- [`docs/user_testing.md`](docs/user_testing.md) — fresh-machine testing template and bug report form
+- [`BENCHMARKS.md`](BENCHMARKS.md) — validation, performance, and enrichment results
 
 ## Development
 

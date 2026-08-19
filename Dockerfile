@@ -78,7 +78,7 @@ RUN strip fpocket/repo/bin/*
 # ============================================================
 # Stage 2 — Minimal runtime image
 # ============================================================
-FROM docker.io/python:3-slim-bookworm
+FROM docker.io/python:3.12-slim-bookworm
 
 COPY requirements.txt /requirements.txt
 

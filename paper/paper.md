@@ -30,85 +30,135 @@ selection and fpocket pocket detection (Le Guilloux et al., 2009,
 SDF/MOL2/PDB/PDBQT files or PubChem-downloaded libraries (Kim et al., 2023,
 @kim2023pubchem), multi-engine docking (Vina with an optional QuickVina 2
 fallback (Alhossary et al., 2015, @alhossary2015qvina2) and SMINA consensus
-scoring (Koes et al., 2013, @koes2013smina)), and output generation ranging
-from plain-text rankings to a self-contained HTML report with an embedded
-NGL (Rose et al., 2018, @rose2018ngl) 3D viewer. Every step is seeded and
+scoring (Koes et al., 2013, @koes2013smina)), and output ranging from
+plain-text rankings to a self-contained HTML report with an embedded NGL
+(Rose et al., 2018, @rose2018ngl) 3D viewer. Every step is seeded and
 checkpointed, so a given input and seed yields identical results on every
-run and interrupted screenings resume in place.
+run, and interrupted screenings resume in place.
 
 # Statement of need
 
-Modern virtual-screening pipelines are frequently assembled from a loose
-collection of scripts, tied to GUI tools, or hidden inside opaque web
-services, which makes reproducibility — a core requirement for early-stage
-drug discovery — difficult to achieve and verify. Fragmented pipelines also
-make it hard to produce auditable, comparable results: reviewers and
-collaborators cannot easily reconstruct exactly how a ranked hit list was
-produced, which receptor was prepared, which pocket was chosen, or which
-docking parameters were used. Existing automation efforts tend to be
-GUI-bound (e.g., Raccoon2, MzDOCK) or assume particular library sources and
-missing quality controls such as charge validation, pocket-based grid
-placement, or checkpointing.
+Virtual screening is a core step in early-stage drug discovery and
+repurposing, but running it *reproducibly* is still unnecessarily hard.
+Typical practice assembles a loose chain of heterogeneous
+components — a GUI for receptor preparation, a separate tool for pocket
+detection, a docking binary invoked by hand, ad-hoc scripts to convert
+formats, and more scripts to rank the outputs. Each junction is a place
+where parameters (pocket choice, grid box, exhaustiveness, seeds, charge
+handling) can be altered, lost, or applied inconsistently, so two otherwise
+identical efforts routinely produce different hit lists. The literature
+often reports docking scores without the parameters and inputs that
+produced them, which makes results difficult to audit or compare across
+groups.
 
-AutoDocker addresses these gaps with a fully local, scriptable,
-containerized pipeline that is explicit about every decision it makes. The
-container image builds all scientific dependencies (Vina, QuickVina 2,
-Open Babel (O'Boyle et al., 2011, @oboyle2011openbabel), fpocket) from
-source as pinned submodules, removing environment drift. The pipeline
-strictly validates receptor and ligand PDBQT files (nonzero charges, atom
-records, plateau-size guards), refuses to silently produce garbage, and
-ships open-source scientific benchmarks (PDBbind/CASF-2016 re-docking,
-DUD-E enrichment, raw-Vina parity) so that changes are continuously checked
-against known-good reference results. AutoDocker is designed to be driven
-from a single command or a set of environment variables, which makes it
-suitable both for interactive use and for large scripted or parallel
-screening campaigns.
+The tools that automate screening workflows address this only partially.
+GUI wrappers around Vina (e.g., PyRx (Dallakyan & Olson, 2015,
+@dallakyan2015pyrx), Raccoon2, MzDOCK) make interactive preparation easier
+but are not designed for scripted, repeatable, high-throughput runs and
+typically capture little of the decision trail. Complementary engines such
+as smina and the QuickVina2 fork (Alhossary et al., 2015, @alhossary2015qvina2)
+speed up scoring but leave the surrounding workflow — library curating,
+preparation, validation, reporting, resumption — to the user. Script-based
+suites such as jamdock-suite (Manso, 2025, @manso2025jamdock) provide a
+missing workflow layer but do not include the quality controls, statistics,
+or bundled validation that make results citable.
 
-# Usage
+AutoDocker is designed for the gap between a bare docking binary and a GUI:
+a fully scriptable, containerized pipeline that makes every preparation and
+scoring decision explicit, validates that inputs are chemically usable
+before docking (nonzero charges, atom records, size guards), fails loudly
+instead of silently producing noise, and ships scientific benchmarks so
+that any future change is continuously checked against known-good reference
+results. It is targeted at researchers who need auditable, reproducible
+screening results at scale — without a GUI, without a proprietary platform,
+and with the option to reproduce every result bit-for-bit.
 
-The quickest path is the container image:
+# State of the field
 
-```bash
-git clone --recurse-submodules https://github.com/mostakimsakib0/autodocker.git
-cd autodocker
-docker build -t autodocker .
-mkdir -p works/ligs
-cp protein.pdb works/protein.pdb
-cp ligands/*.sdf works/ligs/
-docker run --rm -v "$PWD/works:/workspace" autodocker
-```
+The table below compares AutoDocker with the Vina CLI and representative
+existing workflows: PyRx (a widely used GUI wrapper (Dallakyan & Olson,
+2015, @dallakyan2015pyrx)), Raccoon2/MzDOCK (GUI automation), the
+jamdock-suite script suite (Manso, 2025, @manso2025jamdock), and smina (an
+alternative scoring engine (Koes et al., 2013, @koes2013smina)). Rows are
+capabilities that affect reproducibility or screening quality.
 
-Run parameters are exposed both on the CLI (e.g., `--chains`, `--pockets`,
-`--exhaustiveness`, `--seed`, `--consensus`, `--html-report`) and via
-matching environment variables (`CHAIN`, `POCKETS`, `EXHAUSTIVENESS`,
-`VS_SEED`, and so on). Results are written to an `output/` directory:
-`ranking.csv` with per-ligand binding affinities and descriptors,
-`Top_hits.txt`, `pocket_summary.csv`, Docker log files, and (optionally) an
-interactive HTML report with the receptor, poses, and affinity statistics.
+| Capability | AutoDocker | Vina CLI | PyRx | Raccoon2 / MzDOCK | jamdock-suite | smina |
+|---|---|---|---|---|---|---|
+| Fully scriptable / headless | ✔ | ✔ (binary only) | ✖ (GUI) | ✖ (GUI) | ✔ | ✔ |
+| Pocket detection → grid box (fpocket) | ✔ auto (+centroid fallback) | ✖ manual | ✖ manual box | ✔ | ✔ | ✖ |
+| Library source: local files + PubChem/FDA download | ✔ | ✖ | local only | local only | ZINC | ✖ |
+| ADMET (Lipinski) filter on library | ✔ | ✖ | ✖ | ✖ | ✖ | ✖ |
+| Ligand minimization (MMFF94) | ✔ | ✖ | ✖ | ✖ | ✖ | ✖ |
+| Input validation (nonzero charges, atom records, fail-loud) | ✔ | ✖ | partial | partial | ✖ | ✖ |
+| Flexible-receptor docking | ✔ (manual + auto residues) | ✔ (manual) | ✖ | ✖ | ✖ | ✖ |
+| Consensus scoring (Vina + SMINA) | ✔ optional | ✖ | ✖ | ✖ | ✖ | ✖ (engine only) |
+| Checkpoint / resume | ✔ | ✖ | ✖ | ✖ | ✔ (jamresume) | ✖ |
+| Seeded determinism + versioned container | ✔ | ✖ | ✖ | ✖ | ✖ | ✖ |
+| Interactive HTML report with 3D viewer | ✔ optional | ✖ | ✖ | ✖ | ✖ | ✖ |
+| Bundled open benchmarks (re-docking, enrichment, parity) | ✔ | ✖ | ✖ | ✖ | ✖ | ✖ |
 
-For reproducibility the pipeline uses a fixed default seed (`--seed 42`),
-records every docking command in per-ligand log files, and supports
-checkpointed resume, so the exact inputs passed to Vina are always
-recoverable. Installing the pipeline natively (instead of via Docker)
-requires only Python 3.9+, numpy, requests, and the `vina` and `obabel`
-binaries on `PATH`; the test suite (`python -m pytest tests/`) verifies the
-pipeline with a real end-to-end docking run.
+AutoDocker's differentiating value is not a new scoring function — it is a
+*complete, auditable workflow* on top of Vina: automatic pocket-based grid
+placement, chemical validity guards before docking, optional pharmacophore
+meta-features (ADMET, minimization, flexible residues, consensus scoring),
+single-argument scriptability for HPC, and bundled validation so that
+claims are checkable.
+
+# Software design
+
+AutoDocker is two thin layers over well-known scientific binaries. A small
+bash entry point (`entry.sh`) maps environment variables to command-line
+arguments (both workflows are scored: `INPUT`/`LIGS`/`PDB` and
+`-r`/`-l`/`-o`), then a single Python module (`runner.py`) orchestrates the
+pipeline in five phases:
+
+1. **Library preparation** — local SDF/MOL2/PDB/PDBQT input or PubChem
+   download (FDA-approved and custom libraries), optional Lipinski ADMET
+   filtering (Lipinski et al., 2001, @lipinski2001rule), optional MMFF94
+   minimization (Halgren, 1996, @halgren1996mmff94), conversion to PDBQT
+   with Open Babel (O'Boyle et al., 2011, @oboyle2011openbabel).
+2. **Protein preparation** — validate/reject undersized inputs, select
+   chains, prepare the receptor PDBQT, detect pockets with fpocket
+   (Le Guilloux et al., 2009, @leguilloux2009fpocket; Schmidtke et al.,
+   2010, @schmidtke2010fpocket) or fall back to a centroid grid.
+3. **Input validation** — before any docking, the receptor and each ligand
+   must pass structural guards (atom records present, nonzero partial
+   charges, minimum size). Truncated or charge-less inputs are rejected
+   instead of being docked silently.
+4. **Docking** — Vina (primary) with optional QuickVina 2 fallback, seeded
+   for reproducibility, parallelized over ligands with
+   `multiprocessing`; optional flexible residues and consensus scoring via
+   SMINA.
+5. **Result analysis** — ranked CSV, top-hit and metrics text files, pocket
+   summary, checkpoint file for resume, and an optional self-contained HTML
+   report with affinity statistics, pose clustering, and an embedded NGL
+   viewer.
+
+The Docker image is multi-stage: all scientific binaries (Vina, QuickVina
+2, Open Babel, fpocket) are compiled from pinned git submodules, which
+removes environment drift, and the runtime image is minimal and
+non-root. The design goal is that the entire pipeline — from raw receptor
+and ligand files to a ranked, citable hit list — is reproducible with a
+single command and a fixed seed.
 
 # Validation
 
-AutoDocker is validated with three reproducible benchmark scripts
-(`scripts/benchmark_*.py`, see `BENCHMARKS.md`):
+AutoDocker ships reproducible benchmark scripts (`scripts/benchmark_*.py`;
+results in `BENCHMARKS.md`):
 
 1. **Re-docking power.** 40 PDBbind v2016 core-set complexes are re-docked;
-   26 dockable complexes give a 76.9% top-1 success rate within 2 Å RMSD of
-   the crystal pose and 96.2% when the best of the 9 predicted modes is
-   considered, matching or exceeding the Vina baseline.
+   26 dockable complexes give a **76.9%** top-1 success rate within 2 Å
+   RMSD of the crystal pose and **96.2%** when the best of the 9 predicted
+   modes is considered, matching or exceeding the Vina baseline.
 2. **Screening power.** DUD-E enrichment (Mysinger et al., 2012,
-   @mysinger2012dude) across 10 targets spanning protein kinases,
-   proteases, a nuclear receptor, reductases and an esterase, with
-   bootstrap confidence intervals and Mann-Whitney U significance tests.
-3. **No hidden corruption.** All 222 affinity values reported by the
-   pipeline match the raw Vina scores bit-for-bit.
+   @mysinger2012dude) across 10 targets spanning protein kinases, a nuclear
+   receptor, proteases, reductases and an esterase, with bootstrap
+   confidence intervals and Mann-Whitney U significance tests.
+3. **No hidden corruption.** All affinity values reported by the pipeline
+   match the raw Vina scores bit-for-bit (mode-by-mode parity).
+4. **Performance & scalability.** Wall-clock time, peak RSS, and throughput
+   are measured as a function of ligand-library size and process count
+   (`scripts/benchmark_performance.py`, see `BENCHMARKS.md`).
 
 # Availability
 

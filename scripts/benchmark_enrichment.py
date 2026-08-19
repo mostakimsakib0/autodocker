@@ -115,8 +115,10 @@ def sample_ligands(mol2_gz, out_dir, prefix, max_n, seed, skip_existing=True):
         if len(paths) >= max_n:
             break
         block = blocks[idx]
-        name_line = next((l.strip() for l in block.splitlines() if l.strip()),
-                         str(idx))
+        name_line = next(
+            (l.strip() for l in block.splitlines()
+             if l.strip() and not l.strip().startswith("@<TRIPOS>")),
+            str(idx))
         name = (name_line.split()[0] or "_").replace("/", "_")
         mol2_path = os.path.join(out_dir, f"{prefix}{count}_{name}.mol2")
         pdbqt_path = mol2_path.replace(".mol2", ".pdbqt")
@@ -453,9 +455,9 @@ def main():
             "ingest": args.ingest, "outdir": args.outdir})
         results.append(rec)
         print(f"[{t}] {rec['status']} actives={rec['n_actives']} "
-              f"decoys={rec['n_decoys']} auc={rec['auc']}"
+              f"decoys={rec['n_decoys']} auc={rec.get('auc')}"
               f" ({rec.get('auc_lo')}-{rec.get('auc_hi')}) "
-              f"ef1={rec['ef1']} p_mw={rec.get('p_mw_one')} "
+              f"ef1={rec.get('ef1')} p_mw={rec.get('p_mw_one')} "
               f"{rec.get('sig')} err={rec['error']}", flush=True)
         # Incremental save so a partial run still leaves usable results.
         save_tables(results, args.outdir)
