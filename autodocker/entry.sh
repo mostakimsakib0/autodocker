@@ -113,16 +113,24 @@ CMD=(
 	-l "$LIGS"
 	-o "$OUT"
 	--chain "$CHAIN"
-	--no-admet
 	--padding "$PADDING"
 	--exhaustiveness "$EXHAUSTIVENESS"
 	--binding-modes "$BINDING_MODES"
 	--energy-range "$ENERGY_RANGE"
 	--timeout "$TIMEOUT"
 	--top-n "$TOP_N"
-	--no-resume
 	-p "$PROCESSES"
 )
+
+# ADMET filtering is ON by default (matches runner.py); set ADMET=0 to disable.
+if [ "${ADMET:-1}" = "0" ]; then
+	CMD+=(--no-admet)
+fi
+
+# Checkpoint resume is ON by default; set RESUME=0 to force a fresh run.
+if [ "${RESUME:-1}" = "0" ]; then
+	CMD+=(--no-resume)
+fi
 
 if [ -n "${POCKETS:-}" ]; then
 	CMD+=(--pockets "$POCKETS")

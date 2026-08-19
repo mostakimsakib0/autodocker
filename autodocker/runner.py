@@ -26,13 +26,13 @@ PHASE 4: Consensus Scoring
   - Score agreement analysis
 
 Original Features:
-  - ZINC API Integration (FDA & custom libraries)
+  - PubChem library download (FDA & custom libraries)
   - SimScore calculation (RMSD-based pose consistency)
   - ADMET filtering (Lipinski's rule of five)
   - Advanced Vina parameters
 
 Workflow:
-  1. Library preparation (ZINC API with ADMET filtering)
+  1. Library preparation (PubChem download with ADMET filtering)
   2. Protein preparation (chain selection + fpocket)
   3. Smart preprocessing (optional: water/metal/cofactor)
   4. Docking (flexible or rigid, single or multi-engine)
@@ -52,19 +52,37 @@ import re
 import shlex
 import time
 import math
+import html
 import statistics
 import fnmatch
 from multiprocessing import Pool, cpu_count as mp_cpu_count
 from pathlib import Path
 from datetime import datetime
 from typing import List, Tuple, Optional, Dict, Set
-from urllib.parse import urljoin
+from urllib.parse import quote
 from collections import defaultdict
 
 try:
     import requests
 except ModuleNotFoundError:
     requests = None
+
+try:
+    import urllib.request
+except ImportError:  # pragma: no cover
+    urllib = None
+
+
+def _http_get_bytes(url: str, timeout: int = 30) -> bytes:
+    """Fetch a URL, using requests when available and urllib otherwise."""
+    if requests is not None:
+        resp = requests.get(url, timeout=timeout)
+        resp.raise_for_status()
+        return resp.content
+    if urllib is None:
+        raise RuntimeError("No HTTP library available (requests/urllib)")
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        return resp.read()
 
 try:
     import numpy as np
@@ -328,7 +346,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str) -> 
         html_content += f"""
             <tr>
                 <td>{i}</td>
-                <td><strong>{lig.get('Ligand', 'Unknown')}</strong></td>
+                <td><strong>{html.escape(str(lig.get('Ligand', 'Unknown')))}</strong></td>
                 <td class="{conf_class}"><strong>{affinity:.2f}</strong></td>
                 <td>{modes}</td>
                 <td class="{conf_class}">{conf_text}</td>
@@ -375,7 +393,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str) -> 
 
     if clusters:
         for ligand, ligand_clusters in clusters.items():
-            html_content += f"<h3>{ligand}</h3>\n<ul>\n"
+            html_content += f"<h3>{html.escape(str(ligand))}</h3>\n<ul>\n"
             for cluster in ligand_clusters:
                 poses = cluster['poses']
                 html_content += f"  <li>Cluster {cluster['id']}: {len(poses)} poses"
@@ -424,95 +442,215 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str) -> 
 # =============================
 
 
-def detect_water_molecules(pdb_file: str, binding_site_coords: Tuple[float, float, float],
-                           distance_threshold: float = 4.0) -> List[str]:
-    """Detect water molecules near binding site. Returns residue IDs."""
-    waters = []
+WATER_RESNAMES = {"HOH", "WAT", "TIP3", "TIP", "TIP3P", "TIP4", "H2O", "DOD", "SOL"}
 
+METAL_ELEMENTS = {
+    "ZN": "Zinc", "CU": "Copper", "FE": "Iron", "MG": "Magnesium",
+    "CA": "Calcium", "MN": "Manganese", "NI": "Nickel",
+    "CO": "Cobalt", "LI": "Lithium", "K": "Potassium", "NA": "Sodium",
+    "AL": "Aluminum", "CD": "Cadmium", "HG": "Mercury",
+}
+
+COFACTOR_RESNAMES = {
+    "NAD", "NADH", "NADP", "NADPH", "ATP", "ADP", "GTP", "GDP",
+    "FAD", "FADH", "FMN", "HEM", "HEME", "SAM", "SAH", "PLP",
+    "UDP", "UMP", "UTP", "CMP", "ACP", "COA", "THF", "H4B",
+}
+
+
+def _parse_hetatm(line: str) -> Optional[Dict]:
+    """Parse a PDB HETATM line into a dict, or None if malformed.
+
+    Element is taken from the element column with fallback to the atom name
+    (many PDB files leave the element column blank).
+    """
+    if not line.startswith("HETATM"):
+        return None
     try:
-        cx, cy, cz = binding_site_coords
-        with open(pdb_file, 'r') as f:
+        coords = (float(line[30:38]), float(line[38:46]), float(line[46:54]))
+    except (ValueError, IndexError):
+        return None
+
+    atom_name = line[12:16].strip()
+    element = line[76:78].strip().upper()
+    if not element:
+        element = re.sub(r"[^A-Za-z]", "", atom_name).upper()
+
+    return {
+        "index": line[6:11].strip(),
+        "atom": atom_name,
+        "resname": line[17:20].strip().upper(),
+        "chain": line[21].strip() or "A",
+        "resnum": line[22:26].strip(),
+        "element": element,
+        "coords": coords,
+        "line": line,
+    }
+
+def _iter_hetatm_residues(pdb_file: str, predicate) -> List[Dict]:
+    """Parse all HETATM residues from a PDB file matching ``predicate``.
+
+    Detection runs on the *original* PDB so HETATM records (waters, metal
+    ions, cofactors) are still present.
+    """
+    residues = []
+    seen = set()
+    try:
+        with open(pdb_file, "r") as f:
             for line in f:
-                if 'HOH' in line or 'WAT' in line:  # Water residues
-                    try:
-                        x = float(line[30:38].strip())
-                        y = float(line[38:46].strip())
-                        z = float(line[46:54].strip())
-
-                        # Calculate distance to binding site center
-                        dist = math.sqrt((x-cx)**2 + (y-cy)**2 + (z-cz)**2)
-                        if dist <= distance_threshold:
-                            res_id = line[22:26].strip()
-                            waters.append(res_id)
-                    except (ValueError, IndexError):
-                        pass
+                parsed = _parse_hetatm(line)
+                if parsed is None or not predicate(parsed):
+                    continue
+                key = (parsed["chain"], parsed["resnum"], parsed["resname"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                residues.append(parsed)
     except Exception as e:
-        logger.debug(f"Could not detect waters: {e}")
+        logger.debug(f"Could not detect hetero residues in {pdb_file}: {e}")
+    return residues
 
-    return list(set(waters))  # Remove duplicates
+
+def detect_water_molecules(pdb_file: str, binding_site_coords: Tuple[float, float, float],
+                           distance_threshold: float = 4.0) -> List[Dict]:
+    """Detect water molecules near the binding site.
+
+    Returns a list of residue dicts (chain/resnum/resname/coords) for waters
+    whose oxygen lies within ``distance_threshold`` A of the site center.
+    """
+    cx, cy, cz = binding_site_coords
+    waters = []
+    for res in _iter_hetatm_residues(
+            pdb_file, lambda r: r["resname"] in WATER_RESNAMES):
+        x, y, z = res["coords"]
+        if math.sqrt((x - cx) ** 2 + (y - cy) ** 2 + (z - cz) ** 2) <= distance_threshold:
+            waters.append(res)
+    return waters
 
 
 def detect_metal_ions(pdb_file: str) -> List[Dict]:
-    """Detect metal ions in protein. Returns list with ion info."""
+    """Detect metal ions in the protein. Returns list with ion info."""
     metals = []
-    metal_elements = {'ZN': 'Zinc', 'CU': 'Copper', 'FE': 'Iron', 'MG': 'Magnesium',
-                      'CA': 'Calcium', 'MN': 'Manganese', 'NI': 'Nickel'}
-
-    try:
-        with open(pdb_file, 'r') as f:
-            for line in f:
-                if line.startswith('HETATM'):
-                    elem = line[76:78].strip().upper()
-                    if elem in metal_elements:
-                        try:
-                            x = float(line[30:38].strip())
-                            y = float(line[38:46].strip())
-                            z = float(line[46:54].strip())
-                            res_id = line[22:26].strip()
-                            metals.append({
-                                'element': elem,
-                                'name': metal_elements[elem],
-                                'residue': res_id,
-                                'coords': (x, y, z)
-                            })
-                        except (ValueError, IndexError):
-                            pass
-    except Exception as e:
-        logger.debug(f"Could not detect metals: {e}")
-
+    for res in _iter_hetatm_residues(
+            pdb_file, lambda r: r["element"] in METAL_ELEMENTS):
+        metals.append({
+            "element": res["element"],
+            "name": METAL_ELEMENTS[res["element"]],
+            "chain": res["chain"],
+            "resnum": res["resnum"],
+            "resname": res["resname"],
+            "coords": res["coords"],
+        })
     return metals
 
 
 def detect_cofactors(pdb_file: str) -> List[Dict]:
-    """Detect cofactors/ligands already in protein."""
+    """Detect cofactors/ligands already present in the protein."""
     cofactors = []
-    common_cofactors = {'NAD', 'ATP', 'GTP', 'FAD', 'HEM', 'ZN', 'CA', 'MG'}
-
-    try:
-        with open(pdb_file, 'r') as f:
-            seen = set()
-            for line in f:
-                if line.startswith('HETATM'):
-                    res_name = line[17:20].strip().upper()
-                    res_id = line[22:26].strip()
-
-                    if res_name in common_cofactors and res_id not in seen:
-                        try:
-                            x = float(line[30:38].strip())
-                            y = float(line[38:46].strip())
-                            z = float(line[46:54].strip())
-                            cofactors.append({
-                                'name': res_name,
-                                'residue': res_id,
-                                'coords': (x, y, z)
-                            })
-                            seen.add(res_id)
-                        except (ValueError, IndexError):
-                            pass
-    except Exception as e:
-        logger.debug(f"Could not detect cofactors: {e}")
-
+    for res in _iter_hetatm_residues(
+            pdb_file, lambda r: r["resname"] in COFACTOR_RESNAMES):
+        cofactors.append({
+            "name": res["resname"],
+            "chain": res["chain"],
+            "resnum": res["resnum"],
+            "coords": res["coords"],
+        })
     return cofactors
+
+
+VINA_METAL_TYPE_MAP = {
+    "ZN": "Zn", "FE": "Fe", "CA": "Ca", "MG": "Mg", "MN": "Mn",
+    "CU": "Cu", "NI": "Ni", "CO": "Co", "HG": "Hg", "CD": "Cd",
+    "NA": "Na", "K": "K",
+}
+
+
+def _max_pdbqt_serial(pdbqt_file: str) -> int:
+    """Return the largest atom serial in a PDBQT file (0 if none)."""
+    max_serial = 0
+    try:
+        with open(pdbqt_file, "r") as f:
+            for line in f:
+                if line.startswith(("ATOM", "HETATM")):
+                    try:
+                        max_serial = max(max_serial, int(line[6:11]))
+                    except ValueError:
+                        pass
+    except IOError:
+        pass
+    return max_serial
+
+
+def _hetatm_to_pdbqt_line(parsed: Dict, serial: int) -> Optional[str]:
+    """Build a receptor PDBQT ATOM line for a kept HETATM record.
+
+    Water oxygens are typed OA (matching OpenBabel); metals use the element
+    symbol for the types Vina accepts; other elements get conservative
+    AutoDock types. Returns None for unsupported elements.
+    """
+    element = parsed["element"]
+    if element == "O":
+        atom_type = "OA"
+    elif element == "N":
+        atom_type = "NA"
+    elif element == "S":
+        atom_type = "SA"
+    elif element == "H":
+        atom_type = "HD"
+    elif element == "C":
+        atom_type = "C"
+    elif element in VINA_METAL_TYPE_MAP:
+        atom_type = VINA_METAL_TYPE_MAP[element]
+    else:
+        return None
+
+    x, y, z = parsed["coords"]
+    name = parsed["atom"] or element
+    resname = parsed["resname"]
+    chain = parsed["chain"]
+    resnum = parsed["resnum"]
+    # Column layout matches the AutoDock PDBQT convention Vina parses:
+    # coords at 31-38/39-46/47-54, charge at 69-76, atom type at 78-79.
+    return (
+        f"HETATM{serial:5d} {name:<4s} {resname:3s} {chain} {resnum:>3s}    "
+        f"{x:8.3f}{y:8.3f}{z:8.3f}{1.00:6.2f}{20.00:6.2f}    {0.000:+.3f} {atom_type}\n"
+    )
+
+
+def _append_hetatm_to_receptor(pdbqt_file: str, pdb_file: str,
+                               keep_residues, selected_chains) -> int:
+    """Append PDBQT records for the selected HETATM residues to a receptor.
+
+    Works on the *original* PDB so the HETATM records still exist. Returns
+    the number of atoms appended. Existing protein charges are preserved.
+    """
+    keep = set(keep_residues)
+    serial = _max_pdbqt_serial(pdbqt_file) + 1
+    appended = 0
+
+    with open(pdb_file, "r") as src, open(pdbqt_file, "a") as dst:
+        for line in src:
+            if not line.startswith("HETATM"):
+                continue
+            parsed = _parse_hetatm(line)
+            if parsed is None:
+                continue
+            if parsed["chain"] not in selected_chains:
+                continue
+            key = (parsed["chain"], parsed["resnum"], parsed["resname"])
+            if key not in keep:
+                continue
+            record = _hetatm_to_pdbqt_line(parsed, serial)
+            if record is None:
+                logger.warning(
+                    f"[!] Skipping unsupported hetero atom {parsed['atom']} "
+                    f"({parsed['element']}) in {parsed['resname']} {parsed['resnum']}")
+                continue
+            dst.write(record)
+            serial += 1
+            appended += 1
+
+    return appended
 
 # =============================
 # PHASE 3: FLEXIBLE DOCKING
@@ -555,6 +693,236 @@ def detect_flexible_residues(pdbqt_file: str, binding_site_coords: Tuple[float, 
         logger.debug(f"Could not detect flexible residues: {e}")
 
     return flexible
+
+
+FLEX_BACKBONE_NAMES = {"N", "CA", "C", "O", "H"}
+_BOND_TOLERANCE = 0.45
+
+_ATOMIC_RADII = {
+    "H": 0.31, "C": 0.76, "N": 0.71, "O": 0.66, "S": 1.05, "P": 1.07,
+    "F": 0.57, "CL": 1.02, "BR": 1.20, "I": 1.39,
+    "ZN": 1.39, "FE": 1.32, "CA": 1.76, "MG": 1.41, "MN": 1.39,
+    "CU": 1.32, "NI": 1.24, "CO": 1.26, "HG": 1.32, "CD": 1.44,
+    "NA": 1.66, "K": 2.03,
+}
+
+
+def _pdbqt_atom_element(atom_type: str) -> str:
+    """Map a PDBQT atom type back to its element for bond detection."""
+    if atom_type in ("C", "A"):
+        return "C"
+    if atom_type in ("N", "NA"):
+        return "N"
+    if atom_type == "OA":
+        return "O"
+    if atom_type == "SA":
+        return "S"
+    if atom_type in ("HD", "H"):
+        return "H"
+    if atom_type in _ATOMIC_RADII:
+        return atom_type
+    return "C"
+
+
+def _parse_residue_key(key: str) -> Optional[Tuple[str, str]]:
+    """Parse a residue key like 'A45' into (chain, resnum)."""
+    match = re.match(r"^([A-Za-z]+?)(\d+)$", key.strip())
+    if not match:
+        return None
+    return match.group(1).upper(), match.group(2)
+
+
+def _residue_atoms_from_pdbqt(pdbqt_file: str,
+                              key: str) -> List[Dict]:
+    """Collect PDBQT atoms belonging to a residue identified by 'A45'."""
+    parsed = _parse_residue_key(key)
+    if parsed is None:
+        logger.warning(f"[!] Invalid residue key '{key}' (expected e.g. A45)")
+        return []
+    chain, resnum = parsed
+    atoms = []
+    with open(pdbqt_file, "r") as f:
+        for line in f:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            atom_chain = line[21].strip().upper()
+            atom_resnum = line[22:26].strip()
+            if atom_chain != chain:
+                continue
+            if not _resnum_matches(atom_resnum, resnum):
+                continue
+            try:
+                serial = int(line[6:11])
+            except ValueError:
+                continue
+            name = line[12:16].strip()
+            parts = line.split()
+            atom_type = parts[-1] if parts else "C"
+            atoms.append({
+                "serial": serial,
+                "name": name,
+                "atom_type": atom_type,
+                "element": _pdbqt_atom_element(atom_type),
+                "coords": (float(line[30:38]), float(line[38:46]), float(line[46:54])),
+                "line": line if line.endswith("\n") else line + "\n",
+            })
+    return atoms
+
+
+def _resnum_matches(atom_resnum: str, key_resnum: str) -> bool:
+    """Compare a PDB resnum (possibly '45') with a key resnum ('45')."""
+    if atom_resnum.isdigit() and key_resnum.isdigit():
+        return int(atom_resnum) == int(key_resnum)
+    return atom_resnum == key_resnum
+
+
+def _build_flex_residue_block(atoms: List[Dict]) -> List[str]:
+    """Build one BEGIN_RES ... END_RES block for a flexible residue.
+
+    The tree is rooted at CA; backbone atoms (N/CA/C/O/H) are the immobile
+    ROOT, and side-chain branches are emitted as nested BRANCH/ENDBRANCH
+    pairs (the Vina 1.2 flexible-receptor format).
+    """
+    by_name = {a["name"]: a for a in atoms}
+    ca = by_name.get("CA")
+    if ca is None:
+        logger.warning(
+            f"[!] Cannot build flex residue: no CA atom found")
+        return []
+
+    root_atoms = [a for a in atoms if a["name"] in FLEX_BACKBONE_NAMES]
+    side = [a for a in atoms if a["name"] not in FLEX_BACKBONE_NAMES]
+    if not side:
+        logger.warning(
+            f"[!] Residue has no flexible side-chain atoms; skipping")
+        return []
+
+    by_serial = {a["serial"]: a for a in atoms}
+    nodes = side + [ca]
+    node_serials = {a["serial"] for a in nodes}
+
+    def bonded(a: Dict, b: Dict) -> bool:
+        radius = (_ATOMIC_RADII.get(a["element"], 0.76)
+                  + _ATOMIC_RADII.get(b["element"], 0.76) + _BOND_TOLERANCE)
+        dx = a["coords"][0] - b["coords"][0]
+        dy = a["coords"][1] - b["coords"][1]
+        dz = a["coords"][2] - b["coords"][2]
+        return math.sqrt(dx * dx + dy * dy + dz * dz) < radius
+
+    # Grow a tree from CA, visiting each side-chain atom at most once.
+    tree = {}  # serial -> list of child serials
+    parent_of = {ca["serial"]: None}
+
+    def grow(node_serial: int):
+        node = by_serial[node_serial]
+        neighbors = [nb for nb in nodes
+                     if nb["serial"] in node_serials
+                     and nb["serial"] != node_serial
+                     and bonded(node, nb)]
+        for nb in sorted(neighbors, key=lambda x: x["serial"]):
+            if nb["serial"] in parent_of:
+                continue
+            parent_of[nb["serial"]] = node_serial
+            tree.setdefault(node_serial, []).append(nb["serial"])
+            grow(nb["serial"])
+
+    grow(ca["serial"])
+    if not tree.get(ca["serial"]):
+        logger.warning(
+            f"[!] No side-chain atoms bonded to CA; skipping residue")
+        return []
+
+    lines = ["BEGIN_RES\n"]
+    lines.append("ROOT\n")
+    for a in sorted(root_atoms, key=lambda x: x["serial"]):
+        lines.append(a["line"])
+    lines.append("ENDROOT\n")
+
+    def emit(node_serial: int):
+        for child_serial in tree.get(node_serial, []):
+            child = by_serial[child_serial]
+            lines.append(f"BRANCH {node_serial} {child_serial}\n")
+            lines.append(child["line"])
+            emit(child_serial)
+            lines.append(f"ENDBRANCH {node_serial} {child_serial}\n")
+
+    emit(ca["serial"])
+    lines.append("END_RES\n")
+    return lines
+
+
+def build_flexible_residue_pdbqt(receptor_pdbqt: str, residues: List[str],
+                                 outdir: str) -> Optional[str]:
+    """Build a Vina flexible-receptor PDBQT for the given residue keys.
+
+    Residues are given as e.g. ``['A45', 'B102']``. Returns the flex file
+    path, or None if no residue could be converted.
+    """
+    if not residues:
+        return None
+
+    flex_file = os.path.join(outdir, "flex.pdbqt")
+    written = 0
+    with open(flex_file, "w") as dst:
+        dst.write("REMARK flexible residues: " + ", ".join(residues) + "\n")
+        for key in residues:
+            atoms = _residue_atoms_from_pdbqt(receptor_pdbqt, key)
+            if not atoms:
+                logger.warning(
+                    f"[!] Residue '{key}' not found in receptor; skipping")
+                continue
+            block = _build_flex_residue_block(atoms)
+            if not block:
+                logger.warning(f"[!] Could not build flex block for '{key}'")
+                continue
+            dst.writelines(block)
+            written += 1
+
+    if written == 0:
+        logger.warning(
+            f"[!] No flexible residues could be built; flex docking disabled")
+        return None
+
+    logger.info(
+        f"[✔] Flexible receptor PDBQT written: {flex_file} "
+        f"({written} residue(s))")
+    return flex_file
+
+
+def _remove_residues_from_pdbqt(receptor_pdbqt: str, residues: List[str],
+                                outpath: str) -> str:
+    """Build a rigid receptor PDBQT excluding the flexible residue atoms.
+
+    Vina requires flexible residues to be absent from the rigid receptor;
+    including them double-counts atoms and corrupts the scoring.
+    """
+    keys = []
+    for key in residues:
+        parsed = _parse_residue_key(key)
+        if parsed is not None:
+            keys.append(parsed)
+
+    removed = 0
+    kept = []
+    with open(receptor_pdbqt, "r") as src:
+        for line in src:
+            if line.startswith(("ATOM", "HETATM")):
+                chain = line[21].strip().upper()
+                resnum = line[22:26].strip()
+                if any(c == chain and _resnum_matches(resnum, rn)
+                       for c, rn in keys):
+                    removed += 1
+                    continue
+            kept.append(line)
+
+    with open(outpath, "w") as dst:
+        dst.writelines(kept)
+
+    if removed:
+        logger.info(
+            f"[*] Rigid receptor: removed {removed} flexible-residue atoms "
+            f"({outpath})")
+    return outpath
 
 # =============================
 # PHASE 4: CONSENSUS SCORING
@@ -675,34 +1043,71 @@ def run_smina_docking(
                 continue
 
     raise RuntimeError("Could not extract affinity from SMINA output")
+
+
+def _run_smina_scoring(receptor: str, ligands: List[str], outdir: str,
+                       grid: Tuple[float, float, float, float, float, float],
+                       vina_params: Dict) -> Dict[str, float]:
+    """Run SMINA scoring for every ligand. Returns {name: smina_affinity}.
+
+    Per-ligand failures are logged and skipped (never fatal).
+    """
+    cx, cy, cz, sx, sy, sz = grid
+    smina_scores = {}
+    dock_dir = os.path.join(outdir, "docked")
+    os.makedirs(dock_dir, exist_ok=True)
+
+    for lig in ligands:
+        name = os.path.basename(lig).replace(".pdbqt", "")
+        out = os.path.join(dock_dir, name + "_smina.pdbqt")
+        try:
+            score = run_smina_docking(receptor, lig, out, cx, cy, cz, sx, sy, sz)
+        except Exception as e:
+            logger.warning(f"  [!] SMINA failed for {name}: {e}")
+            continue
+        if score is not None:
+            smina_scores[name] = score
+
+    logger.info(
+        f"[*] SMINA scored {len(smina_scores)}/{len(ligands)} ligands")
+    return smina_scores
 # =============================
 # PDBQT CHARGE VALIDATION & FIXING
 # =============================
 
+def _extract_pdbqt_charge(line: str) -> Optional[float]:
+    """Return the atomic charge from a PDBQT ATOM/HETATM line, or None.
+
+    PDBQT charge placement varies by OpenBabel/Vina build, so the first
+    numeric token scanning backwards from the atom-type is used.
+    """
+    parts = line.split()
+    for token in reversed(parts[-3:]):
+        try:
+            return float(token)
+        except ValueError:
+            continue
+    return None
+
+
 def _ensure_pdbqt_has_charges(pdbqt_file: str) -> bool:
-    """Check if PDBQT file contains at least one valid atomic charge (robust)."""
+    """Check if PDBQT file contains at least one atom with a NONZERO charge.
+
+    A file whose atoms all carry 0.000 charge is chemically unusable for
+    docking and is treated as 'no charges' (zero-charge receptors would
+    otherwise pass validation and silently produce garbage results).
+    """
     try:
+        saw_atom = False
         with open(pdbqt_file, 'r') as f:
             for line in f:
                 if line.startswith(("ATOM", "HETATM")):
-                    parts = line.split()
-                    # PDBQT charge placement varies by OpenBabel/Vina build.
-                    # Prefer the trailing atom-type/charge fields, then fall back to
-                    # scanning the line tail for the first numeric token.
-                    if len(parts) >= 2:
-                        for token in reversed(parts[-3:]):
-                            try:
-                                float(token)
-                                return True
-                            except ValueError:
-                                continue
-                    tail = line[54:].strip().split()
-                    for token in reversed(tail):
-                        try:
-                            float(token)
-                            return True
-                        except ValueError:
-                            continue
+                    saw_atom = True
+                    charge = _extract_pdbqt_charge(line)
+                    if charge is not None and charge != 0.0:
+                        return True
+        if saw_atom:
+            return False
         return False
     except Exception as e:
         logger.warning(f"Charge check failed: {e}")
@@ -1126,14 +1531,37 @@ class DockingCheckpoint:
         return {name: data.get("metrics", {}) for name, data in self.completed.items()}
 
 # =============================
-# LIBRARY GENERATION (ZINC API + ADMET)
+# LIBRARY GENERATION (PubChem + ADMET)
 # =============================
 
 
 class LibraryManager:
     """Manages compound library sourcing and preparation."""
 
-    ZINC_URL = "https://zinc.docking.org/api/v0/"
+    PUBCHEM_REST = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+    MAX_COMPOUNDS = 20
+
+    # Curated FDA-approved drug names (well-known actives) resolved through
+    # PubChem PUG REST name->CID lookup.
+    FDA_DRUG_NAMES = [
+        "aspirin", "ibuprofen", "acetaminophen", "naproxen", "diclofenac",
+        "celecoxib", "atorvastatin", "simvastatin", "rosuvastatin", "lovastatin",
+        "metformin", "glibenclamide", "glipizide", "metoprolol", "propranolol",
+        "amlodipine", "nifedipine", "verapamil", "diltiazem", "losartan",
+        "valsartan", "candesartan", "furosemide", "hydrochlorothiazide", "spironolactone",
+        "digoxin", "warfarin", "clopidogrel", "ticlopidine", "prasugrel",
+        "omeprazole", "lansoprazole", "pantoprazole", "ranitidine", "cimetidine",
+        "fluoxetine", "sertraline", "paroxetine", "citalopram", "escitalopram",
+        "diazepam", "alprazolam", "lorazepam", "clonazepam", "zolpidem",
+        "sildenafil", "tadalafil", "vardenafil", "finasteride", "dutasteride",
+        "tamoxifen", "anastrozole", "letrozole", "methotrexate", "cyclophosphamide",
+        "prednisone", "dexamethasone", "hydrocortisone", "levothyroxine", "amoxicillin",
+        "ciprofloxacin", "azithromycin", "doxycycline", "fluconazole", "acyclovir",
+        "valacyclovir", "allopurinol", "colchicine", "gabapentin", "pregabalin",
+        "donepezil", "rivastigmine", "memantine", "levodopa", "carbidopa",
+    ]
+
+    FALLBACK_LIBRARY_NAMES = list(FDA_DRUG_NAMES)
 
     def __init__(self, outdir: str, ligands_input_dir: str,
                  minimize: bool = True, minimize_steps: int = 250):
@@ -1147,216 +1575,175 @@ class LibraryManager:
         self.minimize_steps = minimize_steps
         os.makedirs(self.lib_dir, exist_ok=True)
         os.makedirs(self.minimized_dir, exist_ok=True)
-        self.session = requests.Session() if requests is not None else None
-        # Allow overriding ZINC API base URL and API key via environment variables.
-        # Useful when the public endpoints change or require authentication.
-        self.zinc_api_base = os.environ.get('ZINC_API_BASE') or self.ZINC_URL
-        self.zinc_api_key = os.environ.get('ZINC_API_KEY')
-        # Header name to use for the API key. Common choices: 'Authorization' (Bearer), 'X-API-KEY'
-        self.zinc_api_key_header = os.environ.get(
-            'ZINC_API_KEY_HEADER', 'Authorization')
+        # Allow overriding the PubChem REST base for tests/mirrors.
+        self.pubchem_rest = os.environ.get('PUBCHEM_REST') or self.PUBCHEM_REST
 
     def create_fda_library(self, apply_admet: bool = True) -> List[str]:
-        """Download FDA-approved drugs from ZINC.
+        """Download FDA-approved drugs from PubChem.
 
-        Uses ZINC REST API: https://zinc.docking.org/
-        Filters: FDA approved, MW 200-500, logP < 5
+        Uses PubChem PUG REST: ``compound/name/{name}/cids`` then
+        ``compound/cid/{cid}/SDF`` (the old ZINC endpoint is dead).
         """
-        logger.info("[*] FDA library mode - downloading from ZINC API...")
+        logger.info(
+            "[*] FDA library mode - downloading approved drugs from PubChem...")
 
-        if self.session is None:
+        downloaded = []
+        for name in self.FDA_DRUG_NAMES:
+            if len(downloaded) >= self.MAX_COMPOUNDS:
+                logger.info(
+                    f"[*] Reached {self.MAX_COMPOUNDS} compounds, stopping download")
+                break
+            cids = self._pubchem_cid_for_name(name)
+            if not cids:
+                logger.debug(f"  No PubChem CID for {name}")
+                continue
+            pdbqt_file = self._prepare_pubchem_compound(
+                str(cids[0]), _safe_ligand_id(name), apply_admet)
+            if pdbqt_file:
+                downloaded.append(pdbqt_file)
+                logger.info(f"  [+] {name} (CID {cids[0]})")
+
+        if not downloaded:
             logger.warning(
-                "requests package not found. Falling back to local SDF mode.")
+                "No FDA compounds could be downloaded; falling back to local SDF")
             return self._prepare_local_sdf(apply_admet=apply_admet)
 
-        try:
-            substances = self._query_zinc(
-                supplier='fda8',
-                count=10000,
-                mw_min=200,
-                mw_max=500
-            )
-
-            if not substances:
-                logger.warning(
-                    "No FDA substances found, falling back to local SDF")
-                return self._prepare_local_sdf(apply_admet=apply_admet)
-
-            return self._download_and_prepare(substances, apply_admet)
-
-        except Exception as e:
-            logger.warning(f"ZINC API failed: {e}. Using local SDF.")
-            return self._prepare_local_sdf(apply_admet=apply_admet)
+        self._save_metadata()
+        logger.info(
+            f"[✔] Downloaded and prepared {len(downloaded)} FDA compounds from PubChem")
+        return downloaded
 
     def create_custom_library(self, mw_min: int = 200, mw_max: int = 500,
                               logp_max: float = 5, apply_admet: bool = True) -> List[str]:
-        """Download custom library filtered by molecular properties.
+        """Download a custom library filtered by molecular properties.
 
-        Uses ZINC REST API with filters:
-        - Molecular weight: mw_min to mw_max
-        - LogP: <= logp_max (drug-likeness)
+        PubChem computed properties (MolecularWeight, XLogP) are used for
+        the MW/LogP filters instead of the dead ZINC query API.
         """
         logger.info(
-            f"[*] Custom library mode (MW: {mw_min}-{mw_max}, LogP: <={logp_max})")
+            f"[*] Custom library mode (MW: {mw_min}-{mw_max}, LogP: <={logp_max}) - PubChem")
 
-        if self.session is None:
-            logger.warning(
-                "requests package not found. Falling back to local SDF mode.")
-            return self._prepare_local_sdf(apply_admet=apply_admet)
-
-        try:
-            substances = self._query_zinc(
-                supplier='now',
-                count=50000,
-                mw_min=mw_min,
-                mw_max=mw_max,
-                logp_max=logp_max
-            )
-
-            if not substances:
-                logger.warning(
-                    "No substances found, falling back to local SDF")
-                return self._prepare_local_sdf(apply_admet=apply_admet)
-
-            return self._download_and_prepare(substances, apply_admet)
-
-        except Exception as e:
-            logger.warning(f"ZINC API failed: {e}. Using local SDF.")
-            return self._prepare_local_sdf(apply_admet=apply_admet)
-
-    def _query_zinc(self, supplier: str = 'now', count: int = 10000,
-                    mw_min: int = 200, mw_max: int = 500,
-                    logp_max: float = 5) -> List[Dict]:
-        """Query ZINC API for compounds."""
-        logger.debug(
-            f"Querying ZINC API: supplier={supplier}, MW={mw_min}-{mw_max}")
-
-        params = {
-            'supplier': supplier,
-            'mw__lte': mw_max,
-            'mw__gte': mw_min,
-            'logp__lte': logp_max,
-            'limit': min(count, 10000),
-            'format': 'json'
-        }
-
-        # Try a set of candidate base URLs and supplier names to tolerate
-        # ZINC API endpoint changes or deprecated supplier codes.
-        candidate_bases = [self.zinc_api_base]
-        # Add historical/known endpoints as fallbacks if not overridden
-        for b in ("https://zinc15.docking.org/api/",
-                  "https://zinc15.docking.org/api/v1/",
-                  "https://zinc.docking.org/api/",
-                  "https://zinc.docking.org/"):
-            if b not in candidate_bases:
-                candidate_bases.append(b)
-
-        candidate_suppliers = [supplier]
-        # common fallbacks
-        for s in ("fda", "fda8", "now"):
-            if s not in candidate_suppliers:
-                candidate_suppliers.append(s)
-
-        last_exception = None
-        for base in candidate_bases:
-            for sup in candidate_suppliers:
-                params['supplier'] = sup
-                try:
-                    url = urljoin(base, "substances")
-                    logger.debug(
-                        f"Trying ZINC endpoint: {url} (supplier={sup})")
-                    headers = {}
-                    if self.zinc_api_key:
-                        # Support Bearer tokens or raw API keys depending on header
-                        if self.zinc_api_key_header.lower() == 'authorization' and not self.zinc_api_key.lower().startswith('bearer '):
-                            headers['Authorization'] = f"Bearer {self.zinc_api_key}"
-                        else:
-                            headers[self.zinc_api_key_header] = self.zinc_api_key
-
-                    response = self.session.get(
-                        url, params=params, headers=headers or None, timeout=30)
-                    response.raise_for_status()
-
-                    data = response.json()
-                    # Some API variants may return the list at top-level
-                    substances = data.get('results') or data.get(
-                        'substances') or data
-
-                    if not substances:
-                        logger.debug(
-                            f"Endpoint {url} returned no substances (supplier={sup})")
-                        continue
-
-                    logger.info(
-                        f"[✔] Found {len(substances)} compounds from ZINC (endpoint: {base}, supplier: {sup})")
-                    return substances
-
-                except Exception as e:
-                    logger.debug(
-                        f"ZINC attempt failed for {base} (supplier={sup}): {e}")
-                    last_exception = e
-                    # try the next candidate
-                    continue
-
-        # All attempts failed; raise the last caught exception to be handled by caller
-        logger.error("All ZINC endpoint attempts failed")
-        if last_exception:
-            raise last_exception
-        raise RuntimeError("ZINC query failed for unknown reasons")
-
-    def _download_and_prepare(self, substances: List[Dict],
-                              apply_admet: bool = True) -> List[str]:
-        """Download SDF files and convert to PDBQT."""
-        admet = ADMETFilter()
         downloaded = []
-        skipped = 0
-
-        for i, subst in enumerate(substances[:100], 1):
+        for name in self.FALLBACK_LIBRARY_NAMES:
+            if len(downloaded) >= self.MAX_COMPOUNDS:
+                logger.info(
+                    f"[*] Reached {self.MAX_COMPOUNDS} compounds, stopping download")
+                break
+            cids = self._pubchem_cid_for_name(name)
+            if not cids:
+                continue
+            cid = str(cids[0])
+            props = self._pubchem_properties(cid)
+            if props is None:
+                continue
             try:
-                zinc_id = subst.get('zinc_id')
-                if not zinc_id:
+                mw = props.get("MolecularWeight")
+                logp = props.get("XLogP")
+                if mw is None:
                     continue
-
-                sdf_url = f"http://zinc.docking.org/substances/{zinc_id}.sdf"
-                sdf_file = os.path.join(self.lib_dir, f"{zinc_id}.sdf")
-
-                logger.debug(f"Downloading [{i}/100]: {zinc_id}...")
-
-                response = self.session.get(sdf_url, timeout=10)
-                response.raise_for_status()
-
-                with open(sdf_file, 'wb') as f:
-                    f.write(response.content)
-
-                if apply_admet:
-                    props = admet.parse_sdf_properties(sdf_file)
-                    passes, violations = admet.check_lipinski(props)
-                    if not passes:
-                        logger.debug(
-                            f"  Skipped {zinc_id}: {', '.join(violations)}")
-                        os.remove(sdf_file)
-                        skipped += 1
-                        continue
-
-                pdbqt_file = os.path.join(self.lib_dir, f"{zinc_id}.pdbqt")
-                pdbqt_file = self._prepare_sdf_to_pdbqt(
-                    sdf_file, pdbqt_file, zinc_id)
+                if not (mw_min <= float(mw) <= mw_max):
+                    logger.debug(f"  {name}: MW {mw} outside range; skipping")
+                    continue
+                if logp is not None and float(logp) > logp_max:
+                    logger.debug(f"  {name}: LogP {logp} > {logp_max}; skipping")
+                    continue
+            except (TypeError, ValueError):
+                continue
+            pdbqt_file = self._prepare_pubchem_compound(
+                cid, _safe_ligand_id(name), apply_admet)
+            if pdbqt_file:
                 downloaded.append(pdbqt_file)
+                logger.info(f"  [+] {name} (CID {cid})")
 
-                if len(downloaded) >= 20:
-                    logger.info(f"[*] Reached 20 compounds, stopping download")
-                    break
-
-            except Exception as e:
-                logger.debug(
-                    f"Failed to download {subst.get('zinc_id', 'unknown')}: {e}")
-                skipped += 1
-
-        logger.info(f"[✔] Downloaded and prepared {len(downloaded)} compounds"
-                    f" ({skipped} filtered by ADMET)")
+        if not downloaded:
+            logger.warning(
+                "No matching compounds found; falling back to local SDF")
+            return self._prepare_local_sdf(apply_admet=apply_admet)
 
         self._save_metadata()
+        logger.info(
+            f"[✔] Downloaded and prepared {len(downloaded)} custom compounds from PubChem")
         return downloaded
+
+    def _pubchem_cid_for_name(self, name: str) -> List[str]:
+        """Resolve a drug name to PubChem Compound IDs (CIDs)."""
+        url = (f"{self.pubchem_rest}/compound/name/"
+               f"{quote(name)}/cids/JSON")
+        try:
+            data = json.loads(_http_get_bytes(url).decode("utf-8"))
+        except Exception as e:
+            logger.debug(f"PubChem name lookup failed for '{name}': {e}")
+            return []
+        cids = ((data.get("IdentifierList") or {}).get("CID")) or []
+        return [str(c) for c in cids]
+
+    def _pubchem_properties(self, cid: str) -> Optional[Dict]:
+        """Fetch computed MolecularWeight and XLogP for a CID."""
+        url = (f"{self.pubchem_rest}/compound/cid/{cid}/property/"
+               f"MolecularWeight,XLogP/JSON")
+        try:
+            data = json.loads(_http_get_bytes(url).decode("utf-8"))
+        except Exception as e:
+            logger.debug(f"PubChem property lookup failed for CID {cid}: {e}")
+            return None
+        try:
+            props = data["PropertyTable"]["Properties"][0]
+        except (KeyError, IndexError):
+            return None
+        return props
+
+    def _pubchem_download_sdf(self, cid: str, outpath: str) -> str:
+        """Download the 3D SDF for a CID to ``outpath``."""
+        url = (f"{self.pubchem_rest}/compound/cid/{cid}/SDF"
+               f"?record_type=3d")
+        content = _http_get_bytes(url)
+        with open(outpath, "wb") as f:
+            f.write(content)
+        return outpath
+
+    def _prepare_pubchem_compound(self, cid: str, name: str,
+                                  apply_admet: bool) -> Optional[str]:
+        """Download a PubChem SDF, apply ADMET and convert to PDBQT."""
+        ligand_id = f"{name}_{cid}"
+        sdf_file = os.path.join(self.lib_dir, f"{ligand_id}.sdf")
+        pdbqt_file = os.path.join(self.lib_dir, f"{ligand_id}.pdbqt")
+
+        try:
+            self._pubchem_download_sdf(cid, sdf_file)
+        except Exception as e:
+            logger.debug(f"PubChem SDF download failed for {ligand_id}: {e}")
+            return None
+
+        if apply_admet:
+            props = ADMETFilter.parse_sdf_properties(sdf_file)
+            passes, violations = ADMETFilter.check_lipinski(props)
+            if not passes:
+                logger.debug(
+                    f"  Skipped {ligand_id}: {', '.join(violations)}")
+                try:
+                    os.remove(sdf_file)
+                except OSError:
+                    pass
+                return None
+
+        try:
+            pdbqt_file = self._prepare_sdf_to_pdbqt(
+                sdf_file, pdbqt_file, ligand_id)
+        except Exception as e:
+            logger.debug(f"PDBQT preparation failed for {ligand_id}: {e}")
+            return None
+
+        self.metadata.setdefault(ligand_id, {})["source_url"] = (
+            f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}")
+        return pdbqt_file
+
+    def _save_metadata(self):
+        try:
+            with open(self.metadata_file, "w") as f:
+                json.dump(self.metadata, f, indent=2)
+            logger.info(f"[✔] Ligand metadata saved: {self.metadata_file}")
+        except IOError as e:
+            logger.warning(f"Could not save ligand metadata: {e}")
 
     def _prepare_sdf_to_pdbqt(self, sdf_file: str, pdbqt_file: str, ligand_id: str) -> str:
         """Optionally minimize an SDF with MMFF94, then convert to PDBQT."""
@@ -1414,20 +1801,12 @@ class LibraryManager:
             "rotors": props.get("rotors", 0),
             "hbd": props.get("hbd", 0),
             "hba": props.get("hba", 0),
-            "zinc_url": _zinc_url(ligand_id),
+            "source_url": "",
             "minimized": self.minimize and source_for_conversion == minimized_file,
             "properties_source": "obabel_descriptors" if props else "default",
         }
 
         return pdbqt_file
-
-    def _save_metadata(self):
-        try:
-            with open(self.metadata_file, "w") as f:
-                json.dump(self.metadata, f, indent=2)
-            logger.info(f"[✔] Ligand metadata saved: {self.metadata_file}")
-        except IOError as e:
-            logger.warning(f"Could not save ligand metadata: {e}")
 
     def _prepare_local_sdf(self, apply_admet: bool = True) -> List[str]:
         """Convert local SDF/PDBQT files to ready docking inputs with smart auto-detection."""
@@ -1524,18 +1903,18 @@ class LibraryManager:
                     inp = lig
                     name = Path(lig).stem
                     out = os.path.join(self.lib_dir, f"{name}.pdbqt")
-    
-                    props = admet.parse_sdf_properties(inp)
-                    if props is None:
-                        failed_ligands.append((lig, "Invalid SDF properties"))
-                        continue
-    
+
                     if apply_admet:
+                        props = admet.parse_sdf_properties(inp)
+                        if props is None:
+                            failed_ligands.append((lig, "Invalid SDF properties"))
+                            continue
+
                         ok, violations = admet.check_lipinski(props)
                         if not ok:
                             failed_ligands.append((lig, f"ADMET: {violations}"))
                             continue
-    
+
                     self._prepare_sdf_to_pdbqt(inp, out, name)
                     out_files.append(out)
     
@@ -1664,11 +2043,10 @@ def parse_pdb_coords(pdb_path: str) -> Tuple[List[float], List[float], List[floa
     return xs, ys, zs
 
 
-def _zinc_url(ligand_id: str) -> str:
-    clean_id = ligand_id.strip()
-    if re.match(r"^ZINC\d+", clean_id, re.IGNORECASE):
-        return f"https://zinc.docking.org/substances/{clean_id.upper()}/"
-    return ""
+def _safe_ligand_id(name: str) -> str:
+    """Sanitize a compound name into a safe file basename token."""
+    token = re.sub(r"[^A-Za-z0-9_.-]", "_", name.strip().lower())
+    return token or "compound"
 
 
 def get_chains(pdb_file: str) -> List[str]:
@@ -1739,7 +2117,7 @@ class ProteinPreparation:
         logger.info(f"[✔] Protein validated: {count} ATOM lines")
 
     def select_chain(self) -> str:
-        """Interactively select chain for docking."""
+        """Choose a chain for docking. Non-interactive: never prompts."""
         chains = get_chains(self.pdb_file)
 
         if len(chains) == 1:
@@ -1747,12 +2125,10 @@ class ProteinPreparation:
             return chains[0]
 
         logger.info(f"[*] Multiple chains detected: {', '.join(chains)}")
-        while True:
-            choice = input(
-                f"Select chain [{'/'.join(chains)}]: ").strip().upper()
-            if choice in chains:
-                return choice
-            logger.warning(f"Invalid choice. Choose from: {', '.join(chains)}")
+        logger.warning(
+            f"[!] Multiple chains present; using first chain '{chains[0]}'. "
+            "Specify --chain to choose explicitly.")
+        return chains[0]
 
     def prepare_receptor(self, chain: str = "A", keep_hetero: bool = False) -> List[str]:
         """Clean protein and convert to PDBQT."""
@@ -1767,13 +2143,17 @@ class ProteinPreparation:
             with open(self.pdb_file, "r") as src, open(self.pdb_clean, "w") as dst:
                 for line in src:
                     if line.startswith("ATOM"):
-                        if len(line) > 21 and line[21].strip() in selected_chains:
-                            dst.write(line)
-                            kept_atoms += 1
+                        if len(line) > 21:
+                            chain = line[21].strip() or "A"
+                            if chain in selected_chains:
+                                dst.write(line)
+                                kept_atoms += 1
                     elif keep_hetero and line.startswith("HETATM"):
-                        if len(line) > 21 and line[21].strip() in selected_chains:
-                            dst.write(line)
-                            kept_atoms += 1
+                        if len(line) > 21:
+                            chain = line[21].strip() or "A"
+                            if chain in selected_chains:
+                                dst.write(line)
+                                kept_atoms += 1
                     elif line.startswith("HETATM"):
                         skipped_hetero += 1
                     elif line.startswith(("TER", "END")):
@@ -1813,7 +2193,55 @@ class ProteinPreparation:
             logger.error(f"Failed to prepare receptor: {e}")
             raise
 
+        self.selected_chains = selected_chains
+
         return selected_chains
+
+    def rebuild_receptor_keep_hetatm(self, keep_residues) -> str:
+        """Append the selected HETATM residues to the receptor PDBQT.
+
+        ``keep_residues`` is a sequence of ``(chain, resnum, resname)``
+        triples identifying the HETATM residues to retain (waters, metal
+        ions, cofactors). Appending (rather than re-converting the whole
+        receptor) preserves the protein charges already assigned by
+        OpenBabel. Returns the receptor PDBQT path.
+        """
+        if not os.path.exists(self.receptor_pdbqt):
+            raise FileNotFoundError(
+                f"Receptor PDBQT not found: {self.receptor_pdbqt}")
+
+        selected_chains = getattr(self, "selected_chains", None) or ["A"]
+        appended = _append_hetatm_to_receptor(
+            self.receptor_pdbqt, self.pdb_file, keep_residues, selected_chains)
+
+        if appended == 0:
+            raise ValueError(
+                "No matching HETATM residues found to keep in receptor")
+
+        _sanitize_receptor_pdbqt(self.receptor_pdbqt)
+        logger.info(
+            f"[✔] Receptor updated keeping {appended} HETATM atoms: {self.receptor_pdbqt}")
+        return self.receptor_pdbqt
+
+    def _protein_centroid_grid(self, padding: float = 6.0) -> Tuple[float, float, float, float, float, float]:
+        """Build a grid centered on the receptor bounding box when fpocket is unavailable."""
+        source = self.receptor_pdbqt
+        if not source or not os.path.exists(source):
+            source = self.pdb_clean if os.path.exists(self.pdb_clean) else self.pdb_file
+        try:
+            xs, ys, zs = parse_pdb_coords(source)
+        except (ValueError, IOError):
+            return 0, 0, 0, 24, 24, 24
+        cx = (min(xs) + max(xs)) / 2.0
+        cy = (min(ys) + max(ys)) / 2.0
+        cz = (min(zs) + max(zs)) / 2.0
+        sx = max(max(xs) - min(xs) + 2 * padding, 24.0)
+        sy = max(max(ys) - min(ys) + 2 * padding, 24.0)
+        sz = max(max(zs) - min(zs) + 2 * padding, 24.0)
+        logger.info(
+            f"[✔] Fallback grid centered on receptor centroid "
+            f"({cx:.2f}, {cy:.2f}, {cz:.2f}), size ({sx:.1f}, {sy:.1f}, {sz:.1f})")
+        return cx, cy, cz, sx, sy, sz
 
     def detect_pocket(self, pocket_spec: Optional[str] = None,
                       padding: float = 6.0) -> Tuple[float, float, float, float, float, float]:
@@ -1824,16 +2252,16 @@ class ProteinPreparation:
         try:
             run(["fpocket", "-f", fpocket_target])
         except Exception as e:
-            logger.warning(f"fpocket failed: {e}. Using fallback grid.")
-            return 0, 0, 0, 24, 24, 24
+            logger.warning(f"fpocket failed: {e}. Using centroid fallback grid.")
+            return self._protein_centroid_grid(padding)
 
         pocket_root = fpocket_target.replace(".pdb", "_out")
         pocket_dir = os.path.join(pocket_root, "pockets")
 
         if not os.path.exists(pocket_dir):
             logger.warning(
-                f"Pocket directory not found: {pocket_dir}. Using fallback grid.")
-            return 0, 0, 0, 24, 24, 24
+                f"Pocket directory not found: {pocket_dir}. Using centroid fallback grid.")
+            return self._protein_centroid_grid(padding)
 
         info_file = os.path.join(
             pocket_root, f"{Path(fpocket_target).stem}_info.txt"
@@ -1902,7 +2330,22 @@ class ProteinPreparation:
         selected_names = ", ".join(f"pocket{p['number']}" for p in selected)
         logger.info(
             f"[✔] Pocket selection: {selected_names} (padding={padding:g} Å)")
-        return self._get_pocket_info([p["path"] for p in selected], padding=padding)
+        cx, cy, cz, sx, sy, sz = self._get_pocket_info(
+            [p["path"] for p in selected], padding=padding)
+        dx, dy, dz = self._receptor_centroid()
+        return cx - dx, cy - dy, cz - dz, sx, sy, sz
+
+    def _receptor_centroid(self) -> Tuple[float, float, float]:
+        """Center of mass of the prepared receptor.
+
+        The receptor PDBQT is centered at the origin by ``obabel -c`` during
+        ``prepare_receptor``, while ``pdb_clean`` and fpocket's pocket files
+        keep the original coordinates. The fpocket-derived grid center must be
+        shifted by this centroid to land in the centered receptor frame.
+        """
+        source = self.pdb_clean if os.path.exists(self.pdb_clean) else self.pdb_file
+        xs, ys, zs = parse_pdb_coords(source)
+        return sum(xs) / len(xs), sum(ys) / len(ys), sum(zs) / len(zs)
 
     def _parse_fpocket_info(self, info_file: str) -> Dict[int, Dict]:
         """Parse fpocket's *_info.txt file into a pocket metadata map."""
@@ -2219,6 +2662,24 @@ def _extract_score(output: str) -> float:
     raise ValueError("No valid affinity found")
 
 
+def _parse_grid_triplet(value: str, label: str) -> Tuple[float, float, float]:
+    """Parse an explicit 'X,Y,Z' grid triplet. STRICT validation: any malformed
+    value raises, never silently falls back to auto-detection."""
+    parts = [p.strip() for p in value.split(',')]
+    if len(parts) != 3:
+        raise ValueError(
+            f"--{label} must be three comma-separated values 'X,Y,Z', got '{value}'")
+    try:
+        result = tuple(float(p) for p in parts)
+    except ValueError:
+        raise ValueError(
+            f"--{label} values must be floats, got '{value}'")
+    for v in result:
+        if v != v:  # NaN
+            raise ValueError(f"--{label} values must be finite floats, got '{value}'")
+    return result
+
+
 def _parse_grid_config(grid_file: str) -> Dict[str, float]:
     """Parse grid.conf file and extract center/size coordinates. STRICT validation."""
     config = {}
@@ -2257,6 +2718,27 @@ def _parse_grid_config(grid_file: str) -> Dict[str, float]:
     return config
 
 
+_VINA_THREADS_CACHE: Dict[str, bool] = {}
+
+
+def _vina_supports_threads(vina_path: str) -> bool:
+    """Probe whether the Vina binary accepts --threads. Cached per binary."""
+    if vina_path in _VINA_THREADS_CACHE:
+        return _VINA_THREADS_CACHE[vina_path]
+    supported = False
+    try:
+        result = subprocess.run(
+            [vina_path, "--help_advanced"],
+            capture_output=True, text=True, timeout=5,
+        )
+        help_text = (result.stdout or "") + (result.stderr or "")
+        supported = "--threads" in help_text
+    except Exception:
+        supported = False
+    _VINA_THREADS_CACHE[vina_path] = supported
+    return supported
+
+
 def _detect_vina_type(vina_path: str) -> str:
     """Detect if Vina is QuickVina or standard Vina by checking --help output.
     Returns: 'quickvina' or 'vina'
@@ -2285,11 +2767,12 @@ def _detect_vina_type(vina_path: str) -> str:
 
 def _build_vina_command(vina_path: str, receptor: str, ligand: str, out: str,
                         grid_config: Dict[str, float], vina_params: Dict,
-                        grid_file: str = None) -> list:
+                        grid_file: str = None, flex_file: str = None) -> list:
     """Build appropriate Vina command based on Vina type.
 
     QuickVina: uses --config file
     Standard Vina: uses --center_x/y/z and --size_x/y/z args
+    Flexible docking (--flex) is only supported by standard Vina.
     """
     vina_type = _detect_vina_type(vina_path)
 
@@ -2303,6 +2786,14 @@ def _build_vina_command(vina_path: str, receptor: str, ligand: str, out: str,
         "--energy_range", str(vina_params.get('energy_range', 3.0)),
         "--seed", str(vina_params.get('seed', 42))
     ]
+
+    if vina_params.get('threads'):
+        if _vina_supports_threads(vina_path):
+            cmd.extend(["--threads", str(vina_params['threads'])])
+        else:
+            logger.warning(
+                f"[!] Vina binary {vina_path} does not support --threads; "
+                "ignoring requested thread limit")
 
     if vina_type == 'quickvina':
         # QuickVina: use --config file (simpler)
@@ -2322,6 +2813,9 @@ def _build_vina_command(vina_path: str, receptor: str, ligand: str, out: str,
             cmd.extend(["--size_y", str(grid_config['size_y'])])
         if 'size_z' in grid_config:
             cmd.extend(["--size_z", str(grid_config['size_z'])])
+
+    if flex_file and vina_type != 'quickvina':
+        cmd.extend(["--flex", flex_file])
 
     return cmd
 
@@ -2358,7 +2852,7 @@ def dock_ligand(args_tuple: Tuple) -> Tuple[str, Optional[float], Dict]:
 
     """
     unique_id = uuid.uuid4().hex[:8]
-    receptor, lig, grid_file, dock_dir, vina_params = args_tuple
+    receptor, lig, grid_file, dock_dir, vina_params, flex_file = args_tuple
 
     name = os.path.basename(lig).replace(".pdbqt", "")
     out = os.path.join(dock_dir, name + "_out.pdbqt")
@@ -2372,6 +2866,11 @@ def dock_ligand(args_tuple: Tuple) -> Tuple[str, Optional[float], Dict]:
 
     if not os.path.exists(lig):
         error_msg = f"Ligand file missing: {lig}"
+        logger.error(f"❌ {name}: {error_msg}")
+        return name, None, {"status": "FAILED", "dock_file": out, "log_file": vina_log, "error": error_msg}
+
+    if flex_file and not os.path.exists(flex_file):
+        error_msg = f"Flexible receptor file missing: {flex_file}"
         logger.error(f"❌ {name}: {error_msg}")
         return name, None, {"status": "FAILED", "dock_file": out, "log_file": vina_log, "error": error_msg}
 
@@ -2423,7 +2922,8 @@ def dock_ligand(args_tuple: Tuple) -> Tuple[str, Optional[float], Dict]:
         try:
             # Build command for current Vina binary (auto-detects type)
             cmd = _build_vina_command(
-                vina_tool, receptor, lig, out, grid_config, vina_params, grid_file)
+                vina_tool, receptor, lig, out, grid_config, vina_params,
+                grid_file, flex_file)
 
             for extra_arg in vina_params.get("extra_args", []):
                 cmd.extend(shlex.split(extra_arg))
@@ -2543,8 +3043,13 @@ def dock_ligand(args_tuple: Tuple) -> Tuple[str, Optional[float], Dict]:
 def dock_all(receptor: str, ligands: List[str], grid_file: str,
              outdir: str, num_processes: int = 1,
              resume: bool = True,
-             vina_params: Optional[Dict] = None) -> Tuple[List[Tuple[str, Optional[float]]], DockingCheckpoint, Dict]:
-    """Dock all ligands with resume and metrics."""
+             vina_params: Optional[Dict] = None,
+             flex_file: Optional[str] = None) -> Tuple[List[Tuple[str, Optional[float]]], DockingCheckpoint, Dict]:
+    """Dock all ligands with resume and metrics.
+
+    ``flex_file`` optionally points to a Vina flexible-receptor PDBQT
+    (Phase 3 flexible docking).
+    """
     dock_dir = os.path.join(outdir, "docked")
     os.makedirs(dock_dir, exist_ok=True)
 
@@ -2567,7 +3072,23 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
             'energy_range': float(os.environ.get('VS_ENERGY_RANGE', 3.0)),
             'seed': int(os.environ.get('VS_SEED', 42)),
             'min_valid_affinity': float(os.environ.get('VS_MIN_VALID_AFFINITY', -1.0)),
+            'threads': (int(os.environ['VS_THREADS'])
+                        if os.environ.get('VS_THREADS') else None),
         }
+    else:
+        # Merge caller-provided params over defaults so a partial dict never
+        # causes a KeyError downstream.
+        defaults = {
+            'exhaustiveness': int(os.environ.get('VS_EXHAUSTIVENESS', 8)),
+            'binding_modes': int(os.environ.get('VS_BINDING_MODES', 9)),
+            'energy_range': float(os.environ.get('VS_ENERGY_RANGE', 3.0)),
+            'seed': int(os.environ.get('VS_SEED', 42)),
+            'min_valid_affinity': float(os.environ.get('VS_MIN_VALID_AFFINITY', -1.0)),
+            'threads': (int(os.environ['VS_THREADS'])
+                        if os.environ.get('VS_THREADS') else None),
+        }
+        defaults.update(vina_params)
+        vina_params = defaults
 
     checkpoint_file = os.path.join(outdir, ".docking_checkpoint.json")
     if not resume and os.path.exists(checkpoint_file):
@@ -2599,7 +3120,7 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
         results = checkpoint.get_results()
         return results, checkpoint, checkpoint.get_metrics()
 
-    args_list = [(receptor, lig, grid_file, dock_dir, vina_params)
+    args_list = [(receptor, lig, grid_file, dock_dir, vina_params, flex_file)
                  for lig in ligands_todo]
 
     results = []
@@ -2730,7 +3251,7 @@ class ResultsAnalyzer:
                                              "hbd", ""),
                                          meta.get("tpsa", ""), meta.get(
                                              "rotors", ""),
-                                         meta.get("zinc_url", _zinc_url(lig)),
+                                         meta.get("source_url", ""),
                                          metrics.get("dock_file", os.path.join(
                                              self.outdir, "docked", f"{lig}_out.pdbqt")),
                                          status])
@@ -2807,8 +3328,8 @@ class ResultsAnalyzer:
                         if meta:
                             f.write(
                                 f"   MW: {meta.get('mw', 0):.2f}; LogP: {meta.get('logp', 0):.2f}\n")
-                        if meta.get("zinc_url"):
-                            f.write(f"   ZINC: {meta['zinc_url']}\n")
+                        if meta.get("source_url"):
+                            f.write(f"   Source: {meta['source_url']}\n")
                         f.write(
                             f"   Docked file: {metrics.get('dock_file', os.path.join(self.outdir, 'docked', name + '_out.pdbqt'))}\n")
 
@@ -2910,7 +3431,7 @@ def main():
         "  PHASE 2: Smart preprocessing (water/metal/cofactor handling)\n"
         "  PHASE 3: Flexible receptor docking\n"
         "  PHASE 4: Consensus scoring (Vina + SMINA)\n"
-        "Original: ZINC API integration, SimScore, ADMET filtering",
+        "Original: PubChem library integration, SimScore, ADMET filtering",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
@@ -2922,7 +3443,7 @@ def main():
                         help="Output directory")
 
     parser.add_argument("--library", choices=["fda", "custom", "local"], default="local",
-                        help="Library: fda (ZINC), custom (ZINC filtered), local (manual SDF)")
+                        help="Library: fda (PubChem approved drugs), custom (PubChem filtered), local (manual SDF)")
     parser.add_argument("--mw-min", type=int, default=200, help="Min MW")
     parser.add_argument("--mw-max", type=int, default=500, help="Max MW")
     parser.add_argument("--logp-max", type=float, default=5.0,
@@ -2944,6 +3465,10 @@ def main():
                         help="Grid padding around selected pocket(s), Angstrom")
     parser.add_argument("--no-fpocket", action="store_true",
                         help="Skip fpocket, use default grid")
+    parser.add_argument("--grid-center", default=None,
+                        help="Explicit grid center 'X,Y,Z' (Angstrom), e.g. 12.3,4.5,6.7. Overrides auto-detection")
+    parser.add_argument("--grid-size", default=None,
+                        help="Explicit grid box size 'SX,SY,SZ' (Angstrom), e.g. 22.5,22.5,22.5. Overrides auto-detection")
 
     parser.add_argument("-p", "--processes", type=int,
                         default=1, help="Parallel processes")
@@ -2955,6 +3480,8 @@ def main():
                         default=3.0, help="Vina energy range (kcal/mol)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
+    parser.add_argument("--threads", type=int, default=None,
+                        help="Vina threads (default: all cores; e.g. 2 to bound CPU when docking in parallel)")
     parser.add_argument("--min-valid-affinity", type=float, default=-1.0,
                         help="Reject docking scores >= this threshold (kcal/mol)")
     parser.add_argument(
@@ -3066,8 +3593,9 @@ def main():
         protein_prep.prepare_receptor(chain, keep_hetero=args.keep_hetero)
 
         if args.no_fpocket:
-            cx, cy, cz, sx, sy, sz = 0, 0, 0, 24, 24, 24
-            logger.warning("[!] Using fallback grid (fpocket skipped)")
+            cx, cy, cz, sx, sy, sz = protein_prep._protein_centroid_grid(
+                padding=args.padding)
+            logger.warning("[!] Using centroid fallback grid (fpocket skipped)")
         else:
             cx, cy, cz, sx, sy, sz = protein_prep.detect_pocket(
                 pocket_spec=args.pockets,
@@ -3076,6 +3604,16 @@ def main():
 
         logger.info(f"[*] Grid center: {cx:.2f}, {cy:.2f}, {cz:.2f}")
         logger.info(f"[*] Grid size: {sx:.2f}, {sy:.2f}, {sz:.2f}")
+
+        if args.grid_center:
+            cx, cy, cz = _parse_grid_triplet(args.grid_center, "grid-center")
+            logger.info(
+                f"[*] Grid center overridden: {cx:.2f}, {cy:.2f}, {cz:.2f}")
+        if args.grid_size:
+            sx, sy, sz = _parse_grid_triplet(args.grid_size, "grid-size")
+            logger.info(
+                f"[*] Grid size overridden: {sx:.2f}, {sy:.2f}, {sz:.2f}")
+
         for axis, size in (("x", sx), ("y", sy), ("z", sz)):
             if size < 15 or size > 40:
                 logger.warning(
@@ -3086,52 +3624,76 @@ def main():
         # ===== PHASE 2: Smart Preprocessing (Optional) =====
         if args.keep_waters or args.detect_metals or args.detect_cofactors:
             logger.info("[PHASE 2] Smart Preprocessing")
-            receptor_pdbqt = protein_prep.receptor_pdbqt
+            # Detect on the ORIGINAL PDB: HETATM records (waters, metals,
+            # cofactors) are stripped from pdb_clean during receptor cleaning.
+            source = protein_prep.pdb_file
+
+            keep_residues = []
+            waters = metals = cofactors = []
 
             if args.keep_waters:
                 logger.info(
                     "[*] Detecting water molecules near binding site...")
-                waters = detect_water_molecules(protein_prep.pdb_clean, (cx, cy, cz),
+                waters = detect_water_molecules(source, (cx, cy, cz),
                                                 distance_threshold=args.water_distance)
-                logger.info(
-                    f"[✔] Found {len(waters)} waters. (Implementation: manual editing recommended)")
+                if waters:
+                    logger.info(
+                        f"[✔] Found {len(waters)} water residue(s) within "
+                        f"{args.water_distance}A of the binding site; keeping them in receptor")
+                    keep_residues += [
+                        (w["chain"], w["resnum"], w["resname"]) for w in waters]
+                else:
+                    logger.info("[*] No waters detected near binding site")
 
             if args.detect_metals:
                 logger.info("[*] Detecting metal ions...")
-                metals = detect_metal_ions(protein_prep.pdb_clean)
+                metals = detect_metal_ions(source)
                 if metals:
-                    logger.info(f"[✔] Found {len(metals)} metal ions:")
+                    logger.info(
+                        f"[✔] Found {len(metals)} metal ion(s); keeping them in receptor:")
                     for metal in metals:
                         logger.info(
-                            f"   - {metal['name']} ({metal['element']}) at residue {metal['residue']}")
+                            f"   - {metal['name']} ({metal['element']}) chain {metal['chain']} residue {metal['resnum']}")
+                    keep_residues += [
+                        (m["chain"], m["resnum"], m["resname"]) for m in metals]
                 else:
                     logger.info("[*] No metal ions detected")
 
             if args.detect_cofactors:
                 logger.info("[*] Detecting cofactors...")
-                cofactors = detect_cofactors(protein_prep.pdb_clean)
+                cofactors = detect_cofactors(source)
                 if cofactors:
-                    logger.info(f"[✔] Found {len(cofactors)} cofactors:")
+                    logger.info(
+                        f"[✔] Found {len(cofactors)} cofactor(s); keeping them in receptor:")
                     for cof in cofactors:
                         logger.info(
-                            f"   - {cof['name']} at residue {cof['residue']}")
+                            f"   - {cof['name']} chain {cof['chain']} residue {cof['resnum']}")
+                    keep_residues += [
+                        (c["chain"], c["resnum"], c["name"]) for c in cofactors]
                 else:
                     logger.info("[*] No cofactors detected")
 
+            keep_residues = list(dict.fromkeys(keep_residues))
+            if keep_residues:
+                protein_prep.rebuild_receptor_keep_hetatm(keep_residues)
+
         # ===== PHASE 3: Flexible Receptor Setup (Optional) =====
         flexible_residues = []
+        flex_file = None
+        rigid_receptor = None
         if args.flexibility and args.flexibility > 0:
             logger.info(
                 f"[PHASE 3] Flexible Receptor Setup (Level {args.flexibility}/10)")
 
             if args.flexible_residues:
-                flexible_residues = args.flexible_residues.split(',')
+                flexible_residues = [
+                    r.strip() for r in args.flexible_residues.split(',') if r.strip()]
                 logger.info(
                     f"[*] Using specified flexible residues: {flexible_residues}")
             elif args.auto_flexible:
-                receptor_pdbqt = protein_prep.receptor_pdbqt
-                flexible_residues = detect_flexible_residues(receptor_pdbqt, (cx, cy, cz),
-                                                             radius=8.0, max_residues=args.auto_flexible)
+                flexible_residues = detect_flexible_residues(
+                    protein_prep.receptor_pdbqt, (cx, cy, cz),
+                    radius=8.0, max_residues=args.auto_flexible)
                 logger.info(
                     f"[*] Auto-selected {len(flexible_residues)} flexible residues near binding site")
             else:
@@ -3141,8 +3703,17 @@ def main():
             if flexible_residues:
                 logger.info(
                     f"[✔] Flexible residues: {', '.join(flexible_residues)}")
-                logger.info(
-                    "[*] Note: Flexible docking with Vina requires modified PDBQT format")
+                flex_file = build_flexible_residue_pdbqt(
+                    protein_prep.receptor_pdbqt, flexible_residues, args.output)
+                if not flex_file:
+                    logger.warning(
+                        "[!] Flexible receptor could not be built; running rigid docking")
+                else:
+                    # Vina requires flexible residues to be excluded from the
+                    # rigid receptor passed to --receptor.
+                    rigid_receptor = _remove_residues_from_pdbqt(
+                        protein_prep.receptor_pdbqt, flexible_residues,
+                        os.path.join(args.output, "rigid.pdbqt"))
 
         # ===== STEP 3: Docking =====
         logger.info("[3/6] Docking with Advanced Parameters")
@@ -3155,13 +3726,69 @@ def main():
             'seed': args.seed,
             'min_valid_affinity': args.min_valid_affinity,
             'extra_args': args.vina_extra,
+            'threads': args.threads,
         }
 
+        dock_receptor = rigid_receptor if flex_file else protein_prep.receptor_pdbqt
+
         results, checkpoint, metrics_dict = dock_all(
-            protein_prep.receptor_pdbqt, ligands, protein_prep.grid_conf,
+            dock_receptor, ligands, protein_prep.grid_conf,
             args.output, num_processes=args.processes, resume=resume,
-            vina_params=vina_params
+            vina_params=vina_params, flex_file=flex_file
         )
+
+        # ===== PHASE 4: Consensus Scoring (Optional) =====
+        if args.consensus or args.smina_only:
+            logger.info("[PHASE 4] Consensus Scoring")
+            if not shutil.which(SMINA):
+                if args.smina_only:
+                    raise RuntimeError(
+                        "--smina-only requested but SMINA binary not found in PATH")
+                logger.warning(
+                    "[!] SMINA not found - continuing with Vina-only ranking")
+            else:
+                grid_box = (cx, cy, cz, sx, sy, sz)
+                smina_scores = _run_smina_scoring(
+                    dock_receptor, ligands, args.output, grid_box, vina_params)
+
+                if args.smina_only:
+                    smina_file = os.path.join(args.output, "smina_ranking.csv")
+                    smina_rows = sorted(
+                        smina_scores.items(), key=lambda kv: kv[1])
+                    with open(smina_file, "w", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["Ligand", "SMINA_Affinity"])
+                        for name, score in smina_rows:
+                            writer.writerow([name, _score_csv(score)])
+                    logger.info(
+                        f"[✔] SMINA-only ranking saved: {smina_file} "
+                        f"({len(smina_rows)} ligands)")
+                else:
+                    consensus_rows = []
+                    for name, vina_score, _ in results:
+                        smina_score = smina_scores.get(name)
+                        if vina_score is None or smina_score is None:
+                            continue
+                        row = consensus_rank(vina_score, smina_score)
+                        consensus_rows.append((name, row))
+                    consensus_file = os.path.join(
+                        args.output, "consensus_ranking.csv")
+                    with open(consensus_file, "w", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(
+                            ["Ligand", "Vina_Affinity", "SMINA_Affinity",
+                             "Consensus", "Agreement"])
+                        for name, row in sorted(
+                                consensus_rows,
+                                key=lambda kv: kv[1]["consensus"]):
+                            writer.writerow([
+                                name, _score_csv(row["vina"]),
+                                _score_csv(row["smina"]),
+                                _score_csv(row["consensus"]),
+                                f"{row['agreement']:.1f}%"])
+                    logger.info(
+                        f"[✔] Consensus ranking saved: {consensus_file} "
+                        f"({len(consensus_rows)} ligands)")
 
         # ===== STEP 4: Results Analysis =====
         logger.info("[4/6] Results Analysis + Metrics")
@@ -3197,19 +3824,19 @@ def main():
                 except Exception as e:
                     logger.warning(f"Could not save clustering data: {e}")
 
-            # Generate HTML report
-            if args.html_report:
-                logger.info("[*] Generating professional HTML report...")
-                ranking_csv = os.path.join(args.output, 'ranking.csv')
-                generate_html_report(ranking_csv, os.path.join(
-                    args.output, "docked"), html_report_file)
-
         # ===== STEP 5: Save Results =====
         logger.info("[5/6] Saving Results")
         analyzer = ResultsAnalyzer(args.output, top_n=args.top_n)
         analyzer.save_ranking(results, mode="extended",
                               metrics_dict=metrics_dict)
         analyzer.save_metrics_report(results, metrics_dict)
+
+        # Generate the HTML report AFTER ranking.csv exists.
+        if args.html_report:
+            logger.info("[*] Generating professional HTML report...")
+            ranking_csv = os.path.join(args.output, 'ranking.csv')
+            generate_html_report(ranking_csv, os.path.join(
+                args.output, "docked"), html_report_file)
 
         logger.info("=" * 70)
         logger.info("PIPELINE COMPLETED SUCCESSFULLY (v2.0)")

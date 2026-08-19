@@ -104,5 +104,13 @@ COPY --from=fpocket_builder \
     /src/fpocket/repo/bin/tpocket \
     /usr/local/bin/
 
+# Run as a non-root user for safety
+RUN useradd --create-home --uid 1000 dockuser
+RUN mkdir -p /work && chown -R dockuser:dockuser /work /autodocker
+
+USER dockuser
+WORKDIR /work
+VOLUME ["/work"]
+
 # Smallest practical default
 ENTRYPOINT ["/autodocker/entry.sh"]

@@ -1,0 +1,93 @@
+# Benchmarks
+
+Scientific validation of the autodocker pipeline against known-good Vina
+results. All three benchmarks are reproducible from committed scripts; the
+input datasets (PDBbind core set, DUD-E) are downloaded on demand.
+
+Run the full suite:
+
+```bash
+python3 scripts/benchmark_redock.py --data-dir /tmp/opencode/bm/pdbbind_core_set_2016 \
+    --outdir benchmarks/results/redock --processes 8 --seed 42
+python3 scripts/benchmark_vina_parity.py --workdir benchmarks/results/redock \
+    --outdir benchmarks/results/parity
+python3 scripts/benchmark_enrichment.py --targets akt1,braf,aldr \
+    --workdir /tmp/opencode/dude --outdir benchmarks/results/enrichment \
+    --max-actives 50 --max-decoys 100 --exhaustiveness 4 \
+    --processes 8 --seed 42
+```
+
+## J1 — Re-docking (docking power) — PASS
+
+**Protocol.** 40 PDBbind v2016 core-set complexes (crystal receptor + bound
+ligand) are re-docked with the autodocker pipeline. The grid is centered on
+the crystal-ligand heavy-atom centroid (size = max 22.5 Å, ligand extent +
+2×6 Å padding), exhaustiveness 8, up to 9 binding modes, energy range 3.0,
+fixed seed 42, `--no-fpocket`. Because the runner centers the receptor at the
+origin (`obabel -c`), both the grid center and the crystal-pose reference are
+translated into the centered frame. Success = predicted pose within 2 Å RMSD
+of the crystal pose (`obrms`). 14 complexes with >6000 receptor ATOM records
+(giant oligomeric assemblies) are skipped to keep the runtime reasonable.
+
+**Results** (26 docked, 0 failed):
+
+| Metric | Value |
+|---|---|
+| Success, top-1 pose (≤2 Å) | **76.9%** (20/26) |
+| Success, best-of-9 modes (≤2 Å) | **96.2%** (25/26) |
+| Median RMSD, top-1 | **0.79 Å** |
+| Median RMSD, best-of-9 | **0.79 Å** |
+
+Both top-1 and best-mode success exceed the Vina baseline target of ≥60%,
+confirming that the pipeline does not degrade docking accuracy.
+
+Reproduce: `scripts/benchmark_redock.py`; per-complex data in
+`benchmarks/results/redock/{results.csv,summary.json}`.
+
+## J2 — DUD-E enrichment (screening power) — PASS
+
+**Protocol.** Three DUD-E targets (akt1, braf, aldr) are screened: 50 actives +
+100 decoys per target (sampled, seeded), prepared with Open Babel and docked
+through the autodocker pipeline at exhaustiveness 4, single mode, seeded,
+8 processes. Receptor grid via fpocket with the bug-fixed frame alignment
+(`detect_pocket` grid center shifted into the centered receptor frame, see
+`runner.py::_receptor_centroid`). AUC (tie-aware, P(active ranks above
+decoy)) and enrichment factors EF1%/EF5% are computed from predicted binding
+affinities.
+
+**Results:**
+
+| Target | AUC | EF1% | EF5% |
+|---|---|---|---|
+| akt1 | 0.589 | 2.0 | 1.6 |
+| braf | 0.852 | 4.0 | 3.2 |
+| aldr | 0.786 | 2.0 | 2.8 |
+
+Mean AUC 0.74 — clear separation of actives from decoys, in the range
+expected for Vina-based screening. Note the two runner bugs this exercise
+surfaced and fixed: blank chain-ID PDB handling (`prepare_receptor`) and the
+fpocket grid-frame mismatch.
+
+Reproduce: `scripts/benchmark_enrichment.py`; results in
+`benchmarks/results/enrichment/{enrichment.csv,summary.json}`.
+
+## J3 — Raw Vina parity (no hidden corruption) — PASS
+
+**Protocol.** For each of the 26 re-docked complexes, the exact `vina`
+command recorded in each `*_vina.log` header is re-executed against raw Vina
+1.2.5 (output to a temp file). The per-mode `REMARK VINA RESULT` affinities
+of the pipeline run and the raw run are compared mode-for-mode.
+
+**Result:** 26/26 complexes, all **222 modes** matched the raw Vina affinity
+exactly (`max_diff = 0.0 kcal/mol`). The pipeline passes Vina's own inputs
+through unchanged; every affinity number it reports is bit-for-bit the raw
+Vina score.
+
+Reproduce: `scripts/benchmark_vina_parity.py`; per-complex data in
+`benchmarks/results/parity/parity.csv`.
+
+---
+
+**Environment:** Vina 1.2.5 (no `--threads` support, so parallelism = 8
+processes), Open Babel 3.x, `obrms`, Linux x86-64. Result files are
+deterministic for fixed seeds.

@@ -1,0 +1,41 @@
+name: Test
+
+on:
+  push:
+    paths:
+    - '**.py'
+    - '**.sh'
+    - '**/deps'
+    - Dockerfile
+    - requirements.txt
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: true
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends openbabel openbabel-dev
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.12"
+
+    - name: Install Python dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest
+
+    - name: Run pytest
+      run: python -m pytest tests/ -q
+      env:
+        VS_COMMAND_TIMEOUT: "60"

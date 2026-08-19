@@ -1,1 +1,34 @@
-!scripts
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docking run artifacts
+*/ligands/
+*/results/
+*/out/
+*_out/
+*.pdbqt
+*.sdf
+*.log
+
+# Submodules are cloned lazily; keep the tracker but never vendor trees
+tools/*/repo/
+
+# Vendored fpocket was removed; never re-add it (build via tools/fpocket submodule)
+fpocket/
