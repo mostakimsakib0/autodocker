@@ -1,0 +1,25 @@
+{
+  "creators": [
+    {
+      "name": "Sakib, Mostakim",
+      "orcid": "0000-0000-0000-0000",
+      "affiliation": "Independent researcher"
+    }
+  ],
+  "title": "AutoDocker: reproducible, containerized virtual screening with AutoDock Vina",
+  "description": "AutoDocker is a containerized virtual-screening pipeline that prepares proteins (chain selection, fpocket pocket detection, receptor PDBQT), prepares ligands (local SDF/MOL2/PDB/PDBQT files or PubChem downloads), docks with AutoDock Vina (with QuickVina 2 and SMINA options), and produces reproducible ranked reports (ranking.csv, Top_hits.txt, metrics.txt, and an optional HTML report with an embedded NGL 3D viewer).",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "MIT",
+  "keywords": [
+    "molecular docking",
+    "virtual screening",
+    "AutoDock Vina",
+    "QuickVina",
+    "OpenBabel",
+    "fpocket",
+    "drug discovery",
+    "reproducibility"
+  ],
+  "version": "1.0.0"
+}

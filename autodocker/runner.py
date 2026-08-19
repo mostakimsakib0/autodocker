@@ -40,6 +40,8 @@ Workflow:
 """
 import uuid
 import argparse
+
+__version__ = "1.0.0"
 import subprocess
 import os
 import shutil
@@ -3776,6 +3778,8 @@ def main():
 
     parser.add_argument("-v", "--verbose",
                         action="store_true", help="Debug logging")
+    parser.add_argument("--version", action="version",
+                        version=f"AutoDocker {__version__}")
 
     args = parser.parse_args()
 

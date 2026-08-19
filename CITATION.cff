@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use AutoDocker in your research, please cite it as below."
+title: "AutoDocker"
+abstract: >-
+  AutoDocker is a containerized virtual-screening pipeline that prepares
+  proteins (chain selection, fpocket pocket detection, receptor PDBQT),
+  prepares ligands (local files or PubChem downloads), docks with AutoDock
+  Vina (QuickVina 2 and SMINA options), and produces reproducible ranked
+  reports including an optional HTML report with an embedded NGL 3D viewer.
+keywords:
+  - molecular docking
+  - virtual screening
+  - AutoDock Vina
+  - OpenBabel
+  - fpocket
+  - drug discovery
+  - reproducibility
+license: MIT
+authors:
+  - family-names: Sakib
+    given-names: Mostakim
+    orcid: "https://orcid.org/0000-0000-0000-0000"
