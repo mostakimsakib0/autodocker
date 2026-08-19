@@ -55,6 +55,7 @@ import math
 import html
 import statistics
 import fnmatch
+import glob
 from multiprocessing import Pool, cpu_count as mp_cpu_count
 from pathlib import Path
 from datetime import datetime
@@ -196,7 +197,239 @@ def cluster_poses(poses_dir: str, rmsd_threshold: float = 2.0) -> Dict[str, List
     return clusters
 
 
-def generate_html_report(results_csv: str, poses_dir: str, output_file: str) -> None:
+NGL_CDN_URL = "https://cdn.jsdelivr.net/npm/ngl@2.4.0/dist/ngl.min.js"
+
+# PDB lines that are safe/meaningful to NGL (PDBQT adds ROOT/BRANCH
+# bookkeeping that NGL's PDB parser does not understand).
+_PDBQT_STRIP_PREFIXES = ("ROOT", "ENDROOT", "BRANCH", "ENDBRANCH", "TORSDOF")
+_PDBQT_KEEP_PREFIXES = ("ATOM", "HETATM", "MODEL", "ENDMDL", "REMARK",
+                        "CONECT", "HEADER", "TITLE", "COMPND", "TER",
+                        "MASTER", "END")
+
+
+def _pdbqt_to_pdb(pdbqt_path: str, out_path: str) -> bool:
+    """Convert a (possibly multi-model) PDBQT ligand/receptor to plain PDB.
+
+    NGL does not parse PDBQT directly, so we emit a faithful PDB by
+    dropping the ROOT/BRANCH/TORSDOF bookkeeping records. Returns True on
+    success.
+    """
+    try:
+        written = False
+        with open(pdbqt_path) as src, open(out_path, "w") as dst:
+            for line in src:
+                s = line.strip()
+                if s.startswith(_PDBQT_STRIP_PREFIXES):
+                    continue
+                if s.startswith(_PDBQT_KEEP_PREFIXES):
+                    dst.write(line)
+                    written = True
+        return written and os.path.getsize(out_path) > 0
+    except Exception as e:
+        logger.warning(f"[!] Could not convert {pdbqt_path} for viewer: {e}")
+        return False
+
+
+def _sanitize_viewer_name(name: str, taken: Set[str]) -> str:
+    """Return a filesystem-safe unique stem for HTML viewer artifacts."""
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(name)).strip("_") or "ligand"
+    stem = stem[:80]
+    candidate, i = stem, 2
+    while candidate in taken:
+        candidate = f"{stem}_{i}"
+        i += 1
+    taken.add(candidate)
+    return candidate
+
+
+def _fetch_ngljs() -> Optional[bytes]:
+    """Download the NGL viewer bundle so the report is self-contained.
+
+    Falls back to a CDN <script> reference if the download fails (the
+    report then needs a network connection when viewed).
+    """
+    for attempt in (1, 2):
+        try:
+            return _http_get_bytes(NGL_CDN_URL, timeout=60)
+        except Exception as e:
+            logger.debug(f"NGL download attempt {attempt} failed: {e}")
+            time.sleep(1)
+    logger.warning(
+        "[!] Could not bundle NGL viewer (network?). Report will reference "
+        "the jsDelivr CDN, so it needs internet when opened.")
+    return None
+
+
+def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
+                          receptor_pdbqt: Optional[str], output_file: str) -> str:
+    """Create the interactive NGL 3D viewer HTML section.
+
+    Stages receptor + best pose of each of the top 10 hits into
+    ``<output_dir>/viewer/`` and embeds a picker + NGL stage in the report.
+    An empty string is returned when nothing viewable exists.
+    """
+    top = ranked_ligands[:10]
+    if not top:
+        return ""
+
+    out_dir = os.path.dirname(os.path.abspath(output_file))
+    viewer_dir = os.path.join(out_dir, "viewer")
+    try:
+        os.makedirs(viewer_dir, exist_ok=True)
+    except OSError as e:
+        logger.warning(f"[!] Could not create viewer dir: {e}")
+        return ""
+
+    # 1) Bundled NGL (or CDN fallback).
+    ngl_js = _fetch_ngljs()
+    ngl_local = os.path.join(viewer_dir, "ngl.min.js")
+    script_src = NGL_CDN_URL
+    if ngl_js is not None:
+        try:
+            with open(ngl_local, "wb") as f:
+                f.write(ngl_js)
+            script_src = "viewer/ngl.min.js"
+            logger.info("[✔] Bundled NGL viewer (ngl.min.js, "
+                        f"{len(ngl_js) // 1024} KB)")
+        except OSError as e:
+            logger.warning(f"[!] Could not write bundled NGL: {e}")
+
+    # 2) Receptor PDB.
+    receptor_rel = "viewer/receptor.pdb"
+    if receptor_pdbqt and os.path.exists(receptor_pdbqt):
+        if not _pdbqt_to_pdb(receptor_pdbqt,
+                             os.path.join(viewer_dir, "receptor.pdb")):
+            receptor_rel = ""
+
+    # 3) Best pose PDB per top hit.
+    used_names: Set[str] = set()
+    hits = []
+    for lig, affinity in top:
+        name = str(lig.get('Ligand', lig) if isinstance(lig, dict) else lig)
+        if not os.path.isdir(poses_dir):
+            break
+        # Docked output is <name>_out.pdbqt (multi-model). Prefer the
+        # first model as the representative (best) pose.
+        candidates = sorted(glob.glob(os.path.join(
+            poses_dir, f"{name}_out.pdbqt")))
+        if not candidates:
+            candidates = sorted(glob.glob(os.path.join(
+                poses_dir, f"{name}_pose_*.pdbqt")))
+        if not candidates:
+            continue
+        stem = _sanitize_viewer_name(name, used_names)
+        pose_pdb = os.path.join(viewer_dir, f"{stem}_pose.pdb")
+        if not _pdbqt_to_pdb(candidates[0], pose_pdb):
+            continue
+        hits.append({
+            "name": name,
+            "affinity": affinity,
+            "pose": f"viewer/{stem}_pose.pdb",
+        })
+
+    if not hits:
+        return ""
+
+    hits_json = json.dumps(hits).replace("</", "<\\/")
+
+    section = f"""
+    <div class="section">
+        <h2>🖥️ 3D Structure Viewer</h2>
+        <p><em>Interactive NGL viewer — receptor (cartoon) with the best docked pose of each top hit.</em></p>
+        <div style="margin-bottom:10px;">
+            <label for="viewer-select" style="font-weight:bold;">View hit:</label>
+            <select id="viewer-select" onchange="showHit()">
+            </select>
+            <button type="button" onclick="toggleSpin()" style="margin-left:8px;">Spin</button>
+            <button type="button" onclick="resetView()" style="margin-left:8px;">Reset view</button>
+        </div>
+        <div id="viewer-message" style="margin-bottom:8px;color:#e67e22;"></div>
+        <div id="viewer-container" style="width:100%;height:520px;background:#0b1622;border-radius:5px;"></div>
+        <p style="font-size:12px;color:#7f8c8d;margin-top:8px;">
+            ⚠️ For the viewer to work, open this report over <code>http://</code>
+            (e.g. <code>python3 -m http.server</code> in the results folder) — browsers
+            block local file access from <code>file://</code> pages.
+        </p>
+    </div>
+
+    <div class="section" id="viewer-log" style="display:none;">
+        <h2>🔍 Viewer Diagnostics</h2>
+        <pre id="viewer-error"></pre>
+    </div>
+
+    <script src="{script_src}"></script>
+    <script>
+    (function () {{
+        var receptorFile = "{receptor_rel}";
+        var hits = {hits_json};
+        var stage = null;
+
+        function showHit() {{
+            var sel = document.getElementById("viewer-select");
+            var name = sel.value;
+            var msg = document.getElementById("viewer-message");
+            var selected = null;
+            for (var i = 0; i < hits.length; i++) {{
+                if (hits[i].name === name) selected = hits[i];
+            }}
+            if (!selected) return;
+            if (typeof NGL === "undefined") {{
+                msg.textContent = "NGL viewer failed to load (offline or blocked). Check network/CDN access.";
+                return;
+            }}
+            if (stage) {{ stage.dispose(); }}
+            var holder = document.getElementById("viewer-container");
+            stage = new NGL.Stage("viewer-container", {{ backgroundColor: "#0b1622" }});
+            msg.textContent = "Loading " + name + "…";
+            var jobs = [];
+            if (receptorFile) {{
+                jobs.push(stage.loadFile(receptorFile).then(function (o) {{
+                    o.addRepresentation("cartoon", {{ colorScheme: "chainid" }});
+                }}));
+            }}
+            jobs.push(stage.loadFile(selected.pose).then(function (o) {{
+                o.addRepresentation("ball+stick", {{
+                    colorScheme: "element",
+                    aspectRatio: 2.2,
+                    multipleBond: "symmetric",
+                }});
+            }}));
+            Promise.all(jobs).then(function () {{
+                stage.autoView();
+                msg.textContent = "";
+            }}).catch(function (err) {{
+                msg.textContent = "Viewer error: " + err.message;
+                document.getElementById("viewer-log").style.display = "";
+                document.getElementById("viewer-error").textContent =
+                    err.stack || String(err);
+            }});
+        }}
+
+        function toggleSpin() {{
+            if (stage) stage.toggleSpin();
+        }}
+        function resetView() {{
+            if (stage) stage.autoView();
+        }}
+
+        window.addEventListener("load", function () {{
+            var sel = document.getElementById("viewer-select");
+            hits.forEach(function (h) {{
+                var opt = document.createElement("option");
+                opt.value = h.name;
+                opt.textContent = h.name + " (" + (h.affinity != null ? h.affinity.toFixed(2) : "?") + " kcal/mol)";
+                sel.appendChild(opt);
+            }});
+            if (hits.length) {{ sel.value = hits[0].name; showHit(); }}
+        }});
+    }})();
+    </script>
+"""
+    return section
+
+
+def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
+                         receptor_pdbqt: Optional[str] = None) -> None:
     """Generate professional HTML report with charts and clustering data."""
 
     logger.info("[*] Generating HTML report...")
@@ -356,13 +589,18 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str) -> 
     html_content += """
         </table>
     </div>
+"""
 
+    # Interactive 3D viewer (NGL) for the top hits + receptor.
+    html_content += _build_viewer_section(
+        ranked_ligands, poses_dir, receptor_pdbqt, output_file)
+
+    html_content += """
     <div class="section">
         <h2>📈 Affinity Distribution</h2>
         <p><em>Histogram of binding affinities across all ligands</em></p>
         <pre>
 """
-
     # Create simple histogram
     if valid_affinities:
         bins = 10
@@ -3836,7 +4074,8 @@ def main():
             logger.info("[*] Generating professional HTML report...")
             ranking_csv = os.path.join(args.output, 'ranking.csv')
             generate_html_report(ranking_csv, os.path.join(
-                args.output, "docked"), html_report_file)
+                args.output, "docked"), html_report_file,
+                receptor_pdbqt=protein_prep.receptor_pdbqt)
 
         logger.info("=" * 70)
         logger.info("PIPELINE COMPLETED SUCCESSFULLY (v2.0)")
