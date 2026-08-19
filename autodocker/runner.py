@@ -1189,32 +1189,41 @@ def consensus_rank(vina_affinity: float, smina_affinity: Optional[float]) -> Dic
     }
 
 
-def find_tool(*names: str) -> str:
+def find_tool(*names: str) -> Optional[str]:
+    """Return the path of the first *name* found on PATH, or None.
+
+    Returns None when nothing is found instead of a placeholder name so
+    callers can reliably distinguish 'found' from 'not found'.
+    """
     for name in names:
         path = shutil.which(name)
         if path:
             return path
-    return names[-1]
+    return None
 
 
 # Tool paths (prefer modern Vina for consistency)
-OBABEL = find_tool("obabel", "OpenBabel", "OpenBabel.exe", "obabel")
+OBABEL = find_tool("obabel", "OpenBabel", "OpenBabel.exe")
 # Prefer modern Vina for reproducibility/consistency
 VINA_PRIMARY = find_tool("vina", "vina.exe", "qvina02", "qvina2", "qvina")
-VINA_FALLBACK = find_tool("qvina02", "qvina2") if os.environ.get(
-    "VS_ENABLE_QVINA_FALLBACK", "0") == "1" else VINA_PRIMARY
+if os.environ.get("VS_ENABLE_QVINA_FALLBACK", "0") == "1":
+    VINA_FALLBACK = find_tool("qvina02", "qvina2") or VINA_PRIMARY
+else:
+    VINA_FALLBACK = VINA_PRIMARY
 VINA = VINA_PRIMARY  # Start with primary tool
 # Optional for consensus scoring
-SMINA = find_tool("smina", "smina.exe", "smina")
+SMINA = find_tool("smina", "smina.exe")
 COMMAND_TIMEOUT = int(os.environ.get("VS_COMMAND_TIMEOUT", "900"))
 
 # Verify tools exist - STRICT validation
-for tool_name, tool_path in [("obabel", OBABEL), ("vina", VINA)]:
-    if not shutil.which(tool_path):
-        raise RuntimeError(
-            f"Critical tool '{tool_name}' not found in PATH. Ensure it is installed and in PATH.")
+missing = [name for name, path in (("obabel", OBABEL), ("vina", VINA_PRIMARY))
+           if path is None]
+if missing:
+    raise RuntimeError(
+        f"Critical tool(s) not found in PATH: {', '.join(missing)}. "
+        "Ensure they are installed and in PATH.")
 
-if not shutil.which(SMINA):
+if SMINA is None:
     logger.info("SMINA not found - consensus scoring will be skipped")
 
 # =============================
@@ -1231,7 +1240,7 @@ def run_smina_docking(
 ) -> Optional[float]:
     """Run SMINA docking and return best affinity."""
 
-    if not shutil.which(SMINA):
+    if SMINA is None:
         logger.debug("SMINA not available")
         return None
 
@@ -3791,7 +3800,7 @@ def main():
     _log_tool_version(VINA_PRIMARY, "Primary docking tool")
     if VINA_FALLBACK != VINA_PRIMARY:
         _log_tool_version(VINA_FALLBACK, "Fallback docking tool")
-    if shutil.which(SMINA):
+    if SMINA:
         _log_tool_version(SMINA, "SMINA")
 
     try:
@@ -3978,7 +3987,7 @@ def main():
         # ===== PHASE 4: Consensus Scoring (Optional) =====
         if args.consensus or args.smina_only:
             logger.info("[PHASE 4] Consensus Scoring")
-            if not shutil.which(SMINA):
+            if SMINA is None:
                 if args.smina_only:
                     raise RuntimeError(
                         "--smina-only requested but SMINA binary not found in PATH")
