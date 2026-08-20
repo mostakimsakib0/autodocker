@@ -171,4 +171,4 @@ results in `BENCHMARKS.md`):
 
 - Source code: https://github.com/mostakimsakib0/autodocker
 - MIT License
-- Archived version: https://doi.org/10.5281/zenodo.22035569
+- Archived version: https://doi.org/10.5281/zenodo.22035714
