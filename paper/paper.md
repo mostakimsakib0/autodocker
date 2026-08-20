@@ -13,7 +13,6 @@ authors:
     orcid: 0009-0001-7176-2016
     affiliation: 1
   - name: Ahmad Hasan Mubashshir
-    orcid: 0000-0000-0000-0000
     affiliation: 1
 affiliations:
   - name: Independent researcher
