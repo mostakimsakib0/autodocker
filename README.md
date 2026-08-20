@@ -1,4 +1,4 @@
-# autodocker — Virtual Screening Pipeline
+# Autodocker — Virtual Screening Pipeline
 
 ![License](https://img.shields.io/github/license/mostakimsakib0/autodocker)
 ![CI](https://github.com/mostakimsakib0/autodocker/actions/workflows/ci.yml/badge.svg)
