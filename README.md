@@ -4,8 +4,6 @@
 ![CI](https://github.com/mostakimsakib0/autodocker/actions/workflows/ci.yml/badge.svg)
 ![Version](https://img.shields.io/badge/version-1.0.0-blue)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22035569.svg)](https://doi.org/10.5281/zenodo.22035569)
-[![JOSS paper](paper/paper.md)](paper/paper.md)
-[![Contributing](CONTRIBUTING.md)](CONTRIBUTING.md)
 
 AutoDocker is a containerized virtual-screening pipeline. It prepares proteins
 (chain selection, fpocket pocket detection, receptor PDBQT), prepares ligands
@@ -127,6 +125,8 @@ process counts. All are reproducible from `scripts/benchmark_*.py`.
 - [`docs/installation.md`](docs/installation.md) — Docker and native setup, troubleshooting
 - [`docs/reproducibility.md`](docs/reproducibility.md) — determinism guarantees and how to verify
 - [`docs/user_testing.md`](docs/user_testing.md) — fresh-machine testing template and bug report form
+- [JOSS-style paper](paper/paper.md) — manuscript and references
+- [Contributing guide](CONTRIBUTING.md)
 - [`BENCHMARKS.md`](BENCHMARKS.md) — validation, performance, and enrichment results
 
 ## Development
