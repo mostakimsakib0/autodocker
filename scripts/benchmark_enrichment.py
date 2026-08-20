@@ -76,20 +76,43 @@ TARGET_FAMILY = {
 }
 
 
+def _gzip_ok(path):
+    """Return True for non-.gz files, and only for .gz files that are a
+    complete, readable gzip stream. The flaky DUD-E server sometimes
+    returns a truncated body that only surfaces as 'end-of-stream marker'
+    errors at read time."""
+    if not path.endswith(".gz"):
+        return True
+    try:
+        with gzip.open(path, "rb") as f:
+            f.read(1)
+        return True
+    except (OSError, EOFError, gzip.BadGzipFile):
+        return False
+
+
 def download(url, dest, retries=5, backoff=10.0):
-    if os.path.exists(dest):
+    if os.path.exists(dest) and _gzip_ok(dest):
         return
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": "autodocker-bench"})
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "autodocker-bench",
+                      # The legacy DUD-E server drops/truncates plain GETs on
+                      # large files; an open-ended Range header makes it
+                      # stream the complete body (verified empirically).
+                      "Range": "bytes=0-"},
+    )
     last_err = None
     for attempt in range(1, retries + 1):
         try:
             with urllib.request.urlopen(req, timeout=180) as r, open(dest, "wb") as out:
                 shutil.copyfileobj(r, out)
+            if not _gzip_ok(dest):
+                raise RuntimeError("gzip integrity check failed (truncated body)")
             return
         except (urllib.error.URLError, ConnectionError,
                 TimeoutError, http.client.IncompleteRead,
-                OSError) as e:
+                OSError, RuntimeError) as e:
             last_err = e
             if os.path.exists(dest):
                 os.remove(dest)  # never leave a truncated gz/pdb behind

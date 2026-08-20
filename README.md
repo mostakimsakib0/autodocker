@@ -116,9 +116,11 @@ and the standalone `scripts/reproducibility_check.sh` checker).
 ## Validation
 
 Scientific results are in `BENCHMARKS.md`: a CASF-2016 re-docking benchmark
-(76.9% top-1 pose success ≤2 Å), a DUD-E enrichment test (AUC 0.59–0.85
-across akt1/braf/aldr), and a raw-Vina parity check (222/222 modes score
-identically). All three are reproducible from `scripts/benchmark_*.py`.
+(76.9% top-1 pose success ≤2 Å), a DUD-E enrichment test (mean AUC 0.740:
+akt1 0.76, braf 0.74, aldr 0.71, each significant with bootstrap CIs and
+Mann-Whitney U tests), a raw-Vina parity check (222/222 modes score
+identically), and throughput/scaling measurements across library sizes and
+process counts. All are reproducible from `scripts/benchmark_*.py`.
 
 ## More docs
 

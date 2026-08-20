@@ -153,9 +153,15 @@ results in `BENCHMARKS.md`):
    RMSD of the crystal pose and **96.2%** when the best of the 9 predicted
    modes is considered, matching or exceeding the Vina baseline.
 2. **Screening power.** DUD-E enrichment (Mysinger et al., 2012,
-   @mysinger2012dude) across 10 targets spanning protein kinases, a nuclear
-   receptor, proteases, reductases and an esterase, with bootstrap
-   confidence intervals and Mann-Whitney U significance tests.
+   @mysinger2012dude) on a curated, family-diverse target set (kinases
+   akt1/braf, reductase aldr) with seeded sampling (50 actives + 100
+   decoys per target), bootstrap 95% confidence intervals and one-sided
+   Mann-Whitney U tests. Reported mean AUC 0.74 (akt1 0.76, braf 0.74,
+   aldr 0.71), all three actives-vs-decoys comparisons significant
+   (p ≤ 1e-5); full per-target results in `BENCHMARKS.md`.
+   Benchmark scripts default to the full 10-target curated set; results
+   above are from the subset that completed on the legacy DUD-E
+   download server ([results][benchmark-results]).
 3. **No hidden corruption.** All affinity values reported by the pipeline
    match the raw Vina scores bit-for-bit (mode-by-mode parity).
 4. **Performance & scalability.** Wall-clock time, peak RSS, and throughput

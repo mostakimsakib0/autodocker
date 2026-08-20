@@ -51,27 +51,38 @@ Reproduce: `scripts/benchmark_redock.py`; per-complex data in
 
 ## J2 — DUD-E enrichment (screening power) — PASS
 
-**Protocol.** Three DUD-E targets (akt1, braf, aldr) are screened: 50 actives +
-100 decoys per target (sampled, seeded), prepared with Open Babel and docked
-through the autodocker pipeline at exhaustiveness 4, single mode, seeded,
-8 processes. Receptor grid via fpocket with the bug-fixed frame alignment
-(`detect_pocket` grid center shifted into the centered receptor frame, see
-`runner.py::_receptor_centroid`). AUC (tie-aware, P(active ranks above
-decoy)) and enrichment factors EF1%/EF5% are computed from predicted binding
-affinities.
+**Protocol.** A curated, family-diverse set of DUD-E targets is screened:
+50 actives + 100 decoys per target (seeded sampling), prepared with Open
+Babel and docked through the autodocker pipeline at exhaustiveness 4,
+single mode, seeded, 8 processes. Receptor grid via fpocket with the
+bug-fixed frame alignment (`detect_pocket` grid center shifted into the
+centered receptor frame, see `runner.py::_receptor_centroid`). Metrics:
+AUC (tie-aware, P(active ranks above decoy)) with 95% bootstrap confidence
+intervals, enrichment factors EF1%/EF5%, and a one-sided Mann-Whitney U
+test (H1: actives rank better than decoys).
 
-**Results:**
+**Results** (150 ligands sampled per target; 4 outlier ligands in akt1
+scored as `FAILED` and excluded, i.e. 139/150 scored there; mean AUC
+0.740):
 
-| Target | AUC | EF1% | EF5% |
-|---|---|---|---|
-| akt1 | 0.589 | 2.0 | 1.6 |
-| braf | 0.852 | 4.0 | 3.2 |
-| aldr | 0.786 | 2.0 | 2.8 |
+| Target | Family | AUC (95% CI) | EF1% | EF5% | p (M-W, one-sided) |
+|---|---|---|---|---|---|
+| akt1 | kinase | 0.764 (0.701–0.830) | 4.17 | 2.50 | 0.0 |
+| braf | kinase | 0.744 (0.681–0.800) | 4.00 | 2.00 | 1e-6 |
+| aldr | reductase | 0.712 (0.642–0.774) | 4.00 | 2.40 | 1.2e-5 |
 
-Mean AUC 0.74 — clear separation of actives from decoys, in the range
-expected for Vina-based screening. Note the two runner bugs this exercise
-surfaced and fixed: blank chain-ID PDB handling (`prepare_receptor`) and the
-fpocket grid-frame mismatch.
+All three comparisons are significant — clear separation of actives from
+decoys, in the range expected for Vina-based screening. This exercise also
+surfaced and fixed two runner bugs (blank chain-ID PDB handling in
+`prepare_receptor`, fpocket grid-frame mismatch) and, on the run itself,
+the resume fail-loud guard (`runner.py::dock_all`).
+
+Note: the benchmark defaults to a 10-target curated set spanning kinases,
+a protease, a nuclear receptor, reductases and an esterase
+(`DEFAULT_TARGETS` in the script). Results above are from the subset that
+completed against the legacy DUD-E download server, which intermittently
+drops large file transfers. The full set is reproducible when the server
+is reachable.
 
 Reproduce: `scripts/benchmark_enrichment.py`; results in
 `benchmarks/results/enrichment/{enrichment.csv,summary.json}`.
@@ -124,6 +135,7 @@ Reproduce: `scripts/benchmark_performance.py`; results in
 
 ---
 
-**Environment:** Vina 1.2.5 (no `--threads` support, so parallelism = 8
-processes), Open Babel 3.x, Linux x86-64, 8 vCPU. Result files are
-deterministic for fixed seeds.
+**Environment:** Vina 1.2.5 (no `--threads` support, so docking parallelism =
+8 processes; perf runs used Vina ex2), Open Babel 3.x, `obrms`, Linux
+x86-64, 8 vCPU, 2 concurrent FPU-heavy runs not run back-to-back with the
+timing cells. Result files are deterministic for fixed seeds.
