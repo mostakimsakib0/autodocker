@@ -3423,7 +3423,12 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
     all_results = checkpoint.get_results()
     all_results.extend(failed_results)
 
-    if ligands_todo and success_count == 0:
+    # Fail loud only when the *whole* screen produced no valid score.
+    # On a resumed run, cached successes may already exist while the only
+    # remaining ligands are permanent outliers (unrealistic affinities,
+    # malformed inputs) that will never succeed; that is a partial success,
+    # not a pipeline failure.
+    if not any(score is not None for _, score in all_results):
         raise RuntimeError(
             "All docking attempts failed; no valid ligand scores were produced. "
             "Inspect output/docked/*_vina.log for root causes."

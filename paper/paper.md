@@ -9,7 +9,10 @@ tags:
   - fpocket
   - reproducibility
 authors:
-  - name: Mostakim Sakib
+  - name: Md. Mostakim Ahmed Sakib
+    orcid: 0009-0001-7176-2016
+    affiliation: 1
+  - name: Ahmad Hasan Mubashshir
     orcid: 0000-0000-0000-0000
     affiliation: 1
 affiliations:
@@ -17,7 +20,6 @@ affiliations:
     index: 1
 date: 20 August 2026
 bibliography: paper.bib
----
 
 # Summary
 

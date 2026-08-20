@@ -37,6 +37,7 @@ import argparse
 import csv
 import gzip
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -44,6 +45,8 @@ import random
 import shutil
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.request
 
 DUD_E_BASE = "https://dude.docking.org/targets/{t}/{f}"
@@ -73,13 +76,30 @@ TARGET_FAMILY = {
 }
 
 
-def download(url, dest):
+def download(url, dest, retries=5, backoff=10.0):
     if os.path.exists(dest):
         return
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": "autodocker-bench"})
-    with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as out:
-        shutil.copyfileobj(r, out)
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r, open(dest, "wb") as out:
+                shutil.copyfileobj(r, out)
+            return
+        except (urllib.error.URLError, ConnectionError,
+                TimeoutError, http.client.IncompleteRead,
+                OSError) as e:
+            last_err = e
+            if os.path.exists(dest):
+                os.remove(dest)  # never leave a truncated gz/pdb behind
+            print(f"    download attempt {attempt}/{retries} failed for "
+                  f"{os.path.basename(dest)}: {e} — retrying in "
+                  f"{backoff * attempt:.0f}s", flush=True)
+            if attempt == retries:
+                break
+            time.sleep(backoff * attempt)
+    raise RuntimeError(f"download failed after {retries} attempts: {last_err}")
 
 
 def mol2_to_pdbqt(mol2_path, pdbqt_path):

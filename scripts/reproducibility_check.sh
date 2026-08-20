@@ -49,11 +49,16 @@ python3 autodocker/runner.py \
     --no-resume >/dev/null
 
 echo "[*] comparing ranking.csv ..."
-if diff -q "$RUN1/ranking.csv" "$RUN2/ranking.csv" >/dev/null; then
+# ranking.csv embeds each output's absolute Docked_File path, which differs
+# between run1/ and run2/ by construction. Normalise those paths away and
+# compare the deterministic scientific content (affinities, descriptors).
+if diff <(sed "s#$RUN1#$ROOT/runX#g" "$RUN1/ranking.csv") \
+        <(sed "s#$RUN2#$ROOT/runX#g" "$RUN2/ranking.csv") >/dev/null; then
     echo "[✔] DETERMINISTIC: both runs produced identical ranking.csv"
     exit 0
 else
     echo "[✘] NON-DETERMINISTIC: ranking.csv differs between runs" >&2
-    diff "$RUN1/ranking.csv" "$RUN2/ranking.csv" | head -40 >&2 || true
+    diff <(sed "s#$RUN1#$ROOT/runX#g" "$RUN1/ranking.csv") \
+         <(sed "s#$RUN2#$ROOT/runX#g" "$RUN2/ranking.csv") | head -40 >&2 || true
     exit 1
 fi
