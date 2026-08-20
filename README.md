@@ -1,7 +1,7 @@
 # autodocker — Virtual Screening Pipeline
 
-![License](https://img.shields.io/github/license/mostakim_sakib0/autodocker)
-![CI](https://github.com/mostakim_sakib0/autodocker/actions/workflows/ci.yml/badge.svg)
+![License](https://img.shields.io/github/license/mostakimsakib0/autodocker)
+![CI](https://github.com/mostakimsakib0/autodocker/actions/workflows/ci.yml/badge.svg)
 ![Version](https://img.shields.io/badge/version-1.0.0-blue)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22035569.svg)](https://doi.org/10.5281/zenodo.22035569)
 [![JOSS paper](paper/paper.md)](paper/paper.md)
