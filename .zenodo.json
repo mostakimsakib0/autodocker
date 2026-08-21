@@ -1,6 +1,11 @@
 {
   "creators": [
     {
+      "name": "Md Zahurul Haque",
+      "orcid": "0009-0007-3455-7535",
+      "affiliation": "Dept. of CSE, Manarat International University, Dhaka, Bangladesh"
+    },
+    {
       "name": "Md. Mostakim Ahmed Sakib",
       "orcid": "0009-0001-7176-2016",
       "affiliation": "Independent researcher"
@@ -8,11 +13,6 @@
     {
       "name": "Ahmad Hasan Mubashshir",
       "affiliation": "Independent researcher"
-    },
-    {
-      "name": "Md Zahurul Haque",
-      "orcid": "0009-0007-3455-7535",
-      "affiliation": "Dept. of CSE, Manarat International University, Dhaka, Bangladesh"
     }
   ],
   "title": "AutoDocker: reproducible, containerized virtual screening with AutoDock Vina",
@@ -30,5 +30,5 @@
     "drug discovery",
     "reproducibility"
   ],
-  "version": "1.0.2"
+  "version": "1.0.1"
 }
