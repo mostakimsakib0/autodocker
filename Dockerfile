@@ -5,6 +5,8 @@ FROM docker.io/debian:bookworm-slim AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 COPY scripts/apt.sh /scripts/apt.sh
+COPY scripts/patch.sh /scripts/patch.sh
+
 RUN <<EOF
 set -eu
 apt-get update
@@ -66,7 +68,7 @@ FROM builder AS fpocket_builder
 WORKDIR /src
 COPY tools/fpocket ./fpocket
 RUN /scripts/apt.sh dev fpocket/deps
-RUN make -j"$(nproc)" -C fpocket/repo
+RUN make -j"$(nproc)" -C fpocket/repo CXX=g++
 RUN strip fpocket/repo/bin/*
 
 # ============================================================
@@ -112,10 +114,6 @@ COPY --from=smina_builder \
 COPY --from=qvina_builder \
     /src/qvina/repo/build/linux/release/qvina \
     /usr/local/bin/qvina
-
-#COPY --from=obabel_builder \
-#    /src/openbabel/pfx/ \
-#    /usr/local/
 
 COPY --from=fpocket_builder \
     /src/fpocket/repo/bin/fpocket \

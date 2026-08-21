@@ -34,6 +34,9 @@ pnpm-lock.yaml
 # Submodules are cloned lazily; keep the tracker but never vendor trees
 tools/*/repo/
 
+# keep helper scripts
+!/scripts/
+
 # Vendored fpocket was removed; never re-add it (build via tools/fpocket submodule)
 fpocket/
 
