@@ -61,7 +61,7 @@ import glob
 from multiprocessing import Pool, cpu_count as mp_cpu_count
 from pathlib import Path
 from datetime import datetime
-from typing import List, Tuple, Optional, Dict, Set
+from typing import List, Tuple, Optional, Dict
 from urllib.parse import quote
 from collections import defaultdict
 
@@ -209,39 +209,31 @@ _PDBQT_KEEP_PREFIXES = ("ATOM", "HETATM", "MODEL", "ENDMDL", "REMARK",
                         "MASTER", "END")
 
 
-def _pdbqt_to_pdb(pdbqt_path: str, out_path: str) -> bool:
-    """Convert a (possibly multi-model) PDBQT ligand/receptor to plain PDB.
+def _pdbqt_to_pdb_string(pdbqt_path: str) -> Optional[str]:
+    """Convert a (possibly multi-model) PDBQT ligand/receptor to plain PDB text.
 
-    NGL does not parse PDBQT directly, so we emit a faithful PDB by
-    dropping the ROOT/BRANCH/TORSDOF bookkeeping records. Returns True on
-    success.
+    NGL does not parse PDBQT directly, so we emit a faithful PDB by dropping
+    the ROOT/BRANCH/TORSDOF bookkeeping records. The text is returned so it can
+    be inlined directly into the report (no external ``viewer/`` files needed).
+    Returns None when nothing useful could be extracted.
     """
     try:
+        lines = []
         written = False
-        with open(pdbqt_path) as src, open(out_path, "w") as dst:
+        with open(pdbqt_path) as src:
             for line in src:
                 s = line.strip()
                 if s.startswith(_PDBQT_STRIP_PREFIXES):
                     continue
                 if s.startswith(_PDBQT_KEEP_PREFIXES):
-                    dst.write(line)
+                    lines.append(line)
                     written = True
-        return written and os.path.getsize(out_path) > 0
+        if not written:
+            return None
+        return "".join(lines)
     except Exception as e:
         logger.warning(f"[!] Could not convert {pdbqt_path} for viewer: {e}")
-        return False
-
-
-def _sanitize_viewer_name(name: str, taken: Set[str]) -> str:
-    """Return a filesystem-safe unique stem for HTML viewer artifacts."""
-    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(name)).strip("_") or "ligand"
-    stem = stem[:80]
-    candidate, i = stem, 2
-    while candidate in taken:
-        candidate = f"{stem}_{i}"
-        i += 1
-    taken.add(candidate)
-    return candidate
+        return None
 
 
 def _fetch_ngljs() -> Optional[bytes]:
@@ -263,48 +255,45 @@ def _fetch_ngljs() -> Optional[bytes]:
 
 
 def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
-                          receptor_pdbqt: Optional[str], output_file: str) -> str:
+                          receptor_pdbqt: Optional[str], output_file=None) -> str:
     """Create the interactive NGL 3D viewer HTML section.
 
-    Stages receptor + best pose of each of the top 10 hits into
-    ``<output_dir>/viewer/`` and embeds a picker + NGL stage in the report.
-    An empty string is returned when nothing viewable exists.
+    Everything needed for the viewer (the NGL library and the receptor/pose
+    PDB texts) is inlined directly into the report HTML. The result is a
+    single self-contained file that opens from ``file://`` with a double-click
+    — no ``python3 -m http.server`` and no ``viewer/`` directory required.
+
+    When the NGL library cannot be bundled (no network at report time) the
+    viewer is omitted entirely and replaced with a clear notice. A solid
+    message is preferred over a half-working report that silently needs
+    internet. An empty string is returned when there are no viewable hits.
     """
     top = ranked_ligands[:10]
     if not top:
         return ""
 
-    out_dir = os.path.dirname(os.path.abspath(output_file))
-    viewer_dir = os.path.join(out_dir, "viewer")
-    try:
-        os.makedirs(viewer_dir, exist_ok=True)
-    except OSError as e:
-        logger.warning(f"[!] Could not create viewer dir: {e}")
-        return ""
-
-    # 1) Bundled NGL (or CDN fallback).
+    # 1) Bundled NGL library (inline <script>). If we cannot bundle it,
+    #    drop the viewer with a clear notice — no CDN fallback ambiguity.
     ngl_js = _fetch_ngljs()
-    ngl_local = os.path.join(viewer_dir, "ngl.min.js")
-    script_src = NGL_CDN_URL
-    if ngl_js is not None:
-        try:
-            with open(ngl_local, "wb") as f:
-                f.write(ngl_js)
-            script_src = "viewer/ngl.min.js"
-            logger.info("[✔] Bundled NGL viewer (ngl.min.js, "
-                        f"{len(ngl_js) // 1024} KB)")
-        except OSError as e:
-            logger.warning(f"[!] Could not write bundled NGL: {e}")
+    if ngl_js is None:
+        return """
+    <div class="section">
+        <h2>🖥️ 3D Structure Viewer</h2>
+        <p style="color:#e67e22;">
+            ⚠️ 3D viewer unavailable — the NGL viewer library could not be
+            downloaded (no internet during report generation). The rest of
+            this report is unaffected. Regenerate the report online to get
+            the interactive viewer.
+        </p>
+    </div>
+"""
 
-    # 2) Receptor PDB.
-    receptor_rel = "viewer/receptor.pdb"
+    # 2) Receptor PDB text (inlined, not written to disk).
+    receptor_text = None
     if receptor_pdbqt and os.path.exists(receptor_pdbqt):
-        if not _pdbqt_to_pdb(receptor_pdbqt,
-                             os.path.join(viewer_dir, "receptor.pdb")):
-            receptor_rel = ""
+        receptor_text = _pdbqt_to_pdb_string(receptor_pdbqt)
 
-    # 3) Best pose PDB per top hit.
-    used_names: Set[str] = set()
+    # 3) Best pose PDB text per top hit (inlined).
     hits = []
     for lig, affinity in top:
         name = str(lig.get('Ligand', lig) if isinstance(lig, dict) else lig)
@@ -319,25 +308,38 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
                 poses_dir, f"{name}_pose_*.pdbqt")))
         if not candidates:
             continue
-        stem = _sanitize_viewer_name(name, used_names)
-        pose_pdb = os.path.join(viewer_dir, f"{stem}_pose.pdb")
-        if not _pdbqt_to_pdb(candidates[0], pose_pdb):
+        pose_text = _pdbqt_to_pdb_string(candidates[0])
+        if not pose_text:
             continue
         hits.append({
             "name": name,
             "affinity": affinity,
-            "pose": f"viewer/{stem}_pose.pdb",
+            "pose": pose_text,
         })
 
     if not hits:
-        return ""
+        return """
+    <div class="section">
+        <h2>🖥️ 3D Structure Viewer</h2>
+        <p style="color:#e67e22;">
+            No docked structures were available to display in the 3D viewer.
+        </p>
+    </div>
+"""
 
-    hits_json = json.dumps(hits).replace("</", "<\\/")
+    # Inline all data as one JSON blob; escape closing-script tags so the
+    # PDB text cannot break out of the <script> context.
+    data = {
+        "receptor": receptor_text or "",
+        "hits": hits,
+    }
+    data_json = json.dumps(data).replace("</", "<\\/")
+    ngl_script = ngl_js.decode("utf-8", errors="replace")
 
     section = f"""
     <div class="section">
         <h2>🖥️ 3D Structure Viewer</h2>
-        <p><em>Interactive NGL viewer — receptor (cartoon) with the best docked pose of each top hit.</em></p>
+        <p><em>Interactive NGL viewer — receptor (cartoon) with the best docked pose of each top hit. This report is fully self-contained and opens by double-clicking (no web server required).</em></p>
         <div style="margin-bottom:10px;">
             <label for="viewer-select" style="font-weight:bold;">View hit:</label>
             <select id="viewer-select" onchange="showHit()">
@@ -347,11 +349,6 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
         </div>
         <div id="viewer-message" style="margin-bottom:8px;color:#e67e22;"></div>
         <div id="viewer-container" style="width:100%;height:520px;background:#0b1622;border-radius:5px;"></div>
-        <p style="font-size:12px;color:#7f8c8d;margin-top:8px;">
-            ⚠️ For the viewer to work, open this report over <code>http://</code>
-            (e.g. <code>python3 -m http.server</code> in the results folder) — browsers
-            block local file access from <code>file://</code> pages.
-        </p>
     </div>
 
     <div class="section" id="viewer-log" style="display:none;">
@@ -359,11 +356,12 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
         <pre id="viewer-error"></pre>
     </div>
 
-    <script src="{script_src}"></script>
+    <script>{ngl_script}</script>
     <script>
     (function () {{
-        var receptorFile = "{receptor_rel}";
-        var hits = {hits_json};
+        var data = {data_json};
+        var receptorText = data.receptor || "";
+        var hits = data.hits || [];
         var stage = null;
 
         function showHit() {{
@@ -376,7 +374,7 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
             }}
             if (!selected) return;
             if (typeof NGL === "undefined") {{
-                msg.textContent = "NGL viewer failed to load (offline or blocked). Check network/CDN access.";
+                msg.textContent = "NGL viewer failed to load.";
                 return;
             }}
             if (stage) {{ stage.dispose(); }}
@@ -384,12 +382,16 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
             stage = new NGL.Stage("viewer-container", {{ backgroundColor: "#0b1622" }});
             msg.textContent = "Loading " + name + "…";
             var jobs = [];
-            if (receptorFile) {{
-                jobs.push(stage.loadFile(receptorFile).then(function (o) {{
-                    o.addRepresentation("cartoon", {{ colorScheme: "chainid" }});
+            if (receptorText) {{
+                jobs.push(stage.loadFile(
+                    new Blob([receptorText], {{ type: "text/plain" }}),
+                    {{ ext: "pdb" }}).then(function (o) {{
+                        o.addRepresentation("cartoon", {{ colorScheme: "chainid" }});
                 }}));
             }}
-            jobs.push(stage.loadFile(selected.pose).then(function (o) {{
+            jobs.push(stage.loadFile(
+                new Blob([selected.pose], {{ type: "text/plain" }}),
+                {{ ext: "pdb" }}).then(function (o) {{
                 o.addRepresentation("ball+stick", {{
                     colorScheme: "element",
                     aspectRatio: 2.2,

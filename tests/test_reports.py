@@ -103,18 +103,24 @@ class TestHtmlReport:
 
 
 class TestNglViewer:
-    """The interactive NGL 3D viewer embedded in the HTML report."""
+    """The interactive NGL 3D viewer embedded in the HTML report.
 
-    @pytest.fixture
-    def ready_assets(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(runner, "_fetch_ngljs", lambda: None)
+    The viewer is fully self-contained: the NGL library and the receptor/pose
+    PDB texts are inlined into the HTML, so the report opens from ``file://``
+    with a double-click (no ``viewer/`` directory, no web server, no CDN).
+    """
+
+    @staticmethod
+    def _prepare(tmp_path, monkeypatch, ngl_bundle=b"/* fake ngl */"):
+        monkeypatch.setattr(runner, "_fetch_ngljs", lambda: ngl_bundle)
         outdir = str(tmp_path / "out")
         docked = os.path.join(outdir, "docked")
         os.makedirs(docked, exist_ok=True)
         _write(os.path.join(outdir, "receptor_b.pdbqt"), _receptor_pdbqt())
         _write(os.path.join(docked, "ligA_out.pdbqt"), _pose_pdbqt("ligA"))
-        _write(os.path.join(docked, "ligB_out.pdbqt"), _pose_pdbqt("ligB", serial=7,
-                                                                   x=7.0, y=7.0, z=7.0))
+        _write(os.path.join(docked, "ligB_out.pdbqt"), _pose_pdbqt("ligB",
+                                                                    serial=7,
+                                                                    x=7.0, y=7.0, z=7.0))
         csv_path = _ranking_csv(outdir, [
             {"Ligand": "ligA", "Binding_Affinity": "-7.5",
              "SimScore": "0.9", "Binding_Modes": "9", "Status": "OK"},
@@ -125,27 +131,33 @@ class TestNglViewer:
         runner.generate_html_report(
             csv_path, docked, html,
             receptor_pdbqt=os.path.join(outdir, "receptor_b.pdbqt"))
-        return outdir
-
-    def test_viewer_section_present(self, ready_assets, monkeypatch):
-        monkeypatch.setattr(runner, "_fetch_ngljs", lambda: None)
-        with open(os.path.join(ready_assets, "results_report.html")) as f:
+        with open(html) as f:
             content = f.read()
+        return outdir, content
+
+    def test_viewer_section_present(self, tmp_path, monkeypatch):
+        outdir, content = self._prepare(tmp_path, monkeypatch)
         assert "3D Structure Viewer" in content
         assert "viewer-container" in content
         assert "ligA" in content
         assert "ligB" in content
-        assert "viewer/ligA_pose.pdb" in content
+        # Data is inlined, never referenced as external files:
+        assert "viewer/ligA_pose.pdb" not in content
+        assert runner.NGL_CDN_URL not in content
+        # Inlined PDB text carries the receptor/pose atoms:
+        assert "LIG L" in content
+        assert "ALA A" in content
+        # The NGL library itself is inlined into the report:
+        assert "/* fake ngl */" in content
 
-    def test_viewer_assets_written(self, ready_assets, monkeypatch):
-        monkeypatch.setattr(runner, "_fetch_ngljs", lambda: None)
-        viewer = os.path.join(ready_assets, "viewer")
-        assert os.path.exists(os.path.join(viewer, "receptor.pdb"))
-        assert os.path.exists(os.path.join(viewer, "ligA_pose.pdb"))
-        assert os.path.exists(os.path.join(viewer, "ligB_pose.pdb"))
+    def test_no_viewer_files_written(self, tmp_path, monkeypatch):
+        outdir, content = self._prepare(tmp_path, monkeypatch)
+        assert not os.path.exists(os.path.join(outdir, "viewer"))
+        assert "viewer/" not in content
 
-    def test_viewer_no_docked_skips(self, tmp_path, monkeypatch):
-        """Without docked poses the viewer stage must be omitted cleanly."""
+    def test_viewer_no_docked_notice(self, tmp_path, monkeypatch):
+        """With no docked poses the viewer is replaced by a clear notice."""
+        monkeypatch.setattr(runner, "_fetch_ngljs", lambda: b"/* fake ngl */")
         outdir = str(tmp_path / "out")
         os.makedirs(outdir, exist_ok=True)
         csv_path = _ranking_csv(outdir, [
@@ -157,29 +169,31 @@ class TestNglViewer:
             csv_path, os.path.join(outdir, "docked"), html, receptor_pdbqt=None)
         with open(html) as f:
             content = f.read()
-        assert "3D Structure Viewer" not in content
+        assert "No docked structures were available" in content
+        assert "viewer-container" not in content
 
-    def test_ngl_bundle_script_ref(self, ready_assets, monkeypatch):
-        monkeypatch.setattr(runner, "_fetch_ngljs",
-                            lambda: b"/* fake ngl */")
-        # Re-run with a patched downloader so the report references the
-        # bundled file instead of the CDN.
-        outdir = ready_assets
+    def test_ngl_inlined_not_cdn(self, tmp_path, monkeypatch):
+        outdir, content = self._prepare(tmp_path, monkeypatch)
+        assert 'src="viewer/ngl.min.js"' not in content
+        assert runner.NGL_CDN_URL not in content
+        assert "/* fake ngl */" in content
+
+    def test_ngl_unavailable_notice(self, tmp_path, monkeypatch):
+        """If the NGL library cannot be bundled, show a notice (no CDN)."""
+        monkeypatch.setattr(runner, "_fetch_ngljs", lambda: None)
+        outdir = str(tmp_path / "out")
+        docked = os.path.join(outdir, "docked")
+        os.makedirs(docked, exist_ok=True)
+        _write(os.path.join(docked, "ligA_out.pdbqt"), _pose_pdbqt("ligA"))
         csv_path = _ranking_csv(outdir, [
             {"Ligand": "ligA", "Binding_Affinity": "-7.5",
              "SimScore": "0.9", "Binding_Modes": "9", "Status": "OK"},
         ])
         html = os.path.join(outdir, "results_report.html")
         runner.generate_html_report(
-            csv_path, os.path.join(outdir, "docked"), html,
-            receptor_pdbqt=os.path.join(outdir, "receptor_b.pdbqt"))
-        assert os.path.exists(os.path.join(outdir, "viewer", "ngl.min.js"))
+            csv_path, docked, html, receptor_pdbqt=None)
         with open(html) as f:
             content = f.read()
-        assert 'src="viewer/ngl.min.js"' in content
-
-    def test_ngl_cdn_fallback(self, ready_assets, monkeypatch):
-        monkeypatch.setattr(runner, "_fetch_ngljs", lambda: None)
-        with open(os.path.join(ready_assets, "results_report.html")) as f:
-            content = f.read()
-        assert runner.NGL_CDN_URL in content
+        assert "3D viewer unavailable" in content
+        assert runner.NGL_CDN_URL not in content
+        assert "viewer-container" not in content
