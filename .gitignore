@@ -38,7 +38,7 @@ tools/*/repo/
 !/scripts/
 
 # Vendored fpocket was removed; never re-add it (build via tools/fpocket submodule)
-fpocket/
+/fpocket/
 
 # Local working docs, kept out of the remote repo
 AUDIT_REPORT.md

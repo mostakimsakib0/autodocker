@@ -67,6 +67,7 @@ RUN mv node_modules/ngl/dist ngl
 FROM builder AS fpocket_builder
 WORKDIR /src
 COPY tools/fpocket ./fpocket
+RUN /scripts/patch.sh fpocket
 RUN /scripts/apt.sh dev fpocket/deps
 RUN make -j"$(nproc)" -C fpocket/repo CXX=g++
 RUN strip fpocket/repo/bin/*

@@ -1,0 +1,47 @@
+diff --git a/src/qhull/src/qvoronoi/qvoronoi.c b/src/qhull/src/qvoronoi/qvoronoi.c
+index d5900d0..d114da2 100644
+--- a/src/qhull/src/qvoronoi/qvoronoi.c
++++ b/src/qhull/src/qvoronoi/qvoronoi.c
+@@ -238,24 +238,26 @@ int run_qvoronoi(FILE *fin,FILE *fout) {
+   int exitcode, numpoints, dim;
+   coordT *points;
+   boolT ismalloc;
+-  int argc=6;
+-  const char *argv[6];
++  int argc=7;
++  const char *argv[7];
+   argv[0]=malloc(sizeof(char)*200);
+   argv[0]="src/qhull/qvoronoi\0";
+   argv[1]=malloc(sizeof(char)*2);
+-  argv[1]="p\0";
++  argv[1]="v\0";
+   argv[2]=malloc(sizeof(char)*2);
+-  argv[2]="i\0";
+-  argv[3]=malloc(sizeof(char)*3);
+-  argv[3]="Pp\0";/*
++  argv[2]="p\0";
++  argv[3]=malloc(sizeof(char)*2);
++  argv[3]="i\0";
++  argv[4]=malloc(sizeof(char)*3);
++  argv[4]="Pp\0";/*
+   argv[5]=malloc(sizeof(char)*6);
+   argv[5]="QR0\0";
+   argv[6]=malloc(sizeof(char)*5);
+   argv[6]="C-0\0";*/
+-  argv[4]=malloc(sizeof(char)*4);
+-  argv[4]="Qz\0";
+   argv[5]=malloc(sizeof(char)*4);
+-  argv[5]="Qt\0";
++  argv[5]="Qz\0";
++  argv[6]=malloc(sizeof(char)*4);
++  argv[6]="Qt\0";
+   /*argv[6]="R1.0e-5\0";*/
+ /*#if __MWERKS__ && __POWERPC__
+   char inBuf[BUFSIZ], outBuf[BUFSIZ], errBuf[BUFSIZ];
+@@ -315,4 +317,4 @@ int run_qvoronoi(FILE *fin,FILE *fout) {
+        totlong, curlong);
+ #endif
+   return exitcode;
+-} /* main */
+\ No newline at end of file
++} /* main */
