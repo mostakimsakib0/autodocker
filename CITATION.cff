@@ -17,11 +17,12 @@ keywords:
   - reproducibility
 license: MIT
 authors:
+  - family-names: Haque
+    given-names: "Md Zahurul"
+    orcid: "https://orcid.org/0009-0007-3455-7535"
+    affiliation: "Manarat International University"
   - family-names: Sakib
     given-names: "Md. Mostakim Ahmed"
     orcid: "https://orcid.org/0009-0001-7176-2016"
   - family-names: Mubashshir
     given-names: "Ahmad Hasan"
-  - family-names: Haque
-    given-names: "Md Zahurul"
-    orcid: "https://orcid.org/0009-0007-3455-7535"
