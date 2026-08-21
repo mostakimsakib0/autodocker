@@ -2,7 +2,7 @@
 
 ![License](https://img.shields.io/github/license/mostakimsakib0/autodocker)
 ![CI](https://github.com/mostakimsakib0/autodocker/actions/workflows/ci.yml/badge.svg)
-![Version](https://img.shields.io/badge/version-1.0.1-blue)
+![Version](https://img.shields.io/badge/version-1.0.2-blue)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22035568.svg)](https://doi.org/10.5281/zenodo.22035568)
 
 AutoDocker is a containerized virtual-screening pipeline. It prepares proteins
