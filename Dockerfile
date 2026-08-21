@@ -70,6 +70,16 @@ RUN make -j"$(nproc)" -C fpocket/repo
 RUN strip fpocket/repo/bin/*
 
 # ============================================================
+# Stage 1 — Build Rootless Mode ACL Manager
+# ============================================================
+
+FROM builder AS aclmgr_builder
+WORKDIR /src
+COPY tools/aclmgr.c .
+RUN gcc aclmgr.c -o aclmgr
+RUN strip aclmgr
+
+# ============================================================
 # Stage 2 — Minimal runtime image
 # ============================================================
 FROM docker.io/python:3.12-slim-bookworm
@@ -112,17 +122,20 @@ COPY --from=fpocket_builder \
     /src/fpocket/repo/bin/dpocket \
     /src/fpocket/repo/bin/tpocket \
     /usr/local/bin/
+COPY --from=fpocket_builder \
+    /src/fpocket/repo/plugins/LINUXAMD64/molfile/ \
+    /usr/local/lib/
 
 COPY --from=ngl_builder \
     src/ngl /ngl
 
-# Run as a non-root user for safety
+COPY --from=aclmgr_builder \
+	src/aclmgr /autodocker/aclmgr
+
 RUN useradd --create-home --uid 1000 dockuser
 RUN mkdir -p /workspace && chown -R dockuser:dockuser /workspace /autodocker
 
-USER dockuser
 WORKDIR /workspace
 VOLUME ["/workspace"]
 
-# Smallest practical default
-ENTRYPOINT ["/autodocker/entry.sh"]
+ENTRYPOINT ["/autodocker/aclmgr"]
