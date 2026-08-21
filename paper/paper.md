@@ -9,18 +9,18 @@ tags:
   - fpocket
   - reproducibility
 authors:
-  - name: Md. Mostakim Ahmed Sakib
-    orcid: 0009-0001-7176-2016
-    affiliation: 1
-  - name: Ahmad Hasan Mubashshir
-    affiliation: 1
   - name: Md Zahurul Haque
     orcid: 0009-0007-3455-7535
+    affiliation: 1
+  - name: Md. Mostakim Ahmed Sakib
+    orcid: 0009-0001-7176-2016
+    affiliation: 2
+  - name: Ahmad Hasan Mubashshir
     affiliation: 2
 affiliations:
-  - name: Independent researcher
-    index: 1
   - name: Dept. of CSE, Manarat International University, Dhaka, Bangladesh
+    index: 1
+  - name: Independent researcher
     index: 2
 date: 20 August 2026
 bibliography: paper.bib
