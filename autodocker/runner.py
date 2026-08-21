@@ -237,11 +237,47 @@ def _pdbqt_to_pdb_string(pdbqt_path: str) -> Optional[str]:
 
 
 def _fetch_ngljs() -> Optional[bytes]:
-    """Download the NGL viewer bundle so the report is self-contained.
+    """Return the NGL viewer library bytes for inlining into the report.
 
-    Falls back to a CDN <script> reference if the download fails (the
-    report then needs a network connection when viewed).
+    Resolution order (offline-first):
+      1. ``/ngl`` — the directory the Docker image populates from the pnpm
+         ``tools/ngl`` package during build (contains NGL's dist bundle,
+         e.g. ``ngl.umd.js``). This is the preferred, always-available copy.
+      2. The repo checkout's pnpm install at
+         ``tools/ngl/node_modules/ngl/dist`` — so local (non-Docker) runs
+         work offline too, with no re-download.
+      3. A download from the CDN, only if no local copy exists.
+
+    Returns None only when none are available; the caller then omits the
+    viewer and shows a clear notice instead.
     """
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [
+        # Prefer the standalone bundle (ngl.js) which inlines three.js etc.
+        # and defines a global NGL. ngl.umd.js needs external peer globals
+        # and must NOT be inlined on its own.
+        "/ngl/ngl.js",
+        "/ngl/ngl.min.js",
+        "/ngl/ngl.umd.js",
+        os.path.join(repo_root, "tools", "ngl", "node_modules", "ngl",
+                     "dist", "ngl.js"),
+        os.path.join(repo_root, "tools", "ngl", "node_modules", "ngl",
+                     "dist", "ngl.min.js"),
+        os.path.join(repo_root, "tools", "ngl", "node_modules", "ngl",
+                     "dist", "ngl.umd.js"),
+    ]
+    for path in candidates:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+                if data:
+                    logger.info(f"[✔] Using local NGL viewer ({path}, "
+                                f"{len(data) // 1024} KB) — no network needed")
+                    return data
+            except OSError as e:
+                logger.debug(f"Could not read NGL from {path}: {e}")
+
     for attempt in (1, 2):
         try:
             return _http_get_bytes(NGL_CDN_URL, timeout=60)
@@ -249,8 +285,8 @@ def _fetch_ngljs() -> Optional[bytes]:
             logger.debug(f"NGL download attempt {attempt} failed: {e}")
             time.sleep(1)
     logger.warning(
-        "[!] Could not bundle NGL viewer (network?). Report will reference "
-        "the jsDelivr CDN, so it needs internet when opened.")
+        "[!] Could not bundle NGL viewer (no local copy and no network). "
+        "The report will show a notice instead of the interactive viewer.")
     return None
 
 
@@ -401,6 +437,11 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
             Promise.all(jobs).then(function () {{
                 stage.autoView();
                 msg.textContent = "";
+                // Firefox does not present the WebGL canvas until a reflow;
+                // nudge a resize on the next frame so it draws without a click.
+                requestAnimationFrame(function () {{
+                    if (stage && stage.viewer) stage.viewer.requestResize();
+                }});
             }}).catch(function (err) {{
                 msg.textContent = "Viewer error: " + err.message;
                 document.getElementById("viewer-log").style.display = "";
@@ -415,6 +456,14 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
         function resetView() {{
             if (stage) stage.autoView();
         }}
+
+        // Keep the canvas sized to its container (and help Firefox repaint).
+        window.addEventListener("resize", function () {{
+            if (stage && stage.viewer) stage.viewer.requestResize();
+        }});
+        document.getElementById("viewer-container").addEventListener("click", function () {{
+            if (stage && stage.viewer) stage.viewer.requestResize();
+        }});
 
         window.addEventListener("load", function () {{
             var sel = document.getElementById("viewer-select");
@@ -3776,8 +3825,11 @@ def main():
                         help="Number of compounds in Top_hits.txt")
 
     # ===== PHASE 1: Advanced Result Analysis =====
-    parser.add_argument("--html-report", action="store_true",
-                        help="Generate professional HTML report with charts")
+    parser.add_argument("--html-report", dest="html_report", action="store_true",
+                        default=True,
+                        help="Generate professional HTML report with charts (default: on)")
+    parser.add_argument("--no-html-report", dest="html_report", action="store_false",
+                        help="Disable the HTML report")
     parser.add_argument("--cluster-poses", action="store_true",
                         help="Cluster similar poses by RMSD")
     parser.add_argument("--rmsd-threshold", type=float,

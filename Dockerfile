@@ -50,32 +50,14 @@ mv qvina/repo/build/linux/release/vina qvina/repo/build/linux/release/qvina
 EOF
 
 # ============================================================
-# Stage 1 — Build OpenBabel
+# Stage 1 — Build NGL
 # ============================================================
-#FROM builder AS obabel_builder
-#WORKDIR /src
-#COPY tools/openbabel ./openbabel
-#RUN /scripts/apt.sh dev openbabel/deps
-#RUN cmake -S openbabel/repo -B openbabel/build \
-#    -DCMAKE_BUILD_TYPE=Release \
-#    -DBUILD_GUI=OFF \
-#    -DBUILD_SHARED=OFF \
-#    -DWITH_COORDGEN=OFF \
-#    -DWITH_MAEPARSER=OFF \
-#    -DWITH_AVALON=OFF \
-#    -DWITH_SWIG=OFF \
-#    -DWITH_PYTHON=OFF \
-#    -DWITH_OPENMP=ON \
-#    -DCMAKE_INSTALL_PREFIX=/usr/local
-#RUN make -j"$(nproc)" -C openbabel/build
-#RUN strip openbabel/build/bin/obabel
-#RUN <<EOF
-#make -C openbabel/build DESTDIR=/src/openbabel/pfx install
-#mkdir /src/openbabel/pfx/share
-#mv /src/openbabel/pfx/usr/local/bin /src/openbabel/pfx/bin
-#mv /src/openbabel/pfx/usr/local/share/openbabel /src/openbabel/pfx/share/openbabel
-#rm -rf /src/openbabel/pfx/usr
-#EOF
+FROM ghcr.io/pnpm/pnpm:latest AS ngl_builder
+WORKDIR /src
+COPY tools/ngl .
+RUN pnpm install
+RUN mv node_modules/ngl/dist ngl
+
 # ============================================================
 # Stage 1 — Build FPocket
 # ============================================================
@@ -130,6 +112,9 @@ COPY --from=fpocket_builder \
     /src/fpocket/repo/bin/dpocket \
     /src/fpocket/repo/bin/tpocket \
     /usr/local/bin/
+
+COPY --from=ngl_builder \
+    src/ngl /ngl
 
 # Run as a non-root user for safety
 RUN useradd --create-home --uid 1000 dockuser
