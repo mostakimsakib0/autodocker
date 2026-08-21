@@ -14,9 +14,14 @@ authors:
     affiliation: 1
   - name: Ahmad Hasan Mubashshir
     affiliation: 1
+  - name: Md Zahurul Haque
+    orcid: 0009-0007-3455-7535
+    affiliation: 2
 affiliations:
   - name: Independent researcher
     index: 1
+  - name: Dept. of CSE, Manarat International University, Dhaka, Bangladesh
+    index: 2
 date: 20 August 2026
 bibliography: paper.bib
 

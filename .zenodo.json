@@ -8,6 +8,11 @@
     {
       "name": "Ahmad Hasan Mubashshir",
       "affiliation": "Independent researcher"
+    },
+    {
+      "name": "Md Zahurul Haque",
+      "orcid": "0009-0007-3455-7535",
+      "affiliation": "Dept. of CSE, Manarat International University, Dhaka, Bangladesh"
     }
   ],
   "title": "AutoDocker: reproducible, containerized virtual screening with AutoDock Vina",
