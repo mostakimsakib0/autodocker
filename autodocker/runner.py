@@ -2564,6 +2564,8 @@ class ProteinPreparation:
         fpocket_target = self.pdb_clean if os.path.exists(
             self.pdb_clean) else self.pdb_file
         try:
+            shutil.rmtree(Path(fpocket_target).with_suffix(
+                "").as_posix() + "_out", ignore_errors=True)
             run(["fpocket", "-f", fpocket_target])
         except Exception as e:
             logger.warning(
