@@ -38,6 +38,7 @@ RUN /scripts/apt.sh dev smina/deps
 RUN cmake -S smina/repo -B smina/build
 RUN make -j"$(nproc)" -C smina/build
 RUN strip smina/build/fromsmina smina/build/tosmina smina/build/smina
+RUN /scripts/shlib.sh boost smina/build/fromsmina smina/build/tosmina smina/build/smina > deps
 
 # ============================================================
 # Stage 1 — Build QuickVina2
@@ -84,11 +85,20 @@ RUN gcc aclmgr.c -o aclmgr
 RUN strip aclmgr
 
 # ============================================================
+# Stage 1.5 — Accumulate deps
+# ============================================================
+FROM docker.io/debian:bookworm-slim as deps
+
+WORKDIR /acc
+COPY deps base
+COPY --from=smina_builder /src/deps smina
+RUN cat * > /deps
+# ============================================================
 # Stage 2 — Minimal runtime image
 # ============================================================
 FROM docker.io/python:3.12-slim-bookworm
 
-COPY deps /deps
+COPY --from=deps /deps /deps
 COPY scripts/apt.sh /apt.sh
 RUN <<EOF
 export DEBIAN_FRONTEND=noninteractive
