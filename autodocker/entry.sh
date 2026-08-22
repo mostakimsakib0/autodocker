@@ -1,4 +1,5 @@
 #!/bin/bash
+
 for arg in "$@"; do
 	case "$arg" in
 		-s | --shell | --debug) exec bash -i ;;
@@ -15,20 +16,18 @@ SCRIPT="$DIR/runner.py"
 LIGS="${LIGS:-/workspace/ligs}"
 PDB="${PDB:-}"
 
-
 mkdir -p "$OUT"
 
 INPUT="${INPUT:-}"
 
 if [ -n "${INPUT}" ] && [ -f "${INPUT}" ]; then
-    echo "[INFO] Single ligand mode detected: $INPUT"
-    LIGAND_MODE="single"
+	echo  "[INFO] Single ligand mode detected: $INPUT"
+	LIGAND_MODE="single"
 	LIGS="$INPUT"
 else
-    echo "[INFO] Batch mode: scanning $LIGS"
-    LIGAND_MODE="batch"
+	echo  "[INFO] Batch mode: scanning $LIGS"
+	LIGAND_MODE="batch"
 fi
-
 
 if [ -n "${PDB:-}" ]; then
 	: # Use PDB from the environment.
@@ -58,10 +57,30 @@ if [ "$LIGAND_MODE" = "single" ]; then
 	fi
 
 	case "${LIGS##*.}" in
-		sdf) SDF_COUNT=1; PDBQT_COUNT=0; MOL2_COUNT=0; PDB_COUNT=0 ;;
-		pdbqt) SDF_COUNT=0; PDBQT_COUNT=1; MOL2_COUNT=0; PDB_COUNT=0 ;;
-		mol2) SDF_COUNT=0; PDBQT_COUNT=0; MOL2_COUNT=1; PDB_COUNT=0 ;;
-		pdb) SDF_COUNT=0; PDBQT_COUNT=0; MOL2_COUNT=0; PDB_COUNT=1 ;;
+		sdf)
+			SDF_COUNT=1
+			PDBQT_COUNT=0
+			MOL2_COUNT=0
+			PDB_COUNT=0
+			;;
+		pdbqt)
+			SDF_COUNT=0
+			PDBQT_COUNT=1
+			MOL2_COUNT=0
+			PDB_COUNT=0
+			;;
+		mol2)
+			SDF_COUNT=0
+			PDBQT_COUNT=0
+			MOL2_COUNT=1
+			PDB_COUNT=0
+			;;
+		pdb)
+			SDF_COUNT=0
+			PDBQT_COUNT=0
+			MOL2_COUNT=0
+			PDB_COUNT=1
+			;;
 		*)
 			echo "[!] Unsupported ligand file type: $LIGS"
 			exit 1
@@ -86,7 +105,7 @@ fi
 
 if [ "$TOTAL_LIGS" -eq 0 ]; then
 	echo "[!] No ligand files (.sdf/.pdbqt/.mol2/.pdb) found in $LIGS"
-    exit 1
+	exit  1
 fi
 
 echo "[*] Found $TOTAL_LIGS ligands"
@@ -140,7 +159,7 @@ if [ "${NO_MINIMIZE:-0}" = "1" ]; then
 	CMD+=(--no-minimize)
 fi
 
-"${CMD[@]}"
+"${CMD[@]}" "$@"
 
 echo "======================================"
 echo " Pipeline Completed Successfully"
