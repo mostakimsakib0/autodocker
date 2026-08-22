@@ -87,6 +87,7 @@ def _http_get_bytes(url: str, timeout: int = 30) -> bytes:
     with urllib.request.urlopen(url, timeout=timeout) as resp:
         return resp.read()
 
+
 try:
     import numpy as np
 except ModuleNotFoundError:
@@ -733,7 +734,8 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
 # =============================
 
 
-WATER_RESNAMES = {"HOH", "WAT", "TIP3", "TIP", "TIP3P", "TIP4", "H2O", "DOD", "SOL"}
+WATER_RESNAMES = {"HOH", "WAT", "TIP3", "TIP",
+                  "TIP3P", "TIP4", "H2O", "DOD", "SOL"}
 
 METAL_ELEMENTS = {
     "ZN": "Zinc", "CU": "Copper", "FE": "Iron", "MG": "Magnesium",
@@ -777,6 +779,7 @@ def _parse_hetatm(line: str) -> Optional[Dict]:
         "coords": coords,
         "line": line,
     }
+
 
 def _iter_hetatm_residues(pdb_file: str, predicate) -> List[Dict]:
     """Parse all HETATM residues from a PDB file matching ``predicate``.
@@ -1361,7 +1364,8 @@ def _run_smina_scoring(receptor: str, ligands: List[str], outdir: str,
         name = os.path.basename(lig).replace(".pdbqt", "")
         out = os.path.join(dock_dir, name + "_smina.pdbqt")
         try:
-            score = run_smina_docking(receptor, lig, out, cx, cy, cz, sx, sy, sz)
+            score = run_smina_docking(
+                receptor, lig, out, cx, cy, cz, sx, sy, sz)
         except Exception as e:
             logger.warning(f"  [!] SMINA failed for {name}: {e}")
             continue
@@ -1374,6 +1378,7 @@ def _run_smina_scoring(receptor: str, ligands: List[str], outdir: str,
 # =============================
 # PDBQT CHARGE VALIDATION & FIXING
 # =============================
+
 
 def _extract_pdbqt_charge(line: str) -> Optional[float]:
     """Return the atomic charge from a PDBQT ATOM/HETATM line, or None.
@@ -1945,7 +1950,8 @@ class LibraryManager:
                     logger.debug(f"  {name}: MW {mw} outside range; skipping")
                     continue
                 if logp is not None and float(logp) > logp_max:
-                    logger.debug(f"  {name}: LogP {logp} > {logp_max}; skipping")
+                    logger.debug(
+                        f"  {name}: LogP {logp} > {logp_max}; skipping")
                     continue
             except (TypeError, ValueError):
                 continue
@@ -2110,14 +2116,14 @@ class LibraryManager:
 
     def _prepare_local_sdf(self, apply_admet: bool = True) -> List[str]:
         """Convert local SDF/PDBQT files to ready docking inputs with smart auto-detection."""
-    
+
         ligands_input = self.ligands_input_dir
-    
+
         if not os.path.exists(ligands_input):
             raise FileNotFoundError(
                 f"Ligands directory not found: {ligands_input}"
             )
-    
+
         # -----------------------------
         # STEP 1: COLLECT FILES
         # -----------------------------
@@ -2149,16 +2155,18 @@ class LibraryManager:
                         mol2_files.append(path)
                     elif f.lower().endswith(".pdb"):
                         pdb_files.append(path)
-    
+
         # -----------------------------
         # STEP 2: DECIDE MODE
         # -----------------------------
         # Diagnostic: log what we found to help debug empty-result cases
         try:
-            logger.info(f"[DEBUG] Local ligands found - SDF: {len(sdf_files)}, PDBQT: {len(pdbqt_files)}, MOL2: {len(mol2_files)}, PDB: {len(pdb_files)}")
+            logger.info(
+                f"[DEBUG] Local ligands found - SDF: {len(sdf_files)}, PDBQT: {len(pdbqt_files)}, MOL2: {len(mol2_files)}, PDB: {len(pdb_files)}")
             sample = (sdf_files or pdbqt_files or mol2_files or pdb_files)[:5]
             if sample:
-                logger.info(f"[DEBUG] Sample files: {', '.join([os.path.basename(s) for s in sample])}")
+                logger.info(
+                    f"[DEBUG] Sample files: {', '.join([os.path.basename(s) for s in sample])}")
         except Exception:
             pass
         if sdf_files:
@@ -2182,19 +2190,20 @@ class LibraryManager:
             logger.info(f"[*] PDB mode detected: {len(pdb_files)} ligands")
 
         else:
-            raise FileNotFoundError("No ligands found (.sdf/.pdbqt/.mol2/.pdb)")
-    
+            raise FileNotFoundError(
+                "No ligands found (.sdf/.pdbqt/.mol2/.pdb)")
+
         # -----------------------------
         # STEP 3: PROCESS
         # -----------------------------
         admet = ADMETFilter()
         out_files = []
         failed_ligands = []
-    
+
         logger.info(f"[*] Preparing {len(ligands)} ligands...")
-    
+
         for lig in ligands:
-    
+
             try:
                 # -------------------------
                 # CASE A: SDF pipeline
@@ -2207,19 +2216,21 @@ class LibraryManager:
                     if apply_admet:
                         props = admet.parse_sdf_properties(inp)
                         if props is None:
-                            failed_ligands.append((lig, "Invalid SDF properties"))
+                            failed_ligands.append(
+                                (lig, "Invalid SDF properties"))
                             continue
 
                         ok, violations = admet.check_lipinski(props)
                         if not ok:
-                            failed_ligands.append((lig, f"ADMET: {violations}"))
+                            failed_ligands.append(
+                                (lig, f"ADMET: {violations}"))
                             continue
 
                     self._prepare_sdf_to_pdbqt(inp, out, name)
                     out_files.append(out)
-    
+
                     logger.info(f"  [✓] {name} (SDF) → PDBQT")
-    
+
                 # -------------------------
                 # CASE B: PDBQT direct
                 # -------------------------
@@ -2237,7 +2248,8 @@ class LibraryManager:
                     try:
                         run([OBABEL, "-imol2", inp, "-opdbqt", "-O", out])
                         if not os.path.exists(out) or os.path.getsize(out) == 0:
-                            raise RuntimeError("Conversion produced empty file")
+                            raise RuntimeError(
+                                "Conversion produced empty file")
                         if not _ensure_pdbqt_has_charges(out):
                             _fix_pdbqt_charges(out, inp)
                         out_files.append(out)
@@ -2256,7 +2268,8 @@ class LibraryManager:
                     try:
                         run([OBABEL, "-ipdb", inp, "-opdbqt", "-O", out])
                         if not os.path.exists(out) or os.path.getsize(out) == 0:
-                            raise RuntimeError("Conversion produced empty file")
+                            raise RuntimeError(
+                                "Conversion produced empty file")
                         if not _ensure_pdbqt_has_charges(out):
                             _fix_pdbqt_charges(out, inp)
                         out_files.append(out)
@@ -2264,28 +2277,28 @@ class LibraryManager:
                     except Exception as e:
                         failed_ligands.append((lig, f"Conversion failed: {e}"))
                         logger.error(f"  [✗] {lig}: {e}")
-    
+
             except Exception as e:
                 failed_ligands.append((lig, str(e)))
                 logger.error(f"  [✗] {lig}: {e}")
-    
+
         # -----------------------------
         # STEP 4: FINAL REPORT
         # -----------------------------
         self._save_metadata()
-    
+
         logger.info(
             f"[✔] Success: {len(out_files)}/{len(ligands)} ligands ready"
         )
-    
+
         if failed_ligands:
             logger.warning(f"[!] Skipped {len(failed_ligands)} ligands:")
             for lig, reason in failed_ligands:
                 logger.warning(f"   - {Path(lig).name}: {reason}")
-    
+
         if not out_files:
             raise RuntimeError("No valid ligands prepared")
-    
+
         return out_files
 
 # =============================
@@ -2527,7 +2540,8 @@ class ProteinPreparation:
         """Build a grid centered on the receptor bounding box when fpocket is unavailable."""
         source = self.receptor_pdbqt
         if not source or not os.path.exists(source):
-            source = self.pdb_clean if os.path.exists(self.pdb_clean) else self.pdb_file
+            source = self.pdb_clean if os.path.exists(
+                self.pdb_clean) else self.pdb_file
         try:
             xs, ys, zs = parse_pdb_coords(source)
         except (ValueError, IOError):
@@ -2552,7 +2566,8 @@ class ProteinPreparation:
         try:
             run(["fpocket", "-f", fpocket_target])
         except Exception as e:
-            logger.warning(f"fpocket failed: {e}. Using centroid fallback grid.")
+            logger.warning(
+                f"fpocket failed: {e}. Using centroid fallback grid.")
             return self._protein_centroid_grid(padding)
 
         pocket_root = fpocket_target.replace(".pdb", "_out")
@@ -2643,7 +2658,8 @@ class ProteinPreparation:
         keep the original coordinates. The fpocket-derived grid center must be
         shifted by this centroid to land in the centered receptor frame.
         """
-        source = self.pdb_clean if os.path.exists(self.pdb_clean) else self.pdb_file
+        source = self.pdb_clean if os.path.exists(
+            self.pdb_clean) else self.pdb_file
         xs, ys, zs = parse_pdb_coords(source)
         return sum(xs) / len(xs), sum(ys) / len(ys), sum(zs) / len(zs)
 
@@ -2786,7 +2802,7 @@ size_z = {sz}
             (0, 4), (1, 5), (2, 6), (3, 7),
         ]
 
-        generate_box = lambda: ',\n       '.join(
+        def generate_box(): return ',\n       '.join(
             map(lambda x: ', '.join(x), (
                 ('COLOR', '0.0', '1.0'),
                 ('LINEWIDTH', '3.0'),
@@ -3000,7 +3016,8 @@ def _parse_grid_triplet(value: str, label: str) -> Tuple[float, float, float]:
             f"--{label} values must be floats, got '{value}'")
     for v in result:
         if v != v:  # NaN
-            raise ValueError(f"--{label} values must be finite floats, got '{value}'")
+            raise ValueError(
+                f"--{label} values must be finite floats, got '{value}'")
     return result
 
 
@@ -3929,7 +3946,8 @@ def main():
         if args.no_fpocket:
             cx, cy, cz, sx, sy, sz = protein_prep._protein_centroid_grid(
                 padding=args.padding)
-            logger.warning("[!] Using centroid fallback grid (fpocket skipped)")
+            logger.warning(
+                "[!] Using centroid fallback grid (fpocket skipped)")
         else:
             cx, cy, cz, sx, sy, sz = protein_prep.detect_pocket(
                 pocket_spec=args.pockets,
@@ -4099,7 +4117,7 @@ def main():
                         f"({len(smina_rows)} ligands)")
                 else:
                     consensus_rows = []
-                    for name, vina_score, _ in results:
+                    for name, vina_score in results:
                         smina_score = smina_scores.get(name)
                         if vina_score is None or smina_score is None:
                             continue
