@@ -5,6 +5,7 @@ FROM docker.io/debian:bookworm-slim AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 COPY scripts/apt.sh /scripts/apt.sh
+COPY scripts/shlib.sh /scripts/shlib.sh
 COPY scripts/patch.sh /scripts/patch.sh
 
 RUN <<EOF
