@@ -20,6 +20,7 @@ import html
 import statistics
 import subprocess
 import logging
+from multiprocessing import Pool
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -60,7 +61,9 @@ def run_smina_docking(
     ligand_pdbqt: str,
     output_pdbqt: str,
     cx: float, cy: float, cz: float,
-    sx: float, sy: float, sz: float
+    sx: float, sy: float, sz: float,
+    exhaustiveness: int = 8,
+    seed: Optional[int] = None,
 ) -> Optional[float]:
     """Run SMINA docking and return best affinity."""
 
@@ -80,8 +83,10 @@ def run_smina_docking(
         "--size_y", str(sy),
         "--size_z", str(sz),
         "--num_modes", "1",
-        "--exhaustiveness", str(os.environ.get('VS_EXHAUSTIVENESS', 8))
+        "--exhaustiveness", str(exhaustiveness),
     ]
+    if seed is not None:
+        cmd += ["--seed", str(seed)]
 
     result = subprocess.run(
         cmd,
@@ -105,40 +110,93 @@ def run_smina_docking(
             raise RuntimeError("SMINA produced no docking poses")
 
     # 🔴 Parse properly (mode table)
-    for line in result.stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0].isdigit():
+    aff = _parse_smina_affinity(result.stdout)
+    if aff is None:
+        raise RuntimeError("Could not extract affinity from SMINA output")
+    return aff
+
+
+def _parse_smina_affinity(stdout: str) -> Optional[float]:
+    """Extract the best-mode affinity (kcal/mol) from SMINA stdout.
+
+    Prefers the ``mode | affinity`` table (first data row = best mode) and
+    falls back to the first digit-leading line for non-standard output.
+    """
+    lines = stdout.splitlines()
+    for i, line in enumerate(lines):
+        if re.search(r"mode\s*\|\s*affinity", line):
+            for nxt in lines[i + 1:]:
+                if nxt.strip():
+                    toks = nxt.split()
+                    if len(toks) >= 2:
+                        try:
+                            return float(toks[1])
+                        except ValueError:
+                            break
+            break
+    for line in lines:
+        toks = line.split()
+        if len(toks) >= 2 and toks[0].isdigit():
             try:
-                return float(parts[1])
+                return float(toks[1])
             except ValueError:
                 continue
+    return None
 
-    raise RuntimeError("Could not extract affinity from SMINA output")
+
+def _smina_score_one(task):
+    """Worker: dock a single ligand with SMINA. Picklable for Pool."""
+    receptor, lig, out, cx, cy, cz, sx, sy, sz, exhaustiveness, seed = task
+    name = os.path.basename(lig).replace(".pdbqt", "")
+    try:
+        score = run_smina_docking(
+            receptor, lig, out, cx, cy, cz, sx, sy, sz,
+            exhaustiveness=exhaustiveness, seed=seed)
+    except Exception as e:
+        return name, None, str(e)
+    return name, score, None
 
 
 def _run_smina_scoring(receptor: str, ligands: List[str], outdir: str,
                        grid: Tuple[float, float, float, float, float, float],
-                       vina_params: Dict) -> Dict[str, float]:
+                       vina_params: Dict,
+                       num_processes: int = 1) -> Dict[str, float]:
     """Run SMINA scoring for every ligand. Returns {name: smina_affinity}.
 
-    Per-ligand failures are logged and skipped (never fatal).
+    Per-ligand failures are logged and skipped (never fatal). Docking is
+    parallelized with a process pool (like Vina) when ``num_processes > 1``.
     """
     cx, cy, cz, sx, sy, sz = grid
+    exhaustiveness = int(vina_params.get('exhaustiveness', 8)) if vina_params else 8
+    seed = vina_params.get('seed') if vina_params else None
     smina_scores = {}
     dock_dir = os.path.join(outdir, "docked")
     os.makedirs(dock_dir, exist_ok=True)
 
-    for lig in ligands:
-        name = os.path.basename(lig).replace(".pdbqt", "")
-        out = os.path.join(dock_dir, name + "_smina.pdbqt")
+    tasks = [
+        (receptor, lig, os.path.join(dock_dir, os.path.basename(lig)
+         .replace(".pdbqt", "") + "_smina.pdbqt"),
+         cx, cy, cz, sx, sy, sz, exhaustiveness, seed)
+        for lig in ligands
+    ]
+
+    def _collect(results):
+        for name, score, err in results:
+            if err:
+                logger.warning(f"  [!] SMINA failed for {name}: {err}")
+            elif score is not None:
+                smina_scores[name] = score
+
+    if num_processes > 1:
         try:
-            score = run_smina_docking(
-                receptor, lig, out, cx, cy, cz, sx, sy, sz)
+            with Pool(num_processes) as pool:
+                _collect(pool.imap_unordered(_smina_score_one, tasks))
         except Exception as e:
-            logger.warning(f"  [!] SMINA failed for {name}: {e}")
-            continue
-        if score is not None:
-            smina_scores[name] = score
+            logger.warning(
+                f"  [!] SMINA parallel scoring failed ({e}); retrying serially")
+            _collect(_smina_score_one(t) for t in tasks)
+    else:
+        _collect(_smina_score_one(t) for t in tasks)
 
     logger.info(
         f"[*] SMINA scored {len(smina_scores)}/{len(ligands)} ligands")

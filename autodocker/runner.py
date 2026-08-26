@@ -537,7 +537,8 @@ def main():
             else:
                 grid_box = (cx, cy, cz, sx, sy, sz)
                 smina_scores = _run_smina_scoring(
-                    dock_receptor, ligands, args.output, grid_box, vina_params)
+                    dock_receptor, ligands, args.output, grid_box, vina_params,
+                    num_processes=args.processes)
 
                 if args.smina_only:
                     smina_file = os.path.join(args.output, "smina_ranking.csv")
@@ -551,6 +552,14 @@ def main():
                     logger.info(
                         f"[✔] SMINA-only ranking saved: {smina_file} "
                         f"({len(smina_rows)} ligands)")
+                    # Rewire the pipeline's primary results so ranking.csv,
+                    # top hits and the HTML report reflect SMINA scores.
+                    if smina_rows:
+                        results = [(name, score) for name, score in smina_rows]
+                    else:
+                        logger.warning(
+                            "[!] SMINA scored 0 ligands — falling back to "
+                            "Vina ranking for downstream outputs")
                 else:
                     consensus_rows = []
                     for name, vina_score in results:
@@ -623,9 +632,19 @@ def main():
         if args.html_report:
             logger.info("[*] Generating professional HTML report...")
             ranking_csv = os.path.join(args.output, 'ranking.csv')
+            report_meta = {
+                "Protein (receptor)": os.path.basename(args.receptor),
+                "Ligand library": args.library,
+                "Ligands screened": len(results),
+                "Top N reported": args.top_n,
+                "Exhaustiveness": args.exhaustiveness,
+                "Seed": args.seed,
+            }
             generate_html_report(ranking_csv, os.path.join(
                 args.output, "docked"), html_report_file,
-                receptor_pdbqt=protein_prep.receptor_pdbqt)
+                receptor_pdbqt=protein_prep.receptor_pdbqt,
+                meta=report_meta,
+                grid_file=protein_prep.grid_conf)
 
         logger.info("=" * 70)
         logger.info("PIPELINE COMPLETED SUCCESSFULLY (v2.0)")

@@ -204,7 +204,15 @@ def _parse_grid_triplet(value: str, label: str) -> Tuple[float, float, float]:
 
 
 def _parse_grid_config(grid_file: str) -> Dict[str, float]:
-    """Parse grid.conf file and extract center/size coordinates. STRICT validation."""
+    """Parse grid.conf file and extract center/size coordinates. STRICT validation.
+    Results are cached by (path, mtime) so the same file isn't re-parsed per ligand."""
+    try:
+        mtime = os.path.getmtime(grid_file)
+    except OSError:
+        mtime = -1.0
+    cache_key = (grid_file, mtime)
+    if cache_key in _GRID_CACHE:
+        return _GRID_CACHE[cache_key]
     config = {}
     try:
         with open(grid_file, 'r') as f:
@@ -238,10 +246,26 @@ def _parse_grid_config(grid_file: str) -> Dict[str, float]:
         raise ValueError(
             f"Invalid grid box size: {sx}x{sy}x{sz} (must be <= 80)")
 
+    _GRID_CACHE[cache_key] = config
     return config
 
 
+# Cache repeated, expensive, per-ligand inspections so they run once per
+# unique input instead of N times across the ligand set.
 _VINA_THREADS_CACHE: Dict[str, bool] = {}
+_VINA_TYPE_CACHE: Dict[str, str] = {}
+_GRID_CACHE: Dict[Tuple[str, float], Dict] = {}
+_RECEPTOR_CACHE: Dict[str, Tuple[bool, bool]] = {}
+
+
+def _cached_receptor_check(receptor: str) -> Tuple[bool, bool]:
+    """Return (has_atoms, has_charges) for the receptor, cached by path."""
+    if receptor in _RECEPTOR_CACHE:
+        return _RECEPTOR_CACHE[receptor]
+    res = (runner._pdbqt_has_atoms(receptor),
+           runner._ensure_pdbqt_has_charges(receptor))
+    _RECEPTOR_CACHE[receptor] = res
+    return res
 
 
 def _vina_supports_threads(vina_path: str) -> bool:
@@ -264,8 +288,10 @@ def _vina_supports_threads(vina_path: str) -> bool:
 
 def _detect_vina_type(vina_path: str) -> str:
     """Detect if Vina is QuickVina or standard Vina by checking --help output.
-    Returns: 'quickvina' or 'vina'
+    Returns: 'quickvina' or 'vina'. Cached per binary path.
     """
+    if vina_path in _VINA_TYPE_CACHE:
+        return _VINA_TYPE_CACHE[vina_path]
     try:
         result = subprocess.run(
             [vina_path, "--help"],
@@ -283,9 +309,9 @@ def _detect_vina_type(vina_path: str) -> str:
 
     # Fallback: check filename
     basename = os.path.basename(vina_path).lower()
-    if 'qvina' in basename or 'quickvina' in basename:
-        return 'quickvina'
-    return 'vina'
+    result = 'quickvina' if ('qvina' in basename or 'quickvina' in basename) else 'vina'
+    _VINA_TYPE_CACHE[vina_path] = result
+    return result
 
 
 def _build_vina_command(vina_path: str, receptor: str, ligand: str, out: str,
@@ -398,19 +424,20 @@ def dock_ligand(args_tuple: Tuple) -> Tuple[str, Optional[float], Dict]:
         logger.error(f"❌ {name}: {error_msg}")
         return name, None, {"status": "FAILED", "dock_file": out, "log_file": vina_log, "error": error_msg}
 
-    # Validate basic file content
-    if not runner._pdbqt_has_atoms(receptor):
-        error_msg = f"Receptor has no ATOM/HETATM records: {receptor}"
-        logger.error(f"❌ {name}: {error_msg}")
-        return name, None, {"status": "FAILED", "dock_file": out, "log_file": vina_log, "error": error_msg}
-
+    # Validate basic file content (ligand is per-ligand; receptor is cached)
     if not runner._pdbqt_has_atoms(lig):
         error_msg = f"Ligand has no ATOM/HETATM records: {lig}"
         logger.error(f"❌ {name}: {error_msg}")
         return name, None, {"status": "FAILED", "dock_file": out, "log_file": vina_log, "error": error_msg}
 
-    # Validate files have charges
-    if not runner._ensure_pdbqt_has_charges(receptor):
+    # Validate files have charges (receptor check cached per path)
+    _rec_has_atoms, _rec_has_charges = _cached_receptor_check(receptor)
+    if not _rec_has_atoms:
+        error_msg = f"Receptor has no ATOM/HETATM records: {receptor}"
+        logger.error(f"❌ {name}: {error_msg}")
+        return name, None, {"status": "FAILED", "dock_file": out, "log_file": vina_log, "error": error_msg}
+
+    if not _rec_has_charges:
         error_msg = f"Receptor has no charges: {receptor}"
         logger.error(f"❌ {name}: {error_msg}")
         return name, None, {"status": "FAILED", "dock_file": out, "log_file": vina_log, "error": error_msg}
@@ -615,8 +642,11 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
         vina_params = defaults
 
     checkpoint_file = os.path.join(outdir, ".docking_checkpoint.json")
-    if not resume and os.path.exists(checkpoint_file):
-        os.remove(checkpoint_file)
+    journal_file = os.path.join(outdir, ".docking_checkpoint.jsonl")
+    if not resume:
+        for _f in (checkpoint_file, journal_file):
+            if os.path.exists(_f):
+                os.remove(_f)
 
     checkpoint = runner.DockingCheckpoint(outdir)
 
@@ -697,6 +727,7 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
 
     all_results = checkpoint.get_results()
     all_results.extend(failed_results)
+    checkpoint.flush()  # consolidate O(1) journal writes into the JSON file
 
     # Fail loud only when the *whole* screen produced no valid score.
     # On a resumed run, cached successes may already exist while the only
