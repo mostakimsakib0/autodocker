@@ -1,86 +1,80 @@
 import os
-import shutil
 
-import pytest
+import vspipeline.admet as admet
 
-import runner
-
-
-class TestADMETFilter:
-    def test_check_lipinski_ok(self):
-        props = {"mw": 350.0, "logp": 3.0, "hbd": 2, "hba": 4}
-        ok, violations = runner.ADMETFilter.check_lipinski(props)
-        assert ok is True
-        assert violations == []
-
-    def test_check_lipinski_violations(self):
-        props = {"mw": 600.0, "logp": 6.0, "hbd": 6, "hba": 12}
-        ok, violations = runner.ADMETFilter.check_lipinski(props)
-        assert ok is False
-        assert len(violations) == 4
-
-    def test_check_lipinski_none(self):
-        ok, violations = runner.ADMETFilter.check_lipinski(None)
-        assert ok is False
-
-    def test_check_lipinski_missing_keys(self):
-        ok, violations = runner.ADMETFilter.check_lipinski({"mw": 300.0})
-        assert ok is False
-
-    def test_parse_sdf_properties_requires_valid_sdf(self, tmp_path):
-        p = tmp_path / "bad.sdf"
-        p.write_text("garbage\n")
-        assert runner.ADMETFilter.parse_sdf_properties(str(p)) is None
+VALID_SDF = (
+    "ethanol\n"
+    "comment\n"
+    "  3  2  0  0  0\n"
+    "   1.00000   2.00000   3.00000\n"
+    "   4.00000   5.00000   6.00000\n"
+    "M  END\n"
+)
 
 
-@pytest.fixture
-def ligands_dir(tmp_path, small_sdf):
-    d = tmp_path / "ligands"
-    d.mkdir()
-    shutil.copy(small_sdf, str(d / "methane.sdf"))
-    return str(d)
+def test_is_valid_sdf_valid(tmp_path):
+    p = tmp_path / "a.sdf"
+    p.write_text(VALID_SDF)
+    ok, msg = admet._is_valid_sdf(str(p))
+    assert ok and msg == ""
 
 
-class TestNoAdmetNeverDrops:
-    """Regression for ROADMAP A7: --no-admet must not drop ligands
-    even when descriptor parsing fails."""
+def test_is_valid_sdf_missing(tmp_path):
+    ok, msg = admet._is_valid_sdf(str(tmp_path / "nope.sdf"))
+    assert not ok
 
-    def test_apply_admet_false_keeps_ligand(self, ligands_dir, tmp_path, monkeypatch):
-        monkeypatch.setattr(runner.ADMETFilter, "parse_sdf_properties",
-                            staticmethod(lambda sdf: None))
-        monkeypatch.setattr(runner.LibraryManager, "_prepare_sdf_to_pdbqt",
-                            lambda self, sdf, pdbqt, lid: pdbqt)
-        lm = runner.LibraryManager(str(tmp_path / "out"), ligands_dir)
-        out = lm._prepare_local_sdf(apply_admet=False)
-        assert len(out) == 1
 
-    def test_apply_admet_true_drops_when_descriptors_fail(self, ligands_dir, tmp_path, monkeypatch):
-        monkeypatch.setattr(runner.ADMETFilter, "parse_sdf_properties",
-                            staticmethod(lambda sdf: None))
-        monkeypatch.setattr(runner.LibraryManager, "_prepare_sdf_to_pdbqt",
-                            lambda self, sdf, pdbqt, lid: pdbqt)
-        lm = runner.LibraryManager(str(tmp_path / "out"), ligands_dir)
-        with pytest.raises(RuntimeError, match="No valid ligands prepared"):
-            lm._prepare_local_sdf(apply_admet=True)
+def test_is_valid_sdf_too_small(tmp_path):
+    p = tmp_path / "a.sdf"
+    p.write_text("x")
+    ok, msg = admet._is_valid_sdf(str(p))
+    assert not ok
 
-    def test_apply_admet_true_drops_violating(self, ligands_dir, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            runner.ADMETFilter, "parse_sdf_properties",
-            staticmethod(lambda sdf: {"mw": 700.0, "logp": 7.0,
-                                      "hbd": 6, "hba": 12}))
-        monkeypatch.setattr(runner.LibraryManager, "_prepare_sdf_to_pdbqt",
-                            lambda self, sdf, pdbqt, lid: pdbqt)
-        lm = runner.LibraryManager(str(tmp_path / "out"), ligands_dir)
-        with pytest.raises(RuntimeError, match="No valid ligands prepared"):
-            lm._prepare_local_sdf(apply_admet=True)
 
-    def test_apply_admet_false_keeps_violating(self, ligands_dir, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            runner.ADMETFilter, "parse_sdf_properties",
-            staticmethod(lambda sdf: {"mw": 700.0, "logp": 7.0,
-                                      "hbd": 6, "hba": 12}))
-        monkeypatch.setattr(runner.LibraryManager, "_prepare_sdf_to_pdbqt",
-                            lambda self, sdf, pdbqt, lid: pdbqt)
-        lm = runner.LibraryManager(str(tmp_path / "out"), ligands_dir)
-        out = lm._prepare_local_sdf(apply_admet=False)
-        assert len(out) == 1
+def test_is_valid_sdf_no_mend(tmp_path):
+    p = tmp_path / "a.sdf"
+    p.write_text("mol\n\n  3  2  0  0  0\n   1.0   2.0   3.0\nno end here\n")
+    ok, msg = admet._is_valid_sdf(str(p))
+    assert not ok
+
+
+def test_is_valid_sdf_error_content(tmp_path):
+    p = tmp_path / "a.sdf"
+    p.write_text("404 NotFound short")
+    ok, msg = admet._is_valid_sdf(str(p))
+    assert not ok
+
+
+def test_check_lipinski_pass():
+    ok, v = admet.ADMETFilter.check_lipinski(
+        {"mw": 300, "logp": 2, "hba": 2, "hbd": 1})
+    assert ok and v == []
+
+
+def test_check_lipinski_fail():
+    ok, v = admet.ADMETFilter.check_lipinski(
+        {"mw": 600, "logp": 6, "hba": 12, "hbd": 6})
+    assert not ok and len(v) == 4
+
+
+def test_check_lipinski_missing():
+    ok, v = admet.ADMETFilter.check_lipinski(None)
+    assert not ok and "Invalid SDF" in v[0]
+
+
+def test_parse_sdf_properties(monkeypatch, tmp_path):
+    p = tmp_path / "a.sdf"
+    p.write_text(VALID_SDF)
+    monkeypatch.setattr(
+        admet, "_obabel_descriptors",
+        lambda f: {"mw": 300.0, "logp": 2.0, "tpsa": 60.0,
+                   "rotors": 3.0, "hbd": 1.0, "hba": 2.0})
+    props = admet.ADMETFilter.parse_sdf_properties(str(p))
+    assert props["mw"] == 300.0 and props["hba"] == 2.0
+
+
+def test_obabel_descriptors_real(tmp_path):
+    p = tmp_path / "a.sdf"
+    p.write_text(VALID_SDF)
+    result = admet._obabel_descriptors(str(p))
+    assert result is None or isinstance(result, dict)

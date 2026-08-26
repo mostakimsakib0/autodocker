@@ -97,8 +97,8 @@ def _pdbqt_atom_element(atom_type: str) -> str:
         return "S"
     if atom_type in ("HD", "H"):
         return "H"
-    if atom_type in _ATOMIC_RADII:
-        return atom_type
+    if atom_type in _ATOMIC_RADII or atom_type.upper() in _ATOMIC_RADII:
+        return atom_type if atom_type in _ATOMIC_RADII else atom_type.upper()
     return "C"
 
 

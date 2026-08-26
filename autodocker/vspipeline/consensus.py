@@ -186,21 +186,28 @@ def run_smina_docking(
 def _parse_smina_affinity(stdout: str) -> Optional[float]:
     """Extract the best-mode affinity (kcal/mol) from SMINA stdout.
 
-    Prefers the ``mode | affinity`` table (first data row = best mode) and
-    falls back to the first digit-leading line for non-standard output.
+    Prefers the ``mode | affinity`` table (first data row = best mode); SMINA
+    emits ``0 | -7.5 | 0.0`` so the affinity is the second pipe-delimited
+    column. Falls back to the first digit-leading line for non-standard
+    output.
     """
     lines = stdout.splitlines()
     for i, line in enumerate(lines):
         if re.search(r"mode\s*\|\s*affinity", line):
             for nxt in lines[i + 1:]:
-                if nxt.strip():
+                if not nxt.strip():
+                    continue
+                cols = [c.strip() for c in nxt.split('|')]
+                cand = cols[1] if len(cols) >= 2 else None
+                if cand is None:
                     toks = nxt.split()
-                    if len(toks) >= 2:
-                        try:
-                            return float(toks[1])
-                        except ValueError:
-                            break
-            break
+                    cand = toks[1] if len(toks) >= 2 else None
+                if cand is not None:
+                    try:
+                        return float(cand)
+                    except ValueError:
+                        pass
+                break
     for line in lines:
         toks = line.split()
         if len(toks) >= 2 and toks[0].isdigit():
