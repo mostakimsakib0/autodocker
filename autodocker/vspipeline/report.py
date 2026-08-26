@@ -685,9 +685,10 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
 
 
 def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
-                         receptor_pdbqt: Optional[str] = None,
-                         meta: Optional[Dict] = None,
-                         grid_file: Optional[str] = None) -> None:
+                          receptor_pdbqt: Optional[str] = None,
+                          meta: Optional[Dict] = None,
+                          grid_file: Optional[str] = None,
+                          scorer_agreement: Optional[Dict] = None) -> None:
     """Generate a self-contained, professional HTML screening report.
 
     Includes a table of contents, run metadata, summary stat cards, an
@@ -813,6 +814,46 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                 <td>{html.escape(str(lig.get('Status', '-')))}</td>
             </tr>"""
 
+    # Global, citable scorer-concordance metric (Spearman rho) -- shown as the
+    # defensible agreement statistic. The per-ligand "Agreement (heuristic)"
+    # column in consensus_ranking.csv is only a quick UI indicator.
+    agreement_section = ""
+    if scorer_agreement and scorer_agreement.get("rho") is not None:
+        _rho = float(scorer_agreement["rho"])
+        _n = int(scorer_agreement.get("n", 0))
+        _abs = abs(_rho)
+        if _abs >= 0.7:
+            _strength = "strong"
+        elif _abs >= 0.4:
+            _strength = "moderate"
+        elif _abs >= 0.2:
+            _strength = "weak"
+        else:
+            _strength = "negligible"
+        _direction = ("concordant" if _rho > 0 else
+                      "discordant" if _rho < 0 else "uncorrelated")
+        agreement_section = f"""
+            <div class="section" id="agreement">
+                <h2>🤝 Scorer Agreement (Vina vs SMINA)</h2>
+                <p class="muted"><em>Global, citable measure of scorer concordance
+                across the screen (Spearman rank correlation).</em></p>
+                <div class="stat-grid">
+                    {_stat_card(f"{_rho:.3f}", "Spearman &rho;")}
+                    {_stat_card(_n, "Paired ligands (n)")}
+                </div>
+                <p>The two scoring functions are <strong>{_strength}
+                {_direction}</strong> (|&rho;| = {_abs:.3f}). This &rho; is the
+                statistically grounded agreement metric and may be reported as
+                such.</p>
+                <p class="muted"><small>Note: the per-ligand
+                <code>Agreement (heuristic)</code> column in
+                <code>consensus_ranking.csv</code> is only a quick UI indicator
+                (max(0, 100 &minus; |&Delta;|&times;10)) and is
+                <strong>not</strong> a validated metric &mdash; do not cite it
+                quantitatively.</small></p>
+            </div>
+"""
+
     html_content = f"""<!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
@@ -857,6 +898,8 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                     {_stat_card(failed_count, "Failed / Invalid")}
                 </div>
             </div>
+
+            {agreement_section}
 
             <div class="section" id="top">
                 <h2>🏆 Top 10 Hits</h2>

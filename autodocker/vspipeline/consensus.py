@@ -37,13 +37,21 @@ import runner  # noqa: E402
 logger = logging.getLogger(__name__)
 
 def consensus_rank(vina_affinity: float, smina_affinity: Optional[float]) -> Dict:
-    """Calculate consensus score."""
+    """Calculate a per-ligand consensus score for quick UI coloring/sorting.
+
+    WARNING: the ``agreement`` field here is a *heuristic UI indicator only*,
+    ``max(0, 100 - |vina - smina| * 10)`` (1 point per 0.1 kcal/mol of
+    disagreement, floored at 10 kcal/mol). It is an arbitrary rule of thumb
+    with no statistical basis and MUST NOT be cited as a quantitative result.
+    For a defensible, citable measure of scorer concordance use
+    :func:`scorer_agreement_spearman` (global Spearman rank correlation).
+    """
     if smina_affinity is None:
         return {'vina': vina_affinity, 'smina': None, 'consensus': vina_affinity, 'agreement': 0}
 
-    # Calculate agreement (0-100, higher = better agreement)
+    # Calculate agreement (0-100, higher = better agreement) -- HEURISTIC ONLY
     diff = abs(vina_affinity - smina_affinity)
-    agreement = max(0, 100 - (diff * 10))  # Rule of thumb
+    agreement = max(0, 100 - (diff * 10))  # Rule of thumb, not a real metric
 
     # Average the scores
     consensus = (vina_affinity + smina_affinity) / 2
@@ -54,6 +62,65 @@ def consensus_rank(vina_affinity: float, smina_affinity: Optional[float]) -> Dic
         'consensus': consensus,
         'agreement': agreement
     }
+
+
+def _rankdata(values: List[float]) -> List[float]:
+    """Assign 1-based average ranks, handling ties (e.g. [10, 20, 20, 30]
+    -> [1.0, 2.5, 2.5, 4.0]). Used for the Spearman correlation."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    n = len(values)
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        i = j + 1
+    return ranks
+
+
+def _pearson(a: List[float], b: List[float]) -> float:
+    n = len(a)
+    if n < 2:
+        return 0.0
+    ma = sum(a) / n
+    mb = sum(b) / n
+    num = sum((a[i] - ma) * (b[i] - mb) for i in range(n))
+    da = sum((a[i] - ma) ** 2 for i in range(n))
+    db = sum((b[i] - mb) ** 2 for i in range(n))
+    if da == 0 or db == 0:
+        return 0.0
+    return num / (da ** 0.5 * db ** 0.5)
+
+
+def scorer_agreement_spearman(vina_scores: List[Optional[float]],
+                              smina_scores: List[Optional[float]]):
+    """Global, citable scorer-concordance metric (Spearman rank correlation).
+
+    Computes the Spearman rank correlation (rho) between two scoring functions
+    across all paired ligands in a screen, together with the number of paired
+    points ``n``. This is the statistically grounded measure of agreement and
+    is safe to report as a quantitative result.
+
+    Returns ``(rho, n)`` or ``(None, n)`` when undefined -- fewer than 2
+    paired values, or either scorer has zero variance (constant ranks).
+
+    Pure-Python (no scipy/numpy dependency required).
+    """
+    pairs = [(float(v), float(s)) for v, s in zip(vina_scores, smina_scores)
+             if v is not None and s is not None]
+    n = len(pairs)
+    if n < 2:
+        return None, n
+    rv = _rankdata([p[0] for p in pairs])
+    rs = _rankdata([p[1] for p in pairs])
+    # Constant-rank guard: zero variance -> correlation undefined.
+    if all(r == rv[0] for r in rv) or all(r == rs[0] for r in rs):
+        return None, n
+    return _pearson(rv, rs), n
 
 
 def run_smina_docking(

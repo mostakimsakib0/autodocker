@@ -150,6 +150,7 @@ from vspipeline.consensus import (
     _run_smina_scoring,
     consensus_rank,
     run_smina_docking,
+    scorer_agreement_spearman,
 )
 from vspipeline.charges import (
     _assign_simple_charges,
@@ -526,6 +527,7 @@ def main():
         )
 
         # ===== PHASE 4: Consensus Scoring (Optional) =====
+        scorer_agreement = None
         if args.consensus or args.smina_only:
             logger.info("[PHASE 4] Consensus Scoring")
             if SMINA is None:
@@ -574,7 +576,7 @@ def main():
                         writer = csv.writer(f)
                         writer.writerow(
                             ["Ligand", "Vina_Affinity", "SMINA_Affinity",
-                             "Consensus", "Agreement"])
+                             "Consensus", "Agreement (heuristic)"])
                         for name, row in sorted(
                                 consensus_rows,
                                 key=lambda kv: kv[1]["consensus"]):
@@ -583,6 +585,25 @@ def main():
                                 _score_csv(row["smina"]),
                                 _score_csv(row["consensus"]),
                                 f"{row['agreement']:.1f}%"])
+                    # Global, citable scorer concordance (Spearman rank corr).
+                    rho, n_agree = scorer_agreement_spearman(
+                        [row["vina"] for _, row in consensus_rows],
+                        [row["smina"] for _, row in consensus_rows])
+                    scorer_agreement = {"rho": rho, "n": n_agree}
+                    try:
+                        with open(consensus_file, "a", newline="") as f:
+                            f.write("\n")
+                            if rho is not None:
+                                f.write(
+                                    f"# Global scorer agreement: Spearman rho "
+                                    f"= {rho:.3f} (n={n_agree}); Vina vs SMINA "
+                                    f"rank correlation (citable metric).\n")
+                            else:
+                                f.write(
+                                    f"# Global scorer agreement: undefined "
+                                    f"(n={n_agree}).\n")
+                    except Exception as e:
+                        logger.warning(f"Could not append agreement summary: {e}")
                     logger.info(
                         f"[✔] Consensus ranking saved: {consensus_file} "
                         f"({len(consensus_rows)} ligands)")
@@ -644,7 +665,8 @@ def main():
                 args.output, "docked"), html_report_file,
                 receptor_pdbqt=protein_prep.receptor_pdbqt,
                 meta=report_meta,
-                grid_file=protein_prep.grid_conf)
+                grid_file=protein_prep.grid_conf,
+                scorer_agreement=scorer_agreement)
 
         logger.info("=" * 70)
         logger.info("PIPELINE COMPLETED SUCCESSFULLY (v2.0)")
