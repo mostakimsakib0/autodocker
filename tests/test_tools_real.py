@@ -33,10 +33,42 @@ def _has_real_charges(pdbqt):
 
 
 def _make_pdbqt(smiles, path, charged=False):
-    cmd = [OBABEL, "-:" + smiles, "--gen3d", "-h", "-opdbqt", "-O", str(path)]
-    if charged:
-        cmd += ["--partialcharge", "gasteiger"]
-    subprocess.run(cmd, check=True, stderr=subprocess.DEVNULL)
+    """Build a PDBQT. When `charged`, compute real partial charges via rdkit
+    (obabel in this env cannot) and patch them into the charge column so the
+    result is usable by AutoDock."""
+    raw = str(path) + ".raw.pdbqt"
+    subprocess.run([OBABEL, "-:" + smiles, "--gen3d", "-h", "-opdbqt", "-O", raw],
+                   check=True, stderr=subprocess.DEVNULL)
+    if not charged:
+        import shutil as _sh
+        _sh.move(raw, str(path))
+        return _has_real_charges(str(path))
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+    except ImportError:
+        return False
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return False
+    mol = Chem.AddHs(mol)
+    if AllChem.EmbedMolecule(mol, randomSeed=42) != 0:
+        return False
+    try:
+        AllChem.ComputeGasteigerCharges(mol)
+        charges = [float(a.GetProp("_GasteigerCharge")) for a in mol.GetAtoms()]
+    except Exception:
+        return False
+    if any(c != c for c in charges):  # NaN guard
+        return False
+    # Patch the charge column (PDBQT cols 55-61) by atom order.
+    out, ai = [], 0
+    for ln in open(raw):
+        if ln.startswith(("ATOM", "HETATM")):
+            q = charges[ai]; ai += 1
+            ln = ln[:54] + f"{q:7.4f}" + ln[61:]
+        out.append(ln)
+    open(str(path), "w").writelines(out)
     return _has_real_charges(str(path))
 
 
