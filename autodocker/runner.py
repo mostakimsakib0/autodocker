@@ -86,6 +86,10 @@ else:
 VINA = VINA_PRIMARY  # Start with primary tool
 # Optional for consensus scoring
 SMINA = find_tool("smina", "smina.exe")
+# Optional: protonation (reduce) and AutoDock4 grid/dock engines
+REDUCE = find_tool("reduce")
+AUTODOCK = find_tool("autodock4", "autodock")
+AUTOGRID = find_tool("autogrid4", "autogrid")
 COMMAND_TIMEOUT = int(os.environ.get("VS_COMMAND_TIMEOUT", "900"))
 
 # Verify tools exist - STRICT validation
@@ -98,6 +102,12 @@ if missing:
 
 if SMINA is None:
     logger.info("SMINA not found - consensus scoring will be skipped")
+if REDUCE is None:
+    logger.info("reduce not found - will rely on OpenBabel for protonation")
+if AUTODOCK is None:
+    logger.info("AutoDock4 not found - AutoDock scoring path disabled")
+if AUTOGRID is None:
+    logger.info("AutoGrid4 not found - AutoDock scoring path disabled")
 
 # ---------------------------------------------------------------------------
 # Pipeline internals (split of the former monolith into vspipeline/*).
