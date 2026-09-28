@@ -16,6 +16,8 @@ OBABEL = shutil.which("obabel")
 
 
 def _run_ok(cmd):
+    if not cmd or cmd[0] is None:  # binary not installed
+        return False
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         return result.returncode == 0

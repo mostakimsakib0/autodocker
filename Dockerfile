@@ -56,8 +56,8 @@ EOF
 # ============================================================
 # Stage 1 — Build NGL
 # ============================================================
-# Pinned to a Node-22 pnpm image (not :latest) so builds are reproducible.
-FROM ghcr.io/pnpm/pnpm:latest-22 AS ngl_builder
+# Pinned to a fixed pnpm release (not :latest) so builds are reproducible.
+FROM ghcr.io/pnpm/pnpm:12.8.0 AS ngl_builder
 WORKDIR /src
 COPY tools/ngl .
 RUN pnpm install
@@ -106,7 +106,7 @@ LABEL org.opencontainers.image.title="AutoDocker" \
       org.opencontainers.image.documentation="https://github.com/mostakimsakib0/autodocker#readme" \
       org.opencontainers.image.vendor="Mostakim Sakib" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.version="1.0.2"
+      org.opencontainers.image.version="1.1.1"
 
 COPY --from=deps /deps /deps
 COPY scripts/apt.sh /apt.sh
