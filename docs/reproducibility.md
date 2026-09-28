@@ -35,7 +35,7 @@ Strictly deterministic *values* are also asserted in `tests/test_e2e.py`
 Pin the pipeline version in your own records:
 
 ```bash
-python3 autodocker/runner.py --version   # e.g. AutoDocker 1.1.2
+python3 autodocker/runner.py --version   # e.g. AutoDocker 1.1.3
 ```
 
 Container images are tagged by git tag and commit SHA

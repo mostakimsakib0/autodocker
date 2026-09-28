@@ -106,7 +106,7 @@ LABEL org.opencontainers.image.title="AutoDocker" \
       org.opencontainers.image.documentation="https://github.com/mostakimsakib0/autodocker#readme" \
       org.opencontainers.image.vendor="Mostakim Sakib" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.version="1.1.2"
+      org.opencontainers.image.version="1.1.3"
 
 COPY --from=deps /deps /deps
 COPY scripts/apt.sh /apt.sh
