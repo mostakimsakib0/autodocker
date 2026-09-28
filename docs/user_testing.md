@@ -39,7 +39,7 @@ Command used:
 Outputs produced (check that apply):
   [ ] ranking.csv     [ ] Top_hits.txt   [ ] metrics.txt
   [ ] pocket_summary.csv    [ ] docked/*_out.pdbqt
-  [ ] grid_box.py     [ ] report.html (when requested)
+  [ ] grid_box.pml    [ ] report.html (when requested)
 
 Determinism check (docs/reproducibility.md):
   scripts/reproducibility_check.sh result: DETERMINISTIC | NON-DETERMINISTIC

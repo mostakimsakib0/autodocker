@@ -75,6 +75,22 @@ def find_tool(*names: str) -> Optional[str]:
     return None
 
 
+def default_seed() -> int:
+    """Seed used when --seed is not given: $VS_SEED if set, else 42.
+
+    Reading the environment here (instead of only in dock_all) keeps the
+    documented VS_SEED knob working: the parsed --seed is always passed down,
+    so a hardcoded argparse default would otherwise override it.
+    """
+    value = os.environ.get("VS_SEED", "").strip()
+    if not value:
+        return 42
+    try:
+        return int(value)
+    except ValueError:
+        raise SystemExit(f"[!] VS_SEED must be an integer, got {value!r}")
+
+
 # Tool paths (prefer modern Vina for consistency)
 OBABEL = find_tool("obabel", "OpenBabel", "OpenBabel.exe")
 # Prefer modern Vina for reproducibility/consistency
@@ -271,8 +287,8 @@ def main():
                         default=9, help="Vina binding modes")
     parser.add_argument("--energy-range", type=float,
                         default=3.0, help="Vina energy range (kcal/mol)")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for reproducibility")
+    parser.add_argument("--seed", type=int, default=default_seed(),
+                        help="Random seed for reproducibility (default: $VS_SEED or 42)")
     parser.add_argument("--threads", type=int, default=None,
                         help="Vina threads (default: all cores; e.g. 2 to bound CPU when docking in parallel)")
     parser.add_argument("--min-valid-affinity", type=float, default=-1.0,
@@ -433,7 +449,10 @@ def main():
             if args.keep_waters:
                 logger.info(
                     "[*] Detecting water molecules near binding site...")
-                waters = detect_water_molecules(source, (cx, cy, cz),
+                # (cx, cy, cz) is in the centered receptor frame; waters are
+                # read from the original PDB, so compare in that frame.
+                dx, dy, dz = protein_prep.frame_offset()
+                waters = detect_water_molecules(source, (cx + dx, cy + dy, cz + dz),
                                                 distance_threshold=args.water_distance)
                 if waters:
                     logger.info(

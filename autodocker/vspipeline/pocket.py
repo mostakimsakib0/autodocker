@@ -213,11 +213,14 @@ def _hetatm_to_pdbqt_line(parsed: Dict, serial: int) -> Optional[str]:
 
 
 def _append_hetatm_to_receptor(pdbqt_file: str, pdb_file: str,
-                               keep_residues, selected_chains) -> int:
+                               keep_residues, selected_chains,
+                               offset: Tuple[float, float, float] = (0.0, 0.0, 0.0)) -> int:
     """Append PDBQT records for the selected HETATM residues to a receptor.
 
-    Works on the *original* PDB so the HETATM records still exist. Returns
-    the number of atoms appended. Existing protein charges are preserved.
+    Works on the *original* PDB so the HETATM records still exist. ``offset``
+    is subtracted from each coordinate to move the atoms into the receptor
+    PDBQT's frame (it is centered by ``obabel -c``). Returns the number of
+    atoms appended. Existing protein charges are preserved.
     """
     keep = set(keep_residues)
     serial = _max_pdbqt_serial(pdbqt_file) + 1
@@ -235,6 +238,8 @@ def _append_hetatm_to_receptor(pdbqt_file: str, pdb_file: str,
             key = (parsed["chain"], parsed["resnum"], parsed["resname"])
             if key not in keep:
                 continue
+            x, y, z = parsed["coords"]
+            parsed["coords"] = (x - offset[0], y - offset[1], z - offset[2])
             record = _hetatm_to_pdbqt_line(parsed, serial)
             if record is None:
                 logger.warning(

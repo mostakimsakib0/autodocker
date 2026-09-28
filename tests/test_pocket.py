@@ -113,3 +113,14 @@ def test_append_hetatm_to_receptor(tmp_path):
     assert "HETATM" in content
     assert "OA" in content
     assert "B" not in content  # chain B excluded
+
+
+def test_append_hetatm_applies_frame_offset(tmp_path):
+    rec = tmp_path / "r.pdbqt"
+    _pdb(rec, ["ATOM      1  C   ALA A   1      0.0 0.0 0.0  0.0 0.0    -0.1 C"])
+    pdb = tmp_path / "prot.pdb"
+    _pdb(pdb, [_het("O", "HOH", "A", "1", 11.0, 22.0, 33.0, element="O")])
+    pk._append_hetatm_to_receptor(str(rec), str(pdb), {("A", "1", "HOH")},
+                                  {"A"}, offset=(10.0, 20.0, 30.0))
+    het = [l for l in rec.read_text().splitlines() if l.startswith("HETATM")][0]
+    assert (float(het[30:38]), float(het[38:46]), float(het[46:54])) == (1.0, 2.0, 3.0)

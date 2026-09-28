@@ -173,3 +173,35 @@ def test_rebuild_receptor_keep_hetatm(tmp_path):
     out = pp.rebuild_receptor_keep_hetatm([("A", "1", "HOH")])
     assert os.path.exists(out)
     assert "HETATM" in open(str(rec)).read()
+
+
+def test_kept_hetatm_lands_in_receptor_frame(tmp_path):
+    # Receptor PDBQT is centered by obabel -c; a kept water must move with it.
+    p = tmp_path / "prot.pdb"
+    water = _het("O", "HOH", "A", "500", 60.0, 59.0, 59.0, element="O")
+    _pdb(p, _protein_pdb(120) + [water])
+    pp = prot.ProteinPreparation(str(p), str(tmp_path))
+    pp.prepare_receptor(chain="A")
+    pp.rebuild_receptor_keep_hetatm([("A", "500", "HOH")])
+    lines = open(pp.receptor_pdbqt).read().splitlines()
+    het = [l for l in lines if l.startswith("HETATM") and "HOH" in l][0]
+    xyz = (float(het[30:38]), float(het[38:46]), float(het[46:54]))
+    # centroid of the protein is (59.5, 59.5, 59.5)
+    assert xyz == pytest.approx((0.5, -0.5, -0.5), abs=0.01)
+
+
+def test_frame_offset_file_restores_input_frame(tmp_path):
+    import subprocess
+    import sys
+    p = tmp_path / "prot.pdb"
+    _pdb(p, _protein_pdb(120))
+    pp = prot.ProteinPreparation(str(p), str(tmp_path))
+    pp.prepare_receptor(chain="A")
+    pp.write_grid(0, 0, 0, 20, 20, 20)
+    assert os.path.exists(tmp_path / "frame_offset.txt")
+    script = os.path.join(os.path.dirname(__file__), "..", "scripts", "restore_frame.py")
+    subprocess.run([sys.executable, script, str(tmp_path), pp.receptor_pdbqt], check=True)
+    restored = str(pp.receptor_pdbqt).replace(".pdbqt", "_inputframe.pdbqt")
+    first = [l for l in open(restored) if l.startswith("ATOM")][0]
+    assert (float(first[30:38]), float(first[38:46]), float(first[46:54])) == \
+        pytest.approx((0.0, 0.0, 0.0), abs=0.01)

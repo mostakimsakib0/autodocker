@@ -162,7 +162,8 @@ class ProteinPreparation:
 
         selected_chains = getattr(self, "selected_chains", None) or ["A"]
         appended = runner._append_hetatm_to_receptor(
-            self.receptor_pdbqt, self.pdb_file, keep_residues, selected_chains)
+            self.receptor_pdbqt, self.pdb_file, keep_residues, selected_chains,
+            offset=self.frame_offset())
 
         if appended == 0:
             raise ValueError(
@@ -291,6 +292,31 @@ class ProteinPreparation:
             [p["path"] for p in selected], padding=padding)
         dx, dy, dz = self._receptor_centroid()
         return cx - dx, cy - dy, cz - dz, sx, sy, sz
+
+    def frame_offset(self) -> Tuple[float, float, float]:
+        """Translation from the receptor PDBQT/docking frame to the input PDB frame.
+
+        Add it to docked-pose coordinates to overlay them on the input PDB;
+        subtract it to move input-PDB coordinates into the docking frame.
+        """
+        return self._receptor_centroid()
+
+    def write_frame_offset(self) -> Optional[str]:
+        """Record the frame offset in ``frame_offset.txt`` next to grid.conf."""
+        path = os.path.join(self.outdir, "frame_offset.txt")
+        try:
+            dx, dy, dz = self.frame_offset()
+            with open(path, "w") as f:
+                f.write(
+                    "# receptor.pdbqt, grid.conf and docked poses are centered at the\n"
+                    "# origin (obabel -c). Add this offset to their coordinates to\n"
+                    "# overlay them on the input PDB, e.g. with\n"
+                    "#   python3 scripts/restore_frame.py <output_dir> docked/*_out.pdbqt\n"
+                    f"offset_x = {dx}\noffset_y = {dy}\noffset_z = {dz}\n")
+        except (ValueError, IOError, ZeroDivisionError) as e:
+            logger.warning(f"[!] Could not write frame offset: {e}")
+            return None
+        return path
 
     def _receptor_centroid(self) -> Tuple[float, float, float]:
         """Center of mass of the prepared receptor.
@@ -421,6 +447,7 @@ size_z = {sz}
 """)
             logger.info(f"[✔] Grid ready: {self.grid_conf}")
             self.write_grid_box_script(cx, cy, cz, sx, sy, sz)
+            self.write_frame_offset()
         except IOError as e:
             logger.error(f"Failed to write grid file: {e}")
             raise

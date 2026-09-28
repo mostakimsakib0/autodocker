@@ -49,8 +49,19 @@ Results are written under `/workspace/output/`:
 - `Top_hits.txt` — the top-N hits with interpretation
 - `metrics.txt` — pose statistics and SimScore
 - `pocket_summary.csv` — fpocket pocket scores
-- `grid_box.py` — PyMOL script visualizing the docking box
+- `grid_box.pml` — PyMOL script visualizing the docking box
 - `docked/*_out.pdbqt` — docked poses; `*_vina.log` — per-ligand logs
+- `frame_offset.txt` — translation back to the input PDB's coordinates (see below)
+
+The receptor is centered at the origin during preparation (`obabel -c`), so
+`receptor.pdbqt`, `grid.conf` and the docked poses share that centered frame.
+The bundled PyMOL script and HTML report use it consistently, but poses will
+not overlay on your original `protein.pdb` (e.g. for MD set-up or comparison
+with a crystal ligand) until shifted back:
+
+```bash
+python3 scripts/restore_frame.py works/output works/output/docked/*_out.pdbqt
+```
 
 ## CLI reference
 
@@ -93,7 +104,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `INPUT` | Single-file ligand input (entry.sh) | unset |
 | `LIGS` | Ligand directory (entry.sh) | `/workspace/ligs` |
 | `PDB` | Protein path (entry.sh) | `/workspace/protein.pdb` |
-| `CHAIN` | Chain selection | `A` |
+| `CHAIN` | Chain selection (`A`, `A,B`, `all`) | first chain |
 | `PROCESSES` / `MAX_WORKERS` | Parallel workers | `-1` |
 | `EXHAUSTIVENESS` | Vina exhaustiveness | `8` |
 | `BINDING_MODES` | Vina binding modes | `9` |
@@ -102,7 +113,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `TIMEOUT` | Per-command timeout (s) | `900` |
 | `ADMET` | Set `0` to disable ADMET filtering | `1` |
 | `RESUME` | Set `0` to disable checkpoint resume | `1` |
-| `VS_SEED` | RNG seed | `42` |
+| `VS_SEED` | RNG seed (an explicit `--seed` takes precedence) | `42` |
 | `PUBCHEM_REST` | PubChem REST base (mirrors) | official |
 
 ## Reproducibility

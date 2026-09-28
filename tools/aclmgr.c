@@ -9,6 +9,32 @@
 #define  DROP_USER  "dockuser"
 #define  DROP_GROUP "dockuser"
 
+extern char **environ;
+
+/* setpriv --reset-env clears the environment for the unprivileged child, so
+ * the pipeline's own settings (README "Environment variables", plus any VS_*
+ * knob) are forwarded explicitly through /usr/bin/env. */
+static const char* const forwarded_env[] = {
+	"ADMET", "BINDING_MODES", "CHAIN", "ENERGY_RANGE", "EXHAUST",
+	"EXHAUSTIVENESS", "INPUT", "LIGAND_MODE", "LIGS", "MAX_WORKERS",
+	"NO_MINIMIZE", "PADDING", "PDB", "POCKETS", "PROCESSES", "PUBCHEM_REST",
+	"RESUME", "TIMEOUT", "TOP_N", NULL
+};
+
+static bool is_forwarded(const char* entry)
+{
+	const char* eq = strchr(entry, '=');
+	if (!eq) return false;
+	size_t name_len = (size_t) (eq - entry);
+
+	if (name_len > 3 && strncmp(entry, "VS_", 3) == 0) return true;
+	for (size_t i = 0; forwarded_env[i] != NULL; i++)
+		if (strlen(forwarded_env[i]) == name_len
+		    && strncmp(entry, forwarded_env[i], name_len) == 0)
+			return true;
+	return false;
+}
+
 bool is_rootless = false;
 volatile sig_atomic_t caught = 0;
 
@@ -109,12 +135,20 @@ int run_child_with_args(int argc, char** argv)
 	static const char* pre_chown[]  = {"/usr/bin/chown", "-R", DROP_USER":"DROP_GROUP, "/workspace", NULL};
 	static const char* post_chown[] = {"/usr/bin/chown", "-R", "root:root", "/workspace", NULL};
 
-	const char* cmdline[argc + 1];
-	cmdline[0] = "/autodocker/entry.sh";
-	cmdline[argc] = NULL;
+	size_t env_count = 0;
+	for (char** e = environ; *e != NULL; e++)
+		if (is_forwarded(*e)) env_count++;
 
+	/* /usr/bin/env NAME=value... /autodocker/entry.sh args... NULL */
+	const char* cmdline[1 + env_count + argc + 1];
+	size_t n = 0;
+	cmdline[n++] = "/usr/bin/env";
+	for (char** e = environ; *e != NULL; e++)
+		if (is_forwarded(*e)) cmdline[n++] = *e;
+	cmdline[n++] = "/autodocker/entry.sh";
 	for(size_t i = 1; i < argc; i++)
-		cmdline[i] = argv[i];
+		cmdline[n++] = argv[i];
+	cmdline[n] = NULL;
 
 	if (is_rootless)
 		run(false, pre_chown);
