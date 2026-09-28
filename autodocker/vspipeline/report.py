@@ -119,7 +119,7 @@ def cluster_poses(poses_dir: str, rmsd_threshold: float = 2.0) -> Dict[str, List
                     match = re.search(r'_aff_([-\d.]+)', pose_file)
                     if match:
                         affinity = float(match.group(1))
-                except:
+                except ValueError:
                     pass
                 pose_data.append(
                     {'file': pose_file, 'coords': coords, 'affinity': affinity})

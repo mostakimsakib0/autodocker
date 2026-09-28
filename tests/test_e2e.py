@@ -60,11 +60,11 @@ def _run_pipeline(receptor, ligands, outdir):
     import logging
     logging.disable(logging.CRITICAL)
     lib = runner.LibraryManager(outdir, ligands)
-    prepared = lib._prepare_local_sdf(apply_admet=False)
+    prepared = lib.prepare_local(apply_admet=False)
     assert len(prepared) == 2
 
     prep = runner.ProteinPreparation(receptor, outdir)
-    cx, cy, cz, sx, sy, sz = prep._protein_centroid_grid(padding=6.0)
+    cx, cy, cz, sx, sy, sz = prep.centroid_grid(padding=6.0)
     prep.write_grid(cx, cy, cz, sx, sy, sz)
 
     vina_params = {

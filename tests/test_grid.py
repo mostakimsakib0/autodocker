@@ -71,7 +71,7 @@ def test_parse_pocket_selection_non_numeric(protein_pdb, outdir):
 def test_centroid_fallback_grid(protein_pdb, outdir, monkeypatch):
     prep = runner.ProteinPreparation(protein_pdb, outdir)
     monkeypatch.setattr(runner.ProteinPreparation, "detect_pocket", None)
-    cx, cy, cz, sx, sy, sz = prep._protein_centroid_grid(padding=6.0)
+    cx, cy, cz, sx, sy, sz = prep.centroid_grid(padding=6.0)
     # protein_pdb has two chains, x in [0,9], y in [0,6], z fixed at 5.
     assert (4.5, 3.0, 5.0) == pytest.approx((cx, cy, cz))
     assert sx >= 24.0 and sy >= 24.0 and sz >= 24.0

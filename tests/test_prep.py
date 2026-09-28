@@ -66,7 +66,7 @@ def test_library_prepare_local_sdf_end_to_end(tmp_path):
     sdf = _make_ethanol_sdf(tmp_path)
     shutil.copy(sdf, str(d / "ethanol.sdf"))
     lm = runner.LibraryManager(str(tmp_path / "out"), str(d))
-    out = lm._prepare_local_sdf(apply_admet=False)
+    out = lm.prepare_local(apply_admet=False)
     assert len(out) == 1
     assert runner._pdbqt_has_atoms(out[0])
     assert runner._ensure_pdbqt_has_charges(out[0])
@@ -78,7 +78,7 @@ def test_library_prepare_local_sdf_batch_recursion(tmp_path):
     sdf = _make_ethanol_sdf(tmp_path)
     shutil.copy(sdf, str(d / "nested.sdf"))
     lm = runner.LibraryManager(str(tmp_path / "out"), str(tmp_path / "ligands"))
-    out = lm._prepare_local_sdf(apply_admet=False)
+    out = lm.prepare_local(apply_admet=False)
     assert len(out) == 1
     assert runner._pdbqt_has_atoms(out[0])
 

@@ -4,6 +4,7 @@ import vspipeline.net as net
 class FakeResp:
     def __init__(self, content):
         self.content = content
+        self.status_code = 200
 
     def raise_for_status(self):
         pass

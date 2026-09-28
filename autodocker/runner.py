@@ -219,7 +219,7 @@ def main():
     global VINA, VINA_PRIMARY, VINA_FALLBACK, COMMAND_TIMEOUT
 
     parser = argparse.ArgumentParser(
-        description="Virtual Screening Pipeline v2.0 - ENHANCED with 4 Phases:\n"
+        description=f"Virtual Screening Pipeline v{__version__} - ENHANCED with 4 Phases:\n"
         "  PHASE 1: Advanced result analysis (HTML reports, clustering)\n"
         "  PHASE 2: Smart preprocessing (water/metal/cofactor handling)\n"
         "  PHASE 3: Flexible receptor docking\n"
@@ -253,7 +253,7 @@ def main():
     parser.add_argument("--keep-hetero", action="store_true",
                         help="Keep matching HETATM records during receptor cleaning")
     parser.add_argument(
-        "--pockets", help="Pocket number(s) from fpocket, e.g. 1 or 2,3. Default: best druggability")
+        "--pockets", help="Pocket number(s) from fpocket, e.g. 1 or 2,3. Default: best fpocket score (druggability breaks ties)")
     parser.add_argument("--padding", type=float, default=6.0,
                         help="Grid padding around selected pocket(s), Angstrom")
     parser.add_argument("--no-fpocket", action="store_true",
@@ -377,7 +377,7 @@ def main():
                 apply_admet=apply_admet
             )
         else:
-            ligands = lib_manager._prepare_local_sdf(apply_admet=apply_admet)
+            ligands = lib_manager.prepare_local(apply_admet=apply_admet)
 
         if not ligands:
             raise ValueError("No ligands found to dock")
@@ -391,7 +391,7 @@ def main():
         protein_prep.prepare_receptor(chain, keep_hetero=args.keep_hetero)
 
         if args.no_fpocket:
-            cx, cy, cz, sx, sy, sz = protein_prep._protein_centroid_grid(
+            cx, cy, cz, sx, sy, sz = protein_prep.centroid_grid(
                 padding=args.padding)
             logger.warning(
                 "[!] Using centroid fallback grid (fpocket skipped)")
@@ -515,7 +515,7 @@ def main():
                         os.path.join(args.output, "rigid.pdbqt"))
 
         # ===== STEP 3: Docking =====
-        logger.info("[3/6] Docking with Advanced Parameters")
+        logger.info("[3/5] Docking with Advanced Parameters")
         resume = not args.no_resume
 
         vina_params = {
@@ -619,7 +619,7 @@ def main():
                         f"({len(consensus_rows)} ligands)")
 
         # ===== STEP 4: Results Analysis =====
-        logger.info("[4/6] Results Analysis + Metrics")
+        logger.info("[4/5] Results Analysis + Metrics")
         if resume and checkpoint.completed:
             logger.info(
                 f"[✔] Checkpoint updated: {len(checkpoint.completed)} successful dockings")
@@ -653,7 +653,7 @@ def main():
                     logger.warning(f"Could not save clustering data: {e}")
 
         # ===== STEP 5: Save Results =====
-        logger.info("[5/6] Saving Results")
+        logger.info("[5/5] Saving Results")
         analyzer = ResultsAnalyzer(args.output, top_n=args.top_n)
         analyzer.save_ranking(results, mode="extended",
                               metrics_dict=metrics_dict)
@@ -679,7 +679,7 @@ def main():
                 scorer_agreement=scorer_agreement)
 
         logger.info("=" * 70)
-        logger.info("PIPELINE COMPLETED SUCCESSFULLY (v2.0)")
+        logger.info(f"PIPELINE COMPLETED SUCCESSFULLY (v{__version__})")
         logger.info("=" * 70)
         logger.info(f"Results saved to: {args.output}")
         logger.info(f"\n📊 STANDARD OUTPUT:")

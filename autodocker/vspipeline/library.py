@@ -35,6 +35,28 @@ import runner  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+
+def _ligand_pdbqt_problem(path: str) -> Optional[str]:
+    """Return why a PDBQT cannot be docked as a ligand, or None if it looks usable.
+
+    Vina requires a ligand torsion tree (ROOT ... TORSDOF). A receptor-style
+    PDBQT has atoms and charges but no tree; Vina rejects it at parse time,
+    so it is caught here with a clear reason instead.
+    """
+    try:
+        with open(path, errors="replace") as fh:
+            tags = {line.split()[0] for line in fh if line.strip()}
+    except OSError as e:
+        return f"Unreadable PDBQT: {e}"
+    if not tags & {"ATOM", "HETATM"}:
+        return "PDBQT has no ATOM/HETATM records"
+    missing = [t for t in ("ROOT", "TORSDOF") if t not in tags]
+    if missing:
+        return ("Not a ligand PDBQT (missing " + "/".join(missing) +
+                "; looks like a receptor-style file)")
+    return None
+
+
 class LibraryManager:
     """Manages compound library sourcing and preparation."""
 
@@ -106,7 +128,7 @@ class LibraryManager:
         if not downloaded:
             logger.warning(
                 "No FDA compounds could be downloaded; falling back to local SDF")
-            return self._prepare_local_sdf(apply_admet=apply_admet)
+            return self.prepare_local(apply_admet=apply_admet)
 
         self._save_metadata()
         logger.info(
@@ -159,7 +181,7 @@ class LibraryManager:
         if not downloaded:
             logger.warning(
                 "No matching compounds found; falling back to local SDF")
-            return self._prepare_local_sdf(apply_admet=apply_admet)
+            return self.prepare_local(apply_admet=apply_admet)
 
         self._save_metadata()
         logger.info(
@@ -309,8 +331,11 @@ class LibraryManager:
 
         return pdbqt_file
 
-    def _prepare_local_sdf(self, apply_admet: bool = True) -> List[str]:
-        """Convert local SDF/PDBQT files to ready docking inputs with smart auto-detection."""
+    def prepare_local(self, apply_admet: bool = True) -> List[str]:
+        """Convert local SDF/PDBQT/MOL2/PDB files to ready docking inputs.
+
+        Public API (formerly the private ``_prepare_local_sdf``).
+        """
 
         ligands_input = self.ligands_input_dir
 
@@ -355,38 +380,28 @@ class LibraryManager:
         # STEP 2: DECIDE MODE
         # -----------------------------
         # Diagnostic: log what we found to help debug empty-result cases
-        try:
+        logger.info(
+            f"[DEBUG] Local ligands found - SDF: {len(sdf_files)}, PDBQT: {len(pdbqt_files)}, MOL2: {len(mol2_files)}, PDB: {len(pdb_files)}")
+        sample = (sdf_files or pdbqt_files or mol2_files or pdb_files)[:5]
+        if sample:
             logger.info(
-                f"[DEBUG] Local ligands found - SDF: {len(sdf_files)}, PDBQT: {len(pdbqt_files)}, MOL2: {len(mol2_files)}, PDB: {len(pdb_files)}")
-            sample = (sdf_files or pdbqt_files or mol2_files or pdb_files)[:5]
-            if sample:
-                logger.info(
-                    f"[DEBUG] Sample files: {', '.join([os.path.basename(s) for s in sample])}")
-        except Exception:
-            pass
-        if sdf_files:
-            mode = "sdf"
-            ligands = sdf_files
-            logger.info(f"[*] SDF mode detected: {len(sdf_files)} ligands")
-
-        elif pdbqt_files:
-            mode = "pdbqt"
-            ligands = pdbqt_files
-            logger.info(f"[*] PDBQT mode detected: {len(pdbqt_files)} ligands")
-
-        elif mol2_files:
-            mode = "mol2"
-            ligands = mol2_files
-            logger.info(f"[*] MOL2 mode detected: {len(mol2_files)} ligands")
-
-        elif pdb_files:
-            mode = "pdb"
-            ligands = pdb_files
-            logger.info(f"[*] PDB mode detected: {len(pdb_files)} ligands")
-
-        else:
+                f"[DEBUG] Sample files: {', '.join([os.path.basename(s) for s in sample])}")
+        # Every format in the folder is prepared (each file by its own
+        # extension); previously only the first format found was used and the
+        # rest were skipped silently.
+        ligands = ([("sdf", f) for f in sdf_files]
+                   + [("pdbqt", f) for f in pdbqt_files]
+                   + [("mol2", f) for f in mol2_files]
+                   + [("pdb", f) for f in pdb_files])
+        if not ligands:
             raise FileNotFoundError(
                 "No ligands found (.sdf/.pdbqt/.mol2/.pdb)")
+        found = [(n, len(fs)) for n, fs in (("SDF", sdf_files), ("PDBQT", pdbqt_files),
+                                            ("MOL2", mol2_files), ("PDB", pdb_files)) if fs]
+        logger.info("[*] Ligand formats detected: " +
+                    ", ".join(f"{n} {k}" for n, k in found))
+        if len(found) > 1:
+            logger.info("[*] Mixed-format ligand folder: all formats will be prepared")
 
         # -----------------------------
         # STEP 3: PROCESS
@@ -397,7 +412,14 @@ class LibraryManager:
 
         logger.info(f"[*] Preparing {len(ligands)} ligands...")
 
-        for lig in ligands:
+        seen_names = {}
+        for mode, lig in ligands:
+            stem = Path(lig).stem
+            if stem in seen_names:
+                failed_ligands.append(
+                    (lig, f"Duplicate ligand name '{stem}' (already taken by {Path(seen_names[stem]).name})"))
+                continue
+            seen_names[stem] = lig
 
             try:
                 # -------------------------
@@ -430,6 +452,11 @@ class LibraryManager:
                 # CASE B: PDBQT direct
                 # -------------------------
                 elif mode == "pdbqt":
+                    problem = _ligand_pdbqt_problem(lig)
+                    if problem:
+                        failed_ligands.append((lig, problem))
+                        logger.error(f"  [✗] {Path(lig).name}: {problem}")
+                        continue
                     out_files.append(lig)
                     logger.info(f"  [✓] {Path(lig).stem} (PDBQT direct)")
 
@@ -495,3 +522,6 @@ class LibraryManager:
             raise RuntimeError("No valid ligands prepared")
 
         return out_files
+
+    # Backward-compatible alias (deprecated): the former private name.
+    _prepare_local_sdf = prepare_local

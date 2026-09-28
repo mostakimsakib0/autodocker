@@ -117,7 +117,6 @@ echo "[*] Found $TOTAL_LIGS ligand(s)"
 echo "[*] Protein loaded: $(basename "$PDB")"
 
 # Run the pipeline
-CHAIN="${CHAIN:-A}"
 PROCESSES="${PROCESSES:-${MAX_WORKERS:--1}}"
 EXHAUSTIVENESS="${EXHAUSTIVENESS:-${EXHAUST:-8}}"
 BINDING_MODES="${BINDING_MODES:-9}"
@@ -131,7 +130,6 @@ CMD=(
 	-r "$PDB"
 	-l "$LIGS"
 	-o "$OUT"
-	--chain "$CHAIN"
 	--padding "$PADDING"
 	--exhaustiveness "$EXHAUSTIVENESS"
 	--binding-modes "$BINDING_MODES"
@@ -140,6 +138,13 @@ CMD=(
 	--top-n "$TOP_N"
 	-p "$PROCESSES"
 )
+
+# Chain selection: only pass --chain when explicitly set, so runner.py's
+# auto-detection (first chain) is the default. Set CHAIN=A (or A,B/all) to
+# override.
+if [ -n "${CHAIN:-}" ]; then
+	CMD+=(--chain "$CHAIN")
+fi
 
 # ADMET filtering is ON by default (matches runner.py); set ADMET=0 to disable.
 if [ "${ADMET:-1}" = "0" ]; then
@@ -172,5 +177,6 @@ echo "  - Results_full.txt: Full text report"
 echo "  - metrics.txt: Pose metrics"
 echo "  - pocket_summary.csv: fpocket pocket scores"
 echo "  - ligand_metadata.json: ligand descriptors and source files"
-echo "  - grid_box.py: PyMOL grid visualization"
+echo "  - grid_box.pml: PyMOL grid visualization"
+echo "  - results_report.html: Self-contained HTML report"
 echo "  - docked/: Docked poses"

@@ -72,7 +72,7 @@ def test_protein_centroid_grid(tmp_path):
     p = tmp_path / "prot.pdb"
     _pdb(p, _protein_pdb(120))
     pp = prot.ProteinPreparation(str(p), str(tmp_path))
-    cx, cy, cz, sx, sy, sz = pp._protein_centroid_grid()
+    cx, cy, cz, sx, sy, sz = pp.centroid_grid()
     assert sx >= 24.0 and sy >= 24.0 and sz >= 24.0
     assert (cx, cy, cz) == (59.5, 59.5, 59.5)  # avg of 0..119
 

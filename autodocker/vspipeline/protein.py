@@ -173,8 +173,11 @@ class ProteinPreparation:
             f"[✔] Receptor updated keeping {appended} HETATM atoms: {self.receptor_pdbqt}")
         return self.receptor_pdbqt
 
-    def _protein_centroid_grid(self, padding: float = 6.0) -> Tuple[float, float, float, float, float, float]:
-        """Build a grid centered on the receptor bounding box when fpocket is unavailable."""
+    def centroid_grid(self, padding: float = 6.0) -> Tuple[float, float, float, float, float, float]:
+        """Build a grid centered on the receptor bounding box when fpocket is unavailable.
+
+        Public API (formerly the private ``_protein_centroid_grid``).
+        """
         source = self.receptor_pdbqt
         if not source or not os.path.exists(source):
             source = self.pdb_clean if os.path.exists(
@@ -207,7 +210,7 @@ class ProteinPreparation:
         except Exception as e:
             logger.warning(
                 f"fpocket failed: {e}. Using centroid fallback grid.")
-            return self._protein_centroid_grid(padding)
+            return self.centroid_grid(padding)
 
         pocket_root = fpocket_target.replace(".pdb", "_out")
         pocket_dir = os.path.join(pocket_root, "pockets")
@@ -215,7 +218,7 @@ class ProteinPreparation:
         if not os.path.exists(pocket_dir):
             logger.warning(
                 f"Pocket directory not found: {pocket_dir}. Using centroid fallback grid.")
-            return self._protein_centroid_grid(padding)
+            return self.centroid_grid(padding)
 
         info_file = os.path.join(
             pocket_root, f"{Path(fpocket_target).stem}_info.txt"
@@ -486,3 +489,6 @@ size_z = {sz}
                     f"[✔] Grid visualization script saved: {self.grid_box_script}")
         except IOError as e:
             logger.warning(f"Could not write grid visualization script: {e}")
+
+    # Backward-compatible alias (deprecated): the former private name.
+    _protein_centroid_grid = centroid_grid

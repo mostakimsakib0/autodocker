@@ -85,7 +85,7 @@ def _calculate_coordinate_simscore(output_pdbqt: str, threshold: float = 2.0) ->
                         y = float(line[38:46])
                         z = float(line[46:54])
                         current_model.append((x, y, z))
-                    except:
+                    except ValueError:
                         pass
 
         if len(models) <= 1:
