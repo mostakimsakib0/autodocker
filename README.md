@@ -35,7 +35,16 @@ docker run --rm \
   autodocker
 ```
 
-The single-ligand mode downloads a ligand via `INPUT`:
+To screen a PubChem library instead of local files (a built-in list of
+approved drugs, up to 20 compounds per run; `custom` also filters by
+`--mw-min/--mw-max/--logp-max`), leave `works/ligs/` empty and pass the
+library option:
+
+```bash
+docker run --rm -v "$PWD/works:/workspace" autodocker --library fda
+```
+
+The single-ligand mode docks one file given via `INPUT`:
 
 ```bash
 docker run --rm \
@@ -85,7 +94,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `--seed` | Random seed (reproducibility) | `42` |
 | `--no-resume` | Ignore checkpoint and start fresh | off |
 | `--top-n` | Hits in `Top_hits.txt` | `20` |
-| `--html-report` | Also generate an HTML report | off |
+| `--no-html-report` | Skip the self-contained HTML report | report on |
 | `--vina-bin` | Custom docking binary | auto |
 | `--vina-extra` | Extra args passed to the docking binary | none |
 | `--keep-waters` | Keep waters near binding site | off |

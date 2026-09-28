@@ -50,7 +50,23 @@ if [ ! -f "$PDB" ]; then
 	exit 1
 fi
 
-if [ "$LIGAND_MODE" = "single" ]; then
+# PubChem library modes (--library fda|custom) download their own ligands,
+# so no local ligand files are required.
+PUBCHEM_LIBRARY=0
+for ((i = 1; i <= $#; i++)); do
+	case "${!i}" in
+		--library=fda|--library=custom) PUBCHEM_LIBRARY=1 ;;
+		--library)
+			next=$((i + 1))
+			case "${!next:-}" in fda|custom) PUBCHEM_LIBRARY=1 ;; esac
+			;;
+	esac
+done
+
+if [ "$PUBCHEM_LIBRARY" = "1" ]; then
+	mkdir -p "$LIGS"
+	echo "[*] PubChem library mode: ligands will be downloaded"
+elif [ "$LIGAND_MODE" = "single" ]; then
 	if [ ! -f "$LIGS" ]; then
 		echo "[!] Ligand file not found: $LIGS"
 		exit 1
@@ -103,17 +119,19 @@ else
 	TOTAL_LIGS=$((SDF_COUNT + PDBQT_COUNT + MOL2_COUNT + PDB_COUNT))
 fi
 
-if [ "$TOTAL_LIGS" -eq 0 ]; then
-	echo "[!] No ligand files (.sdf/.pdbqt/.mol2/.pdb) found in $LIGS"
-	exit  1
-fi
+if [ "$PUBCHEM_LIBRARY" != "1" ]; then
+	if [ "$TOTAL_LIGS" -eq 0 ]; then
+		echo "[!] No ligand files (.sdf/.pdbqt/.mol2/.pdb) found in $LIGS"
+		exit  1
+	fi
 
-echo "[*] Found $TOTAL_LIGS ligands"
-echo "    - SDF: $SDF_COUNT"
-echo "    - PDBQT: $PDBQT_COUNT"
-echo "    - MOL2: $MOL2_COUNT"
-echo "    - PDB: $PDB_COUNT"
-echo "[*] Found $TOTAL_LIGS ligand(s)"
+	echo "[*] Found $TOTAL_LIGS ligands"
+	echo "    - SDF: $SDF_COUNT"
+	echo "    - PDBQT: $PDBQT_COUNT"
+	echo "    - MOL2: $MOL2_COUNT"
+	echo "    - PDB: $PDB_COUNT"
+	echo "[*] Found $TOTAL_LIGS ligand(s)"
+fi
 echo "[*] Protein loaded: $(basename "$PDB")"
 
 # Run the pipeline
