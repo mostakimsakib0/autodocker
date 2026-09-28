@@ -164,11 +164,11 @@ class LibraryManager:
                 if mw is None:
                     continue
                 if not (mw_min <= float(mw) <= mw_max):
-                    logger.debug(f"  {name}: MW {mw} outside range; skipping")
+                    logger.info(f"  [-] {name}: MW {mw} outside range; skipping")
                     continue
                 if logp is not None and float(logp) > logp_max:
-                    logger.debug(
-                        f"  {name}: LogP {logp} > {logp_max}; skipping")
+                    logger.info(
+                        f"  [-] {name}: XLogP3 {logp} > {logp_max}; skipping")
                     continue
             except (TypeError, ValueError):
                 continue
@@ -241,8 +241,8 @@ class LibraryManager:
             props = runner.ADMETFilter.parse_sdf_properties(sdf_file)
             passes, violations = runner.ADMETFilter.check_lipinski(props)
             if not passes:
-                logger.debug(
-                    f"  Skipped {ligand_id}: {', '.join(violations)}")
+                logger.info(
+                    f"  [-] Skipped {ligand_id} (Lipinski): {', '.join(violations)}")
                 try:
                     os.remove(sdf_file)
                 except OSError:
