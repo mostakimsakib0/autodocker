@@ -16,6 +16,9 @@ keywords:
   - drug discovery
   - reproducibility
 license: MIT
+version: "1.1.4"
+doi: 10.5281/zenodo.22035568
+repository-code: "https://github.com/mostakimsakib0/autodocker"
 authors:
   - family-names: Haque
     given-names: "Md Zahurul"
@@ -25,5 +28,5 @@ authors:
     given-names: "Md. Mostakim Ahmed"
     orcid: "https://orcid.org/0009-0001-7176-2016"
   - family-names: "Ahmad Hasan"
-    given-names: "Mubashshir"
+    given-names: Mubashshir
     orcid: "https://orcid.org/0009-0004-8636-2711"
