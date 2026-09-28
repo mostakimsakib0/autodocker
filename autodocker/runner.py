@@ -47,7 +47,7 @@ import sys
 from multiprocessing import cpu_count as mp_cpu_count
 from typing import Optional
 
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 
 # When executed as a script (__name__ == "__main__"), alias this module as
 # "runner" so the vspipeline submodules' ``import runner`` binds THIS running
