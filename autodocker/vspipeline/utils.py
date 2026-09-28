@@ -35,19 +35,25 @@ import runner  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-def run(cmd_list: List[str], capture: bool = False) -> Optional[Tuple[str, str, int]]:
-    """Run a command safely without shell injection risk."""
+def run(cmd_list: List[str], capture: bool = False,
+        extra_env: Optional[Dict[str, str]] = None) -> Optional[Tuple[str, str, int]]:
+    """Run a command safely without shell injection risk.
+
+    ``extra_env`` adds or overrides environment variables for this command only.
+    """
+    env = {**os.environ, **extra_env} if extra_env else None
     try:
         if capture:
             result = subprocess.run(
-                cmd_list, capture_output=True, text=True, timeout=runner.COMMAND_TIMEOUT)
+                cmd_list, capture_output=True, text=True, timeout=runner.COMMAND_TIMEOUT,
+                env=env)
             if result.returncode != 0:
                 raise subprocess.CalledProcessError(
                     result.returncode, cmd_list, output=result.stdout, stderr=result.stderr
                 )
             return result.stdout, result.stderr, result.returncode
         else:
-            subprocess.run(cmd_list, check=True, timeout=runner.COMMAND_TIMEOUT)
+            subprocess.run(cmd_list, check=True, timeout=runner.COMMAND_TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
         logger.error(f"Command timed out: {' '.join(cmd_list)}")
         raise

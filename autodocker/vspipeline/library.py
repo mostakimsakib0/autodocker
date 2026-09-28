@@ -57,6 +57,20 @@ def _ligand_pdbqt_problem(path: str) -> Optional[str]:
     return None
 
 
+def _sdf_has_3d_coords(sdf_file: str) -> bool:
+    """True if the first molecule in an SDF has any non-zero Z coordinate."""
+    try:
+        with open(sdf_file) as f:
+            lines = [next(f) for _ in range(4)]
+            n_atoms = int(lines[3][:3])
+            for _ in range(n_atoms):
+                if abs(float(next(f)[20:30])) > 1e-4:
+                    return True
+    except (OSError, StopIteration, ValueError, IndexError):
+        pass
+    return False
+
+
 class LibraryManager:
     """Manages compound library sourcing and preparation."""
 
@@ -279,12 +293,16 @@ class LibraryManager:
             props = {}
 
         if self.minimize:
+            # --gen3d rebuilds coordinates with a random conformer search, so
+            # use it only when the input has no 3D coordinates. Open Babel's
+            # force field is multithreaded (OpenMP) and its summation order
+            # varies between runs; one thread makes minimization repeatable.
+            cmd = [runner.OBABEL, "-isdf", sdf_file, "-osdf", "-O", minimized_file]
+            if not _sdf_has_3d_coords(sdf_file):
+                cmd.append("--gen3d")
+            cmd += ["--minimize", "--ff", "MMFF94", "--steps", str(self.minimize_steps)]
             try:
-                runner.run([
-                    runner.OBABEL, "-isdf", sdf_file, "-osdf", "-O", minimized_file,
-                    "--gen3d", "--minimize", "--ff", "MMFF94",
-                    "--steps", str(self.minimize_steps)
-                ])
+                runner.run(cmd, extra_env={"OMP_NUM_THREADS": "1"})
                 source_for_conversion = minimized_file
             except Exception as e:
                 logger.warning(

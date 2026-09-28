@@ -152,3 +152,62 @@ def test_prepare_local_duplicate_names_skipped(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "run", lambda *a, **k: None)
     lm = library.LibraryManager(str(tmp_path / "out"), str(indir))
     assert lm.prepare_local(apply_admet=False) == [str(indir / "x.pdbqt")]
+
+
+def _molblock(z):
+    return ("m\n  test\n\n"
+            "  2  1  0  0  0  0  0  0  0  0999 V2000\n"
+            f"    0.0000    0.0000    {z:.4f} C   0  0  0  0  0  0  0  0  0  0  0  0\n"
+            "    1.5000    0.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0\n"
+            "  1  2  1  0\nM  END\n$$$$\n")
+
+
+def test_sdf_has_3d_coords(tmp_path):
+    flat = tmp_path / "flat.sdf"
+    flat.write_text(_molblock(0.0))
+    solid = tmp_path / "solid.sdf"
+    solid.write_text(_molblock(0.8))
+    assert library._sdf_has_3d_coords(str(solid))
+    assert not library._sdf_has_3d_coords(str(flat))
+    assert not library._sdf_has_3d_coords(str(tmp_path / "missing.sdf"))
+
+
+def test_minimize_keeps_3d_input_and_runs_single_threaded(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((cmd, kw))
+        out = cmd[cmd.index("-O") + 1]
+        with open(out, "w") as f:
+            f.write("ATOM      1  C   LIG A   1       0.000   0.000   0.000  0.00  0.00    -0.100 C\n")
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(runner, "_ensure_pdbqt_has_charges", lambda p: True)
+    lm = library.LibraryManager(str(tmp_path / "out"), str(tmp_path))
+    for name, z, expect_gen3d in (("solid", 0.8, False), ("flat", 0.0, True)):
+        sdf = tmp_path / f"{name}.sdf"
+        sdf.write_text(_molblock(z))
+        calls.clear()
+        lm._prepare_sdf_to_pdbqt(str(sdf), str(tmp_path / f"{name}.pdbqt"), name)
+        cmd, kw = calls[0]
+        assert "--minimize" in cmd
+        assert ("--gen3d" in cmd) == expect_gen3d
+        assert kw.get("extra_env") == {"OMP_NUM_THREADS": "1"}
+
+
+def test_minimization_is_repeatable_with_real_obabel(tmp_path):
+    import shutil
+    import subprocess
+    import pytest
+    if not shutil.which("obabel"):
+        pytest.skip("obabel not installed")
+    sdf = tmp_path / "aspirin.sdf"
+    subprocess.run(["obabel", "-:CC(=O)Oc1ccccc1C(=O)O", "--gen3d", "-osdf", "-O", str(sdf)],
+                   check=True, capture_output=True)
+    outputs = []
+    for i in range(3):
+        lm = library.LibraryManager(str(tmp_path / f"run{i}"), str(tmp_path))
+        pdbqt = tmp_path / f"run{i}.pdbqt"
+        lm._prepare_sdf_to_pdbqt(str(sdf), str(pdbqt), "aspirin")
+        outputs.append(pdbqt.read_text())
+    assert outputs[0] == outputs[1] == outputs[2]
