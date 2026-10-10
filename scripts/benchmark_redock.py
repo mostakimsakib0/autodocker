@@ -62,20 +62,15 @@ def ligand_grid(mol2_path, padding=6.0, min_size=22.5):
     return cx, cy, cz, size
 
 
-def receptor_centroid(pdb_path):
-    """Mean of all ATOM-record coordinates (matches the obabel -c centering
-    the runner applies to the receptor PDBQT)."""
-    coords = []
-    with open(pdb_path) as f:
+def read_frame_offset(path):
+    """The (x, y, z) offset the runner wrote to frame_offset.txt."""
+    values = {}
+    with open(path) as f:
         for line in f:
-            if line.startswith("ATOM"):
-                coords.append((float(line[30:38]), float(line[38:46]),
-                               float(line[46:54])))
-    if not coords:
-        raise ValueError("no ATOM records in receptor PDB")
-    return (sum(c[0] for c in coords) / len(coords),
-            sum(c[1] for c in coords) / len(coords),
-            sum(c[2] for c in coords) / len(coords))
+            if "=" in line and not line.lstrip().startswith("#"):
+                key, val = line.split("=", 1)
+                values[key.strip()] = float(val)
+    return values["offset_x"], values["offset_y"], values["offset_z"]
 
 
 def shift_mol2(mol2_path, shift, out_path):
@@ -174,14 +169,10 @@ def process_complex(job):
                 rec["error"] = (f"receptor too large ({n_atom} ATOM > "
                                 f"{opts['max_receptor_atoms']})")
                 return rec
+        # The box is centered on the crystal ligand, given in the input PDB's
+        # coordinates (the runner moves it into its centered docking frame).
         cx, cy, cz, size = ligand_grid(ligand, padding=opts["padding"])
-        rc = receptor_centroid(protein)
-        # The runner centers the receptor at the origin (obabel -c); express the
-        # crystal-ligand-centered box in that centered frame.
-        cx, cy, cz = cx - rc[0], cy - rc[1], cz - rc[2]
-        crystal_shifted = os.path.join(outdir, f"{pdbid}_crystal_centered.mol2")
         os.makedirs(outdir, exist_ok=True)
-        shift_mol2(ligand, rc, crystal_shifted)
         cmd = [
             sys.executable, runner_script,
             "-r", protein, "-l", ligand, "-o", outdir,
@@ -205,6 +196,11 @@ def process_complex(job):
             raise RuntimeError(
                 f"docking failed (rc={proc.returncode}): "
                 f"{(proc.stdout or '')[-400:]} {(proc.stderr or '')[-400:]}")
+        # Poses are in the docking frame; move the crystal ligand into it with
+        # the offset the runner recorded, rather than recomputing it.
+        rc = read_frame_offset(os.path.join(outdir, "frame_offset.txt"))
+        crystal_shifted = os.path.join(outdir, f"{pdbid}_crystal_centered.mol2")
+        shift_mol2(ligand, rc, crystal_shifted)
         rec["affinity"] = read_ranking(
             os.path.join(outdir, "ranking.csv"))
         with tempfile.TemporaryDirectory() as tmp:
@@ -259,7 +255,8 @@ def main():
         if missing:
             raise SystemExit(f"missing complexes in data dir: {missing}")
     else:
-        pdbids = sorted(os.listdir(args.data_dir))[:args.max_complexes]
+        pdbids = sorted(d for d in os.listdir(args.data_dir)
+                        if os.path.isdir(os.path.join(args.data_dir, d)))[:args.max_complexes]
 
     # Resume: skip complexes already docked successfully; drop partial dirs.
     workroot = os.path.join(args.outdir, "work")
@@ -300,8 +297,7 @@ def main():
                         "rmsd_top1": None, "rmsd_best": None, "error": None})
         best_pdbqt = os.path.join(workroot, p, "docked", f"{p}_ligand_out.pdbqt")
         try:
-            rc = receptor_centroid(
-                os.path.join(args.data_dir, p, f"{p}_protein.pdb"))
+            rc = read_frame_offset(os.path.join(workroot, p, "frame_offset.txt"))
             crystal_ref = os.path.join(workroot, p, f"{p}_crystal_centered.mol2")
             here = os.path.join(args.data_dir, p, f"{p}_ligand.mol2")
             if not os.path.exists(crystal_ref):
