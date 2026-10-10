@@ -11,8 +11,14 @@ try_patch()
 	patch="$2"
 	shift 2
 
-	if patch --dry-run -d "$tree" "$@" < "$patch"; then
+	if patch --dry-run -d "$tree" "$@" < "$patch" >/dev/null; then
 		patch -d "$tree" "$@" < "$patch"
+	elif patch --dry-run -R -d "$tree" "$@" < "$patch" >/dev/null; then
+		echo >&2 "Already applied: $patch"
+	else
+		# A patch that no longer applies (e.g. after a submodule bump) must
+		# stop the build instead of silently shipping unpatched code.
+		die "Patch does not apply: $patch"
 	fi
 }
 

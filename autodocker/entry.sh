@@ -16,9 +16,36 @@ SCRIPT="$DIR/runner.py"
 LIGS="${LIGS:-/workspace/ligs}"
 PDB="${PDB:-}"
 
+# -r/-l/-o given on the command line override the workspace defaults
+# (argparse keeps the last value); validate and report what will be used.
+USER_PDB="" USER_LIGS="" USER_OUT=""
+for ((i = 1; i <= $#; i++)); do
+	next=$((i + 1))
+	case "${!i}" in
+		-r|--receptor) USER_PDB="${!next:-}" ;;
+		--receptor=*) USER_PDB="${!i#*=}" ;;
+		-l|--ligands) USER_LIGS="${!next:-}" ;;
+		--ligands=*) USER_LIGS="${!i#*=}" ;;
+		-o|--output) USER_OUT="${!next:-}" ;;
+		--output=*) USER_OUT="${!i#*=}" ;;
+	esac
+done
+[ -n "$USER_OUT" ] && OUT="$USER_OUT"
+
 mkdir -p "$OUT"
 
 INPUT="${INPUT:-}"
+
+# -l on the command line replaces INPUT/LIGS from the environment.
+if [ -n "$USER_LIGS" ]; then
+	LIGS="$USER_LIGS"
+	if [ -f "$LIGS" ]; then INPUT="$LIGS"; else INPUT=""; fi
+fi
+
+if [ -n "${INPUT}" ] && [ ! -f "${INPUT}" ]; then
+	echo "[!] INPUT is set but the file does not exist: $INPUT"
+	exit 1
+fi
 
 if [ -n "${INPUT}" ] && [ -f "${INPUT}" ]; then
 	echo  "[INFO] Single ligand mode detected: $INPUT"
@@ -29,7 +56,9 @@ else
 	LIGAND_MODE="batch"
 fi
 
-if [ -n "${PDB:-}" ]; then
+if [ -n "$USER_PDB" ]; then
+	PDB="$USER_PDB"
+elif [ -n "${PDB:-}" ]; then
 	: # Use PDB from the environment.
 elif [ -f "$WORK/protein.pdb" ]; then
 	PDB="$WORK/protein.pdb"
@@ -40,7 +69,7 @@ else
 fi
 
 echo "======================================"
-echo " PenDrive Virtual Screening Engine"
+echo " AutoDocker Virtual Screening Pipeline"
 echo "======================================"
 
 # Check if required files exist
@@ -72,7 +101,8 @@ elif [ "$LIGAND_MODE" = "single" ]; then
 		exit 1
 	fi
 
-	case "${LIGS##*.}" in
+	ext="${LIGS##*.}"
+	case "${ext,,}" in
 		sdf)
 			SDF_COUNT=1
 			PDBQT_COUNT=0
@@ -111,10 +141,10 @@ else
 	fi
 
 	# Check for ligand files
-	SDF_COUNT=$(find "$LIGS" -type f -name "*.sdf" | wc -l)
-	PDBQT_COUNT=$(find "$LIGS" -type f -name "*.pdbqt" | wc -l)
-	MOL2_COUNT=$(find "$LIGS" -type f -name "*.mol2" | wc -l)
-	PDB_COUNT=$(find "$LIGS" -type f -name "*.pdb" | wc -l)
+	SDF_COUNT=$(find "$LIGS" -type f -iname "*.sdf" | wc -l)
+	PDBQT_COUNT=$(find "$LIGS" -type f -iname "*.pdbqt" | wc -l)
+	MOL2_COUNT=$(find "$LIGS" -type f -iname "*.mol2" | wc -l)
+	PDB_COUNT=$(find "$LIGS" -type f -iname "*.pdb" | wc -l)
 
 	TOTAL_LIGS=$((SDF_COUNT + PDBQT_COUNT + MOL2_COUNT + PDB_COUNT))
 fi

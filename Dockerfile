@@ -153,7 +153,12 @@ COPY --from=aclmgr_builder \
 	src/aclmgr /autodocker/aclmgr
 
 RUN useradd --create-home --uid 1000 dockuser
-RUN mkdir -p /workspace && chown -R dockuser:dockuser /workspace /autodocker
+# /autodocker stays root-owned and read-only for dockuser: aclmgr runs as root
+# at every start, so a dockuser-writable copy could be replaced. Bytecode is
+# compiled now because dockuser cannot write __pycache__ there at run time.
+RUN python3 -m compileall -q /autodocker \
+	&& chmod -R a+rX,go-w /autodocker \
+	&& mkdir -p /workspace && chown -R dockuser:dockuser /workspace
 
 WORKDIR /workspace
 VOLUME ["/workspace"]
