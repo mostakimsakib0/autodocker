@@ -8,12 +8,17 @@ results**, on Docker or natively.
 - Docking seed: `--seed 42` by default (`VS_SEED`).
 - Ligand-library sampling, receptor prep, grid placement and docking all
   derive from the seed.
-- Pinned software: the Dockerfile compiles Vina 1.2.5, QuickVina 2,
-  Open Babel 3.x and fpocket 4.2.3 from pinned submodules; Python and pip
+- Pinned software: the Dockerfile compiles Vina 1.2.7 (tagged release;
+  images up to v1.1.4 used a later commit with identical C++ source), QuickVina 2,
+  and fpocket 4.2.3 from pinned submodules, and installs Open Babel 3.1.1 from
+  the Debian bookworm repository (the `tools/openbabel` submodule is not used
+  by the image); Python and pip
   dependencies are pinned (`python:3.12-slim-bookworm`, exact versions in
   `requirements.txt`).
 - Every docking command is recorded in `docked/*_vina.log`, so the exact
   inputs passed to Vina are recoverable after the fact.
+- Seeded Vina output is byte-identical for any `--cpu` value, so the
+  per-process thread count chosen for `-p N` never changes results.
 - Benchmark scripts are deterministic for a fixed seed (`BENCHMARKS.md`).
 
 ## End-to-end determinism check

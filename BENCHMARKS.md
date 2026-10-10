@@ -124,7 +124,10 @@ docking accuracy.
 **Interpretation.** Parallel scaling is real but plateaus at ~4×
 throughput on this 8-core host: moving from 1→2 processes typically doubles
 throughput (e.g. 1.91→2.93/min at 10 ligands), while 4→8 processes add
-~10% (=CPU-bound; Vina without `--threads` uses one core per process).
+~10%. The host is CPU-bound: these runs predate the `--cpu` fix, so every
+Vina process tried to use all eight cores and extra workers mostly competed
+for the same cores. From the next release, `-p N` gives each Vina process
+`cores / N` threads by default; seeded output is identical for any `--cpu`.
 Larger libraries amortize fixed receptor-prep costs, so per-ligand
 throughput rises with size (1.91→2.46/min single-core from 10→100 ligands).
 Peak RSS grows only modestly with size (588→741 MB), confirming the
@@ -135,7 +138,7 @@ Reproduce: `scripts/benchmark_performance.py`; results in
 
 ---
 
-**Environment:** Vina 1.2.5 (no `--threads` support, so docking parallelism =
-8 processes; perf runs used Vina ex2), Open Babel 3.x, `obrms`, Linux
+**Environment:** host Vina 1.2.5 (multithreaded via `--cpu`, which AutoDocker
+did not yet pass; docking parallelism = up to 8 processes; perf runs used Vina ex2), Open Babel 3.x, `obrms`, Linux
 x86-64, 8 vCPU, 2 concurrent FPU-heavy runs not run back-to-back with the
 timing cells. Result files are deterministic for fixed seeds.

@@ -13,7 +13,7 @@ cd autodocker
 docker build -t autodocker .
 ```
 
-The build compiles Vina, QuickVina 2, Open Babel, and fpocket from pinned
+The build compiles Vina, QuickVina 2, SMINA and fpocket from pinned
 submodules; allow 15-45 minutes on first build. To use a prebuilt image:
 
 ```bash

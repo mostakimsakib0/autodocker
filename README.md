@@ -62,8 +62,10 @@ Results are written under `/workspace/output/`:
 - `docked/*_out.pdbqt` — docked poses; `*_vina.log` — per-ligand logs
 - `frame_offset.txt` — translation back to the input PDB's coordinates (see below)
 
-The receptor is centered at the origin during preparation (`obabel -c`), so
-`receptor.pdbqt`, `grid.conf` and the docked poses share that centered frame.
+The receptor is protonated at pH 7.4 (`--ph`) and centered at the origin
+during preparation, so `receptor.pdbqt`, `grid.conf` and the docked poses
+share that centered frame (`--grid-center` is given in the input PDB's
+coordinates and converted automatically).
 The bundled PyMOL script and HTML report use it consistently, but poses will
 not overlay on your original `protein.pdb` (e.g. for MD set-up or comparison
 with a crystal ligand) until shifted back:
@@ -85,14 +87,19 @@ Direct use (inside the image or with tools on `PATH`):
 | `--no-admet` | Skip Lipinski ADMET filtering | off |
 | `--no-minimize` | Skip MMFF94 ligand minimization | off |
 | `--chain` | Chains to keep, e.g. `A`, `A,B`, or `all` | auto |
+| `--ph` | pH for receptor hydrogens (Open Babel `-p`) | `7.4` |
+| `--grid-center X,Y,Z` | Explicit box center, input-PDB coordinates | auto |
+| `--grid-center-frame` | `input` or `docking` (frame of `--grid-center`; ≤1.1.4 used `docking`) | `input` |
+| `--grid-size SX,SY,SZ` | Explicit box size (Å) | auto |
 | `--no-fpocket` | Skip fpocket; use centroid grid | off |
 | `--pockets` | Pocket numbers, e.g. `1` or `2,3` | best |
 | `--padding` | Grid padding around pocket (Å) | `6.0` |
-| `-p, --processes` | Parallel workers (`-1` = all cores) | `1` |
+| `-p, --processes` | Parallel workers (`-1` = all available CPUs) | `1` |
+| `--threads` | CPU threads per Vina/SMINA process (`--cpu`) | CPUs ÷ workers |
 | `--exhaustiveness` | Vina exhaustiveness | `8` |
 | `--binding-modes` | Vina binding modes | `9` |
 | `--seed` | Random seed (reproducibility) | `42` |
-| `--no-resume` | Ignore checkpoint and start fresh | off |
+| `--no-resume` | Ignore checkpoint and start fresh (a checkpoint is also discarded automatically when the receptor, box, parameters or engine change) | off |
 | `--top-n` | Hits in `Top_hits.txt` | `20` |
 | `--no-html-report` | Skip the self-contained HTML report | report on |
 | `--vina-bin` | Custom docking binary | auto |
@@ -100,10 +107,10 @@ Direct use (inside the image or with tools on `PATH`):
 | `--keep-waters` | Keep waters near binding site | off |
 | `--detect-metals` | Detect & keep metal ions | off |
 | `--detect-cofactors` | Detect & keep cofactors | off |
-| `--flexible-residues` | Flexible residues, e.g. `A45,A78` | none |
-| `--auto-flexible N` | Auto-select N flexible residues | none |
+| `--flexible-residues` | Flexible side chains, e.g. `A45,A78` (enables flexible docking) | none |
+| `--auto-flexible N` | Auto-select the N closest residues with rotatable side chains | none |
 | `--consensus` | Vina + SMINA consensus scoring (needs SMINA on PATH) | off |
-| `--smina-only` | Rank with SMINA only | off |
+| `--smina-only` | Dock and rank with SMINA instead of Vina | off |
 | `--version` | Print version and exit | — |
 
 ## Environment variables
@@ -124,6 +131,12 @@ Direct use (inside the image or with tools on `PATH`):
 | `RESUME` | Set `0` to disable checkpoint resume | `1` |
 | `VS_SEED` | RNG seed (an explicit `--seed` takes precedence) | `42` |
 | `PUBCHEM_REST` | PubChem REST base (mirrors) | official |
+
+## Exit status
+
+The container (and `runner.py`) exits 0 only when the screen completes; any
+failure exits non-zero, so scripts and schedulers can detect it. For a debug
+shell as root, run the image with `--root-shell` as the first argument.
 
 ## Reproducibility
 
