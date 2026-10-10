@@ -103,6 +103,25 @@ def het_groups(pdb_text):
     return [(k, groups[k]) for k in order]
 
 
+def normalize_sdf_elements(sdf):
+    """Write two-letter element symbols as Cl/Br, not CL/BR.
+
+    The ModelServer writes them in capitals, which Open Babel reads as an
+    unknown (dummy) atom, so the ligand loses its halogens.
+    """
+    lines = sdf.split("\n")
+    try:
+        n_atoms = int(lines[3][:3])
+    except (IndexError, ValueError):
+        return sdf
+    for i in range(4, 4 + n_atoms):
+        line = lines[i]
+        elem = line[31:34]
+        fixed = elem.strip().capitalize().ljust(3)
+        lines[i] = line[:31] + fixed + line[34:]
+    return "\n".join(lines)
+
+
 def build(pdbid, smiles, outdir):
     pdb_text = fetch(PDB_URL.format(pdbid=pdbid.upper())).decode()
     target = smiles_formula(smiles)
@@ -112,7 +131,7 @@ def build(pdbid, smiles, outdir):
     comp, chain, resnum = matches[0]
     sdf = fetch(LIGAND_URL.format(pdbid=pdbid.lower(), comp=comp, chain=chain,
                                   resnum=resnum)).decode()
-    sdf = sdf.split("$$$$")[0] + "$$$$\n"
+    sdf = normalize_sdf_elements(sdf.split("$$$$")[0] + "$$$$\n")
     cdir = os.path.join(outdir, pdbid)
     os.makedirs(cdir, exist_ok=True)
     sdf_path = os.path.join(cdir, f"{pdbid}_ligand.sdf")
