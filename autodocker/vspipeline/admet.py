@@ -52,10 +52,12 @@ def _is_valid_sdf(sdf_file: str) -> Tuple[bool, str]:
         with open(sdf_file, 'r', errors='ignore') as f:
             content = f.read()
 
-            # Check for error messages
-            if '404' in content or 'NotFound' in content or 'Status:' in content or 'Message:' in content:
-                if len(content) < 500:  # Likely an error response, not real molecule data
-                    return False, "SDF file contains error message (likely failed download from PubChem)"
+            # Check for error messages (a real molblock may contain "404" in
+            # a coordinate, so only files without one are considered)
+            if 'M  END' not in content and (
+                    '404' in content or 'NotFound' in content
+                    or 'Status:' in content or 'Message:' in content):
+                return False, "SDF file contains error message (likely failed download from PubChem)"
 
             # Check for molecule block end marker (essential for SDF format)
             if 'M  END' not in content:
@@ -126,36 +128,27 @@ class ADMETFilter:
         if obabel_props:
             props.update(obabel_props)
 
-        # If OpenBabel failed, try parsing from SDF file
+        # If OpenBabel failed, read properties stored as SDF data items
+        # ("> <TAG>" on one line, the value on the next).
         if not obabel_props:
             try:
                 with open(sdf_file) as f:
-                    lines = f.readlines()
-                    if len(lines) > 0:
-                        props['name'] = lines[0].strip() or props['name']
-
-                        for i, line in enumerate(lines):
-                            if 'MW' in line or 'MolWt' in line:
-                                try:
-                                    props['mw'] = float(line.split()[-1])
-                                except ValueError:
-                                    pass
-                            if 'LogP' in line or 'LOGP' in line:
-                                try:
-                                    props['logp'] = float(line.split()[-1])
-                                except ValueError:
-                                    pass
-                            if 'HBD' in line:
-                                try:
-                                    props['hbd'] = float(line.split()[-1])
-                                except ValueError:
-                                    pass
-                            if 'HBA' in line or 'HBCount' in line:
-                                try:
-                                    if not props.get('hba'):
-                                        props['hba'] = float(line.split()[-1])
-                                except ValueError:
-                                    pass
+                    lines = f.read().split("$$$$")[0].splitlines()
+                if lines:
+                    props['name'] = lines[0].strip() or props['name']
+                tags = {}
+                for i, line in enumerate(lines[:-1]):
+                    m = re.match(r"^>\s*.*<([^>]+)>", line)
+                    if m:
+                        tags[m.group(1).strip().upper()] = lines[i + 1].strip()
+                for key, names in _SDF_PROPERTY_TAGS.items():
+                    for tag in names:
+                        if tag in tags:
+                            try:
+                                props[key] = float(tags[tag])
+                                break
+                            except ValueError:
+                                pass
             except Exception as e:
                 logger.warning(
                     f"Could not parse SDF properties from {os.path.basename(sdf_file)}: {e}")
@@ -194,6 +187,16 @@ class ADMETFilter:
             violations.append(f"HBA={hba:.0f} (>10)")
 
         return len(violations) == 0, violations
+
+
+# SDF data-item tags (upper case) that hold each descriptor, in order of
+# preference; covers common exporters and PubChem downloads.
+_SDF_PROPERTY_TAGS = {
+    "mw": ["MW", "MOLWT", "MOLECULAR_WEIGHT", "MOLECULARWEIGHT", "PUBCHEM_MOLECULAR_WEIGHT"],
+    "logp": ["LOGP", "XLOGP3", "XLOGP", "PUBCHEM_XLOGP3", "PUBCHEM_XLOGP3_AA"],
+    "hbd": ["HBD", "HBOND_DONOR", "PUBCHEM_CACTVS_HBOND_DONOR"],
+    "hba": ["HBA", "HBOND_ACCEPTOR", "PUBCHEM_CACTVS_HBOND_ACCEPTOR"],
+}
 
 
 def _obabel_descriptors(sdf_file: str) -> Optional[Dict]:

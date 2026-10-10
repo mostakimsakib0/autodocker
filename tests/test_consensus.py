@@ -74,6 +74,31 @@ def test_parse_smina_affinity_table():
     assert cons._parse_smina_affinity(stdout) == -7.5
 
 
+def test_parse_smina_affinity_real_output():
+    # Verbatim SMINA 2020 output: units row, separator, whitespace columns.
+    stdout = (
+        "mode |   affinity | dist from best mode\n"
+        "     | (kcal/mol) | rmsd l.b.| rmsd u.b.\n"
+        "-----+------------+----------+----------\n"
+        "1       -9.1       0.000      0.000    \n"
+        "2       -8.4       2.136      2.961    \n"
+        "Refine time 1.978\n"
+        "Loop time 3.186\n"
+    )
+    assert cons._parse_smina_affinity(stdout) == -9.1
+
+
+def test_smina_score_outside_window_is_rejected(fake_smina, tmp_path):
+    rec = tmp_path / "r.pdbqt"
+    rec.write_text("ATOM\n")
+    lig = tmp_path / "l.pdbqt"
+    lig.write_text("ATOM\n")
+    scores = cons._run_smina_scoring(
+        str(rec), [str(lig)], str(tmp_path / "out"), (1, 2, 3, 20, 20, 20),
+        {"exhaustiveness": 8, "min_valid_affinity": -9.0}, num_processes=1)
+    assert scores == {"l": None}  # -8.1 >= -9.0, so outside the window
+
+
 def test_parse_smina_affinity_fallback():
     stdout = "1 -5.3 something\n2 -4.1 other\n"
     assert cons._parse_smina_affinity(stdout) == -5.3

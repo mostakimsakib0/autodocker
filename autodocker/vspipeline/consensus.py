@@ -131,6 +131,8 @@ def run_smina_docking(
     sx: float, sy: float, sz: float,
     exhaustiveness: int = 8,
     seed: Optional[int] = None,
+    cpu: Optional[int] = None,
+    flex_file: Optional[str] = None,
 ) -> Optional[float]:
     """Run SMINA docking and return best affinity."""
 
@@ -154,6 +156,10 @@ def run_smina_docking(
     ]
     if seed is not None:
         cmd += ["--seed", str(seed)]
+    if cpu:
+        cmd += ["--cpu", str(cpu)]
+    if flex_file:
+        cmd += ["--flex", flex_file]
 
     result = subprocess.run(
         cmd,
@@ -186,30 +192,14 @@ def run_smina_docking(
 def _parse_smina_affinity(stdout: str) -> Optional[float]:
     """Extract the best-mode affinity (kcal/mol) from SMINA stdout.
 
-    Prefers the ``mode | affinity`` table (first data row = best mode); SMINA
-    emits ``0 | -7.5 | 0.0`` so the affinity is the second pipe-delimited
-    column. Falls back to the first digit-leading line for non-standard
-    output.
+    SMINA prints the Vina-style table: a ``mode | affinity`` header, a units
+    row, a ``-----+-----`` separator, then whitespace-separated rows
+    (``1  -7.5  0.000  0.000``); the first row is the best mode. Output
+    without that table falls back to the first digit-leading line.
     """
-    lines = stdout.splitlines()
-    for i, line in enumerate(lines):
-        if re.search(r"mode\s*\|\s*affinity", line):
-            for nxt in lines[i + 1:]:
-                if not nxt.strip():
-                    continue
-                cols = [c.strip() for c in nxt.split('|')]
-                cand = cols[1] if len(cols) >= 2 else None
-                if cand is None:
-                    toks = nxt.split()
-                    cand = toks[1] if len(toks) >= 2 else None
-                if cand is not None:
-                    try:
-                        return float(cand)
-                    except ValueError:
-                        pass
-                break
+    lines = runner._mode_table_lines(stdout)
     for line in lines:
-        toks = line.split()
+        toks = line.replace("|", " ").split()
         if len(toks) >= 2 and toks[0].isdigit():
             try:
                 return float(toks[1])
@@ -220,37 +210,50 @@ def _parse_smina_affinity(stdout: str) -> Optional[float]:
 
 def _smina_score_one(task):
     """Worker: dock a single ligand with SMINA. Picklable for Pool."""
-    receptor, lig, out, cx, cy, cz, sx, sy, sz, exhaustiveness, seed = task
-    name = os.path.basename(lig).replace(".pdbqt", "")
+    (receptor, lig, out, cx, cy, cz, sx, sy, sz, exhaustiveness, seed,
+     cpu, flex_file, min_valid) = task
+    name = runner.ligand_name(lig)
     try:
         score = run_smina_docking(
             receptor, lig, out, cx, cy, cz, sx, sy, sz,
-            exhaustiveness=exhaustiveness, seed=seed)
+            exhaustiveness=exhaustiveness, seed=seed, cpu=cpu, flex_file=flex_file)
     except Exception as e:
         return name, None, str(e)
+    # Same validity window as the Vina scores they are compared with.
+    if score is not None and (score >= min_valid or score < -20):
+        return name, None, (f"score {score:.2f} kcal/mol outside the accepted "
+                            f"window (-20 to <{min_valid})")
     return name, score, None
 
 
 def _run_smina_scoring(receptor: str, ligands: List[str], outdir: str,
                        grid: Tuple[float, float, float, float, float, float],
                        vina_params: Dict,
-                       num_processes: int = 1) -> Dict[str, float]:
-    """Run SMINA scoring for every ligand. Returns {name: smina_affinity}.
+                       num_processes: int = 1,
+                       flex_file: Optional[str] = None) -> Dict[str, Optional[float]]:
+    """Run SMINA docking for every ligand.
 
-    Per-ligand failures are logged and skipped (never fatal). Docking is
-    parallelized with a process pool (like Vina) when ``num_processes > 1``.
+    Returns {name: smina_affinity} with None for ligands SMINA could not
+    score, so callers can report them instead of dropping them. Per-ligand
+    failures are logged, never fatal. Docking is parallelized with a process
+    pool (like Vina) when ``num_processes > 1``, with the cores split between
+    workers.
     """
     cx, cy, cz, sx, sy, sz = grid
-    exhaustiveness = int(vina_params.get('exhaustiveness', 8)) if vina_params else 8
-    seed = vina_params.get('seed') if vina_params else None
+    vina_params = vina_params or {}
+    exhaustiveness = int(vina_params.get('exhaustiveness', 8))
+    seed = vina_params.get('seed')
+    min_valid = float(vina_params.get('min_valid_affinity', -1.0))
+    cpu = vina_params.get('threads')
+    if not cpu and num_processes > 1:
+        cpu = max(1, runner.available_cpus() // num_processes)
     smina_scores = {}
     dock_dir = os.path.join(outdir, "docked")
     os.makedirs(dock_dir, exist_ok=True)
 
     tasks = [
-        (receptor, lig, os.path.join(dock_dir, os.path.basename(lig)
-         .replace(".pdbqt", "") + "_smina.pdbqt"),
-         cx, cy, cz, sx, sy, sz, exhaustiveness, seed)
+        (receptor, lig, os.path.join(dock_dir, runner.ligand_name(lig) + "_smina.pdbqt"),
+         cx, cy, cz, sx, sy, sz, exhaustiveness, seed, cpu, flex_file, min_valid)
         for lig in ligands
     ]
 
@@ -258,8 +261,7 @@ def _run_smina_scoring(receptor: str, ligands: List[str], outdir: str,
         for name, score, err in results:
             if err:
                 logger.warning(f"  [!] SMINA failed for {name}: {err}")
-            elif score is not None:
-                smina_scores[name] = score
+            smina_scores[name] = score if not err else None
 
     if num_processes > 1:
         try:
@@ -273,5 +275,6 @@ def _run_smina_scoring(receptor: str, ligands: List[str], outdir: str,
         _collect(_smina_score_one(t) for t in tasks)
 
     logger.info(
-        f"[*] SMINA scored {len(smina_scores)}/{len(ligands)} ligands")
+        f"[*] SMINA scored {sum(v is not None for v in smina_scores.values())}"
+        f"/{len(ligands)} ligands")
     return smina_scores

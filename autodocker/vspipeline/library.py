@@ -32,6 +32,7 @@ from multiprocessing import Pool, cpu_count as mp_cpu_count
 # initial import of runner this binds the partially-initialized module
 # object, which is fine because attributes are only accessed at call time.
 import runner  # noqa: E402
+from vspipeline import net  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,31 @@ def _ligand_pdbqt_problem(path: str) -> Optional[str]:
     if missing:
         return ("Not a ligand PDBQT (missing " + "/".join(missing) +
                 "; looks like a receptor-style file)")
+    if "MODEL" in tags:
+        return ("PDBQT contains several models (MODEL records, e.g. a Vina "
+                "output file); Vina docks one ligand per file")
     return None
+
+
+def _count_molecules(path: str, fmt: str) -> int:
+    """Number of molecule records in an SDF ($$$$) or MOL2 (@<TRIPOS>MOLECULE) file."""
+    marker = "$$$$" if fmt == "sdf" else "@<TRIPOS>MOLECULE"
+    try:
+        with open(path, errors="replace") as fh:
+            n = sum(1 for line in fh if line.strip() == marker)
+    except OSError:
+        return 0
+    # A single-molecule SDF may omit the trailing $$$$.
+    return max(n, 1) if fmt == "sdf" else n
+
+
+def _sdf_is_usable(path: str) -> bool:
+    """True if ``path`` exists and holds at least one complete molblock."""
+    try:
+        with open(path, errors="replace") as fh:
+            return "M  END" in fh.read()
+    except OSError:
+        return False
 
 
 def _sdf_has_3d_coords(sdf_file: str) -> bool:
@@ -113,6 +138,7 @@ class LibraryManager:
         os.makedirs(self.minimized_dir, exist_ok=True)
         # Allow overriding the PubChem REST base for tests/mirrors.
         self.pubchem_rest = os.environ.get('PUBCHEM_REST') or self.PUBCHEM_REST
+        self._network_failures = 0
 
     def create_fda_library(self, apply_admet: bool = True) -> List[str]:
         """Download FDA-approved drugs from PubChem.
@@ -202,6 +228,8 @@ class LibraryManager:
             f"[✔] Downloaded and prepared {len(downloaded)} custom compounds from PubChem")
         return downloaded
 
+    MAX_NETWORK_FAILURES = 3
+
     def _pubchem_cid_for_name(self, name: str) -> List[str]:
         """Resolve a drug name to PubChem Compound IDs (CIDs)."""
         url = (f"{self.pubchem_rest}/compound/name/"
@@ -210,7 +238,20 @@ class LibraryManager:
             data = json.loads(runner._http_get_bytes(url).decode("utf-8"))
         except Exception as e:
             logger.debug(f"PubChem name lookup failed for '{name}': {e}")
+            # An HTTP status (e.g. 404 for an unknown name, or 429/5xx when
+            # PubChem is busy) means PubChem answered; anything else is a
+            # network failure. Stop after a few in a row instead of walking
+            # the whole list offline.
+            if (net._http_status(e) is None
+                    and not isinstance(e, net._RetryableHTTPError)):
+                self._network_failures += 1
+                if self._network_failures >= self.MAX_NETWORK_FAILURES:
+                    raise RuntimeError(
+                        f"PubChem is unreachable ({self._network_failures} failed "
+                        f"requests in a row; last error: {e}). Check the network "
+                        "connection or proxy, or supply ligands in ligs/") from e
             return []
+        self._network_failures = 0
         cids = ((data.get("IdentifierList") or {}).get("CID")) or []
         return [str(c) for c in cids]
 
@@ -230,10 +271,22 @@ class LibraryManager:
         return props
 
     def _pubchem_download_sdf(self, cid: str, outpath: str) -> str:
-        """Download the 3D SDF for a CID to ``outpath``."""
+        """Download the 3D SDF for a CID to ``outpath``.
+
+        PubChem has no 3D conformer for some compounds (large or very
+        flexible ones); their 2D record is used instead and gets 3D
+        coordinates during preparation.
+        """
         url = (f"{self.pubchem_rest}/compound/cid/{cid}/SDF"
                f"?record_type=3d")
-        content = runner._http_get_bytes(url)
+        try:
+            content = runner._http_get_bytes(url)
+        except Exception as e:
+            if net._http_status(e) != 404:
+                raise
+            logger.info(f"  [*] CID {cid}: no 3D conformer in PubChem; using the 2D record")
+            content = runner._http_get_bytes(
+                f"{self.pubchem_rest}/compound/cid/{cid}/SDF")
         with open(outpath, "wb") as f:
             f.write(content)
         return outpath
@@ -248,7 +301,7 @@ class LibraryManager:
         try:
             self._pubchem_download_sdf(cid, sdf_file)
         except Exception as e:
-            logger.debug(f"PubChem SDF download failed for {ligand_id}: {e}")
+            logger.info(f"  [-] {ligand_id}: PubChem SDF download failed ({e})")
             return None
 
         if apply_admet:
@@ -292,25 +345,44 @@ class LibraryManager:
         if props is None:
             props = {}
 
+        # --gen3d rebuilds coordinates with a random conformer search, so
+        # use it only when the input has no 3D coordinates.
+        needs_3d = not _sdf_has_3d_coords(sdf_file)
         if self.minimize:
-            # --gen3d rebuilds coordinates with a random conformer search, so
-            # use it only when the input has no 3D coordinates. Open Babel's
-            # force field is multithreaded (OpenMP) and its summation order
-            # varies between runs; one thread makes minimization repeatable.
+            # Open Babel's force field is multithreaded (OpenMP) and its
+            # summation order varies between runs; one thread makes
+            # minimization repeatable.
             cmd = [runner.OBABEL, "-isdf", sdf_file, "-osdf", "-O", minimized_file]
-            if not _sdf_has_3d_coords(sdf_file):
+            if needs_3d:
                 cmd.append("--gen3d")
             cmd += ["--minimize", "--ff", "MMFF94", "--steps", str(self.minimize_steps)]
             try:
+                if os.path.exists(minimized_file):
+                    os.remove(minimized_file)
                 runner.run(cmd, extra_env={"OMP_NUM_THREADS": "1"})
+                # Open Babel exits 0 even when MMFF94 cannot be set up (e.g.
+                # boron compounds) and then writes nothing, so check the file.
+                if not _sdf_is_usable(minimized_file):
+                    raise RuntimeError("Open Babel wrote no minimized molecule "
+                                       "(MMFF94 setup failed?)")
                 source_for_conversion = minimized_file
+                needs_3d = False
             except Exception as e:
                 logger.warning(
                     f"MMFF94 minimization failed for {ligand_id}: {e}. Converting original SDF.")
 
-        # Convert to PDBQT
+        # Convert to PDBQT. -h adds hydrogens (the PDBQT writer keeps the
+        # polar ones, which Vina needs for hydrogen-bond donors); a 2D input
+        # that was not minimized still needs 3D coordinates.
+        convert = [runner.OBABEL, "-isdf", source_for_conversion, "-opdbqt",
+                   "-O", pdbqt_file, "-h"]
+        if needs_3d:
+            convert.append("--gen3d")
+            logger.warning(f"[!] {ligand_id}: input has no 3D coordinates; "
+                           "generating a conformer with --gen3d (not seeded, so "
+                           "repeated preparations can differ)")
         try:
-            runner.run([runner.OBABEL, "-isdf", source_for_conversion, "-opdbqt", "-O", pdbqt_file])
+            runner.run(convert)
         except Exception as e:
             logger.error(f"Failed to convert {ligand_id} to PDBQT: {e}")
             # Create empty file to mark failure
@@ -381,8 +453,9 @@ class LibraryManager:
             elif lname.endswith(".pdb"):
                 pdb_files = [ligands_input]
         else:
-            for root, _, files in os.walk(ligands_input):
-                for f in files:
+            for root, dirs, files in os.walk(ligands_input):
+                dirs.sort()
+                for f in sorted(files):
                     path = os.path.join(root, f)
 
                     if f.lower().endswith(".sdf"):
@@ -430,6 +503,10 @@ class LibraryManager:
 
         logger.info(f"[*] Preparing {len(ligands)} ligands...")
 
+        if apply_admet and any(mode != "sdf" for mode, _ in ligands):
+            logger.info("[*] The Lipinski filter applies to SDF inputs only; "
+                        "PDBQT, MOL2 and PDB ligands are docked unfiltered")
+
         seen_names = {}
         for mode, lig in ligands:
             stem = Path(lig).stem
@@ -437,7 +514,17 @@ class LibraryManager:
                 failed_ligands.append(
                     (lig, f"Duplicate ligand name '{stem}' (already taken by {Path(seen_names[stem]).name})"))
                 continue
-            seen_names[stem] = lig
+            n_before = len(out_files)
+
+            if mode in ("sdf", "mol2"):
+                n_mols = _count_molecules(lig, mode)
+                if n_mols > 1:
+                    reason = (f"File holds {n_mols} molecules; Vina docks one per "
+                              f"file (split it, e.g. obabel {Path(lig).name} -O "
+                              f"{stem}_.{mode} -m)")
+                    failed_ligands.append((lig, reason))
+                    logger.error(f"  [✗] {Path(lig).name}: {reason}")
+                    continue
 
             try:
                 # -------------------------
@@ -486,7 +573,7 @@ class LibraryManager:
                     name = Path(lig).stem
                     out = os.path.join(self.lib_dir, f"{name}.pdbqt")
                     try:
-                        runner.run([runner.OBABEL, "-imol2", inp, "-opdbqt", "-O", out])
+                        runner.run([runner.OBABEL, "-imol2", inp, "-opdbqt", "-O", out, "-h"])
                         if not os.path.exists(out) or os.path.getsize(out) == 0:
                             raise RuntimeError(
                                 "Conversion produced empty file")
@@ -506,7 +593,9 @@ class LibraryManager:
                     name = Path(lig).stem
                     out = os.path.join(self.lib_dir, f"{name}.pdbqt")
                     try:
-                        runner.run([runner.OBABEL, "-ipdb", inp, "-opdbqt", "-O", out])
+                        # PDB input carries no partial charges; assign Gasteiger directly.
+                        runner.run([runner.OBABEL, "-ipdb", inp, "-opdbqt", "-O", out, "-h",
+                                    "--partialcharge", "gasteiger"])
                         if not os.path.exists(out) or os.path.getsize(out) == 0:
                             raise RuntimeError(
                                 "Conversion produced empty file")
@@ -521,6 +610,12 @@ class LibraryManager:
             except Exception as e:
                 failed_ligands.append((lig, str(e)))
                 logger.error(f"  [✗] {lig}: {e}")
+
+            # Reserve the name only for a ligand that was actually prepared, so
+            # a file that fails (e.g. lig.sdf rejected by ADMET) does not block
+            # a usable file with the same stem (lig.pdbqt).
+            if len(out_files) > n_before:
+                seen_names[stem] = lig
 
         # -----------------------------
         # STEP 4: FINAL REPORT

@@ -35,9 +35,11 @@ import runner  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-def _score_sort_key(result: Tuple[str, Optional[float]]) -> Tuple[bool, float]:
+def _score_sort_key(result: Tuple[str, Optional[float]]) -> Tuple[bool, float, str]:
+    # The name breaks ties, so ranking.csv does not depend on the order in
+    # which parallel workers finished.
     score = result[1]
-    return score is None, score if score is not None else float("inf")
+    return score is None, score if score is not None else float("inf"), str(result[0])
 
 
 def _score_csv(score: Optional[float]):
@@ -174,12 +176,13 @@ class ResultsAnalyzer:
                         simscore = metrics.get('simscore', 0.0)
                         f.write(
                             f"   SimScore (pose consistency): {simscore:.2f}\n")
-                        if metrics.get("mode_coverage") != "":
+                        if isinstance(metrics.get("mode_coverage"), (int, float)):
                             f.write(
-                                f"   Mode Coverage: {metrics.get('mode_coverage', 0):.2f}\n")
-                        if meta:
+                                f"   Mode Coverage: {metrics['mode_coverage']:.2f}\n")
+                        if (isinstance(meta.get("mw"), (int, float))
+                                and isinstance(meta.get("logp"), (int, float))):
                             f.write(
-                                f"   MW: {meta.get('mw', 0):.2f}; LogP: {meta.get('logp', 0):.2f}\n")
+                                f"   MW: {meta['mw']:.2f}; LogP: {meta['logp']:.2f}\n")
                         if meta.get("source_url"):
                             f.write(f"   Source: {meta['source_url']}\n")
                         f.write(
@@ -196,7 +199,7 @@ class ResultsAnalyzer:
                     f.write(f"   Interpretation: {interp}\n")
                     if score is None:
                         f.write(
-                            f"   Next steps: inspect docked/{name}.log and rerun if needed\n")
+                            f"   Next steps: inspect docked/{name}_vina.log and rerun if needed\n")
                     else:
                         f.write(f"   Next steps: MD/ADMET screening\n")
 

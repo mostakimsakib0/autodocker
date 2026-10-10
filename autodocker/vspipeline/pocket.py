@@ -52,6 +52,19 @@ COFACTOR_RESNAMES = {
 }
 
 
+def _element_from_atom_name(field: str) -> str:
+    """Element from a PDB atom-name field (columns 13-16) when the element
+    column is blank. PDB right-justifies the element symbol in columns 13-14,
+    so C-alpha is ' CA ' (carbon) while calcium is 'CA  '; four-character
+    hydrogen names such as 'HG21' start in column 13."""
+    field = field.ljust(4)[:4]
+    if field[0].isdigit():
+        return field[1].upper()
+    if field[0] == "H" and field.strip() == field and len(field.strip()) == 4:
+        return "H"
+    return re.sub(r"[^A-Za-z]", "", field[:2]).upper()
+
+
 def _parse_hetatm(line: str) -> Optional[Dict]:
     """Parse a PDB HETATM line into a dict, or None if malformed.
 
@@ -68,7 +81,7 @@ def _parse_hetatm(line: str) -> Optional[Dict]:
     atom_name = line[12:16].strip()
     element = line[76:78].strip().upper()
     if not element:
-        element = re.sub(r"[^A-Za-z]", "", atom_name).upper()
+        element = _element_from_atom_name(line[12:16])
 
     return {
         "index": line[6:11].strip(),
@@ -76,6 +89,7 @@ def _parse_hetatm(line: str) -> Optional[Dict]:
         "resname": line[17:20].strip().upper(),
         "chain": line[21].strip() or "A",
         "resnum": line[22:26].strip(),
+        "icode": line[26:27].strip() if len(line) > 26 else "",
         "element": element,
         "coords": coords,
         "line": line,
@@ -206,8 +220,12 @@ def _hetatm_to_pdbqt_line(parsed: Dict, serial: int) -> Optional[str]:
     resnum = parsed["resnum"]
     # Column layout matches the AutoDock PDBQT convention Vina parses:
     # coords at 31-38/39-46/47-54, charge at 69-76, atom type at 78-79.
+    icode = parsed.get("icode", "")
+    # Fixed PDB columns: serial 7-11 (wrapped at 5 digits), name 13-16,
+    # resname 18-20, chain 22, resnum 23-26, insertion code 27.
     return (
-        f"HETATM{serial:5d} {name:<4s} {resname:3s} {chain} {resnum:>3s}    "
+        f"HETATM{serial % 100000:5d} {name:<4s} {resname:>3s} {chain:1s}{resnum:>4s}"
+        f"{icode:1s}   "
         f"{x:8.3f}{y:8.3f}{z:8.3f}{1.00:6.2f}{20.00:6.2f}    {0.000:+.3f} {atom_type}\n"
     )
 

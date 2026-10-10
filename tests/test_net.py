@@ -51,3 +51,39 @@ def test_http_no_lib(monkeypatch):
     import pytest
     with pytest.raises(RuntimeError):
         net._http_get_bytes("http://x")
+
+
+def test_http_404_is_not_retried(monkeypatch):
+    import pytest
+    calls = []
+
+    class Resp:
+        status_code = 404
+
+    class NotFound(OSError):
+        response = Resp()
+
+    def get_once(url, timeout=30):
+        calls.append(url)
+        raise NotFound("404 Not Found")
+
+    monkeypatch.setattr(net, "_http_get_once", get_once)
+    monkeypatch.setattr(net.time, "sleep", lambda s: None)
+    with pytest.raises(NotFound):
+        net._http_get_bytes("http://x")
+    assert len(calls) == 1
+
+
+def test_connection_errors_are_retried(monkeypatch):
+    import pytest
+    calls = []
+
+    def get_once(url, timeout=30):
+        calls.append(url)
+        raise ConnectionRefusedError("refused")
+
+    monkeypatch.setattr(net, "_http_get_once", get_once)
+    monkeypatch.setattr(net.time, "sleep", lambda s: None)
+    with pytest.raises(ConnectionRefusedError):
+        net._http_get_bytes("http://x", retries=3)
+    assert len(calls) == 3

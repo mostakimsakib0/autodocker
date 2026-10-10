@@ -66,6 +66,34 @@ def run(cmd_list: List[str], capture: bool = False,
         raise
 
 
+def ligand_name(path: str) -> str:
+    """Ligand ID used for output names: the file name without a .pdbqt
+    extension (matched case-insensitively, so X.PDBQT -> X)."""
+    base = os.path.basename(path)
+    return base[:-6] if base.lower().endswith(".pdbqt") else base
+
+
+def available_cpus() -> int:
+    """CPUs this process may actually use.
+
+    ``multiprocessing.cpu_count()`` reports every host core, ignoring the
+    process's CPU affinity and a container's cgroup quota (docker --cpus), so
+    defaults based on it oversubscribe a limited container.
+    """
+    try:
+        n = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        n = mp_cpu_count()
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as f:  # cgroup v2: "<quota> <period>"
+            quota, period = f.read().split()[:2]
+        if quota != "max":
+            n = min(n, max(1, int(int(quota) // int(period))))
+    except (OSError, ValueError):
+        pass
+    return max(1, n)
+
+
 def parse_pdb_coords(pdb_path: str) -> Tuple[List[float], List[float], List[float]]:
     """Extract XYZ coordinates from PDB file."""
     xs, ys, zs = [], [], []

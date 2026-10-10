@@ -14,13 +14,14 @@ import time
 import shlex
 import uuid
 import shutil
+import hashlib
 import fnmatch
 import glob
 import html
 import statistics
 import subprocess
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
@@ -35,10 +36,31 @@ import runner  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+def _mode_table_lines(output: str) -> List[str]:
+    """Lines of the Vina/QuickVina/SMINA results table.
+
+    The table follows a ``-----+------`` separator and ends at the first line
+    that is not a mode row; parsing only those lines keeps other digit-led
+    output (warnings, verbose messages) out of the scores. Output without a
+    separator is returned whole, for older or abbreviated formats.
+    """
+    lines = output.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().startswith("-----+"):
+            rows = []
+            for row in lines[i + 1:]:
+                parts = row.split()
+                if not parts or not parts[0].isdigit():
+                    break
+                rows.append(row)
+            return rows
+    return lines
+
+
 def _parse_vina_modes(vina_output: str) -> List[Dict[str, float]]:
     """Parse Vina/QuickVina mode rows from captured output."""
     modes = []
-    for line in vina_output.splitlines():
+    for line in _mode_table_lines(vina_output):
         parts = line.split()
         if len(parts) >= 4 and parts[0].isdigit():
             try:
@@ -163,7 +185,7 @@ def _extract_score(output: str) -> float:
 
     best = None
 
-    for line in output.splitlines():
+    for line in _mode_table_lines(output):
         parts = line.split()
         if len(parts) >= 2 and parts[0].isdigit():
             try:
@@ -252,7 +274,7 @@ def _parse_grid_config(grid_file: str) -> Dict[str, float]:
 
 # Cache repeated, expensive, per-ligand inspections so they run once per
 # unique input instead of N times across the ligand set.
-_VINA_THREADS_CACHE: Dict[str, bool] = {}
+_VINA_CPU_FLAG_CACHE: Dict[str, Optional[str]] = {}
 _VINA_TYPE_CACHE: Dict[str, str] = {}
 _GRID_CACHE: Dict[Tuple[str, float], Dict] = {}
 _RECEPTOR_CACHE: Dict[str, Tuple[bool, bool]] = {}
@@ -268,22 +290,32 @@ def _cached_receptor_check(receptor: str) -> Tuple[bool, bool]:
     return res
 
 
-def _vina_supports_threads(vina_path: str) -> bool:
-    """Probe whether the Vina binary accepts --threads. Cached per binary."""
-    if vina_path in _VINA_THREADS_CACHE:
-        return _VINA_THREADS_CACHE[vina_path]
-    supported = False
-    try:
-        result = subprocess.run(
-            [vina_path, "--help_advanced"],
-            capture_output=True, text=True, timeout=5,
-        )
+def _vina_cpu_flag(vina_path: str) -> Optional[str]:
+    """Return the option that limits the binary's CPU threads, or None.
+
+    Vina 1.2.x and QuickVina 2 call it --cpu; some forks use --threads.
+    Cached per binary.
+    """
+    if vina_path in _VINA_CPU_FLAG_CACHE:
+        return _VINA_CPU_FLAG_CACHE[vina_path]
+    flag = None
+    for help_opt in ("--help_advanced", "--help"):
+        try:
+            result = subprocess.run(
+                [vina_path, help_opt],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception:
+            continue
         help_text = (result.stdout or "") + (result.stderr or "")
-        supported = "--threads" in help_text
-    except Exception:
-        supported = False
-    _VINA_THREADS_CACHE[vina_path] = supported
-    return supported
+        if re.search(r"--cpu\b", help_text):
+            flag = "--cpu"
+            break
+        if re.search(r"--threads\b", help_text):
+            flag = "--threads"
+            break
+    _VINA_CPU_FLAG_CACHE[vina_path] = flag
+    return flag
 
 
 def _detect_vina_type(vina_path: str) -> str:
@@ -301,8 +333,10 @@ def _detect_vina_type(vina_path: str) -> str:
         )
         help_text = (result.stdout or "") + (result.stderr or "")
         if 'quickvina' in help_text.lower() or 'quick vina' in help_text.lower():
+            _VINA_TYPE_CACHE[vina_path] = 'quickvina'
             return 'quickvina'
         elif 'autodock vina' in help_text.lower():
+            _VINA_TYPE_CACHE[vina_path] = 'vina'
             return 'vina'
     except Exception:
         pass
@@ -338,11 +372,12 @@ def _build_vina_command(vina_path: str, receptor: str, ligand: str, out: str,
 
     if vina_params.get('threads'):
         # Resolve via runner so test monkeypatches are honored.
-        if runner._vina_supports_threads(vina_path):
-            cmd.extend(["--threads", str(vina_params['threads'])])
+        cpu_flag = runner._vina_cpu_flag(vina_path)
+        if cpu_flag:
+            cmd.extend([cpu_flag, str(vina_params['threads'])])
         else:
             logger.warning(
-                f"[!] Vina binary {vina_path} does not support --threads; "
+                f"[!] Vina binary {vina_path} has no --cpu/--threads option; "
                 "ignoring requested thread limit")
 
     if vina_type == 'quickvina':
@@ -401,10 +436,9 @@ def dock_ligand(args_tuple: Tuple) -> Tuple[str, Optional[float], Dict]:
     Raises exceptions when ALL docking attempts fail.
 
     """
-    unique_id = uuid.uuid4().hex[:8]
     receptor, lig, grid_file, dock_dir, vina_params, flex_file = args_tuple
 
-    name = os.path.basename(lig).replace(".pdbqt", "")
+    name = runner.ligand_name(lig)
     out = os.path.join(dock_dir, name + "_out.pdbqt")
     vina_log = os.path.join(dock_dir, name + "_vina.log")
 
@@ -455,7 +489,11 @@ def dock_ligand(args_tuple: Tuple) -> Tuple[str, Optional[float], Dict]:
         return name, None, {"status": "FAILED", "dock_file": out, "log_file": vina_log, "error": error_msg}
 
     # Parse grid config file to get center and size coordinates
-    grid_config = _parse_grid_config(grid_file)
+    try:
+        grid_config = _parse_grid_config(grid_file)
+    except (ValueError, RuntimeError) as e:
+        return name, None, {"status": "FAILED", "dock_file": out, "log_file": vina_log,
+                            "error": str(e)}
 
     # Try docking with primary tool (QuickVina), then fallback to standard Vina
     vina_tools = [
@@ -470,6 +508,9 @@ def dock_ligand(args_tuple: Tuple) -> Tuple[str, Optional[float], Dict]:
     tool_log_entries = []
 
     for vina_tool, tool_label in vina_tools:
+        # Never let a previous attempt's (or run's) poses pass for this one.
+        if os.path.exists(out):
+            os.remove(out)
         try:
             # Build command for current Vina binary (auto-detects type)
             cmd = _build_vina_command(
@@ -517,10 +558,20 @@ def dock_ligand(args_tuple: Tuple) -> Tuple[str, Optional[float], Dict]:
             min_valid_affinity = float(
                 vina_params.get('min_valid_affinity', -1.0))
             if score >= min_valid_affinity or score < -20:
-                raise ValueError(
-                    f"Unrealistic binding affinity: {score} kcal/mol "
-                    f"(expected -20 to <{min_valid_affinity})"
-                )
+                # A valid run whose score is outside the accepted window is a
+                # result, not a tool failure: report it, and do not re-dock
+                # with the fallback engine (that would mix engines in one
+                # ranking).
+                reason = (f"score {score:.2f} kcal/mol outside the accepted window "
+                          f"(-20 to <{min_valid_affinity})")
+                tool_log_entries.append(f"# Result: REJECTED - {reason}\n")
+                tool_log_entries.append(stdout + "\n")
+                with open(vina_log, 'w') as f:
+                    f.writelines(tool_log_entries)
+                logger.warning(f"  [!] {name}: {reason}")
+                return name, None, {"status": f"REJECTED ({score:.2f})", "dock_file": out,
+                                    "log_file": vina_log, "raw_score": score,
+                                    "vina_tool": tool_label, "error": reason}
 
             # Success!
             logger.debug(
@@ -536,7 +587,7 @@ def dock_ligand(args_tuple: Tuple) -> Tuple[str, Optional[float], Dict]:
 
             # Calculate metrics
             metrics = _calculate_metrics(
-                lig, out, stdout + stderr,
+                lig, out, stdout,
                 expected_modes=int(vina_params.get('binding_modes', 0)) or None
             )
             metrics["status"] = "OK" if score < -4.0 else "WEAK"
@@ -591,6 +642,32 @@ def dock_ligand(args_tuple: Tuple) -> Tuple[str, Optional[float], Dict]:
     return name, None, {"status": "FAILED", "dock_file": out, "log_file": vina_log, "error": error_msg}
 
 
+def _file_sha256(path: Optional[str]) -> str:
+    if not path or not os.path.exists(path):
+        return ""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _run_fingerprint(receptor: str, grid_file: str, flex_file: Optional[str],
+                     vina_params: Dict) -> str:
+    """Hash of everything that determines a ligand's docking result apart from
+    the ligand itself. The thread count is left out: seeded Vina output does
+    not depend on it."""
+    params = {k: v for k, v in vina_params.items() if k != "threads"}
+    payload = json.dumps({
+        "receptor": _file_sha256(receptor),
+        "grid": _file_sha256(grid_file),
+        "flex": _file_sha256(flex_file),
+        "params": params,
+        "engines": [runner.VINA_PRIMARY, runner.VINA_FALLBACK],
+    }, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def dock_all(receptor: str, ligands: List[str], grid_file: str,
              outdir: str, num_processes: int = 1,
              resume: bool = True,
@@ -605,10 +682,9 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
     os.makedirs(dock_dir, exist_ok=True)
 
     # Guard against output collisions when ligand basenames are duplicated.
-    ligand_names = [os.path.basename(lig).replace(
-        ".pdbqt", "") for lig in ligands]
+    ligand_names = [runner.ligand_name(lig) for lig in ligands]
     duplicate_names = sorted(
-        {n for n in ligand_names if ligand_names.count(n) > 1})
+        n for n, k in Counter(ligand_names).items() if k > 1)
     if duplicate_names:
         raise ValueError(
             "Duplicate ligand names detected (would overwrite outputs): "
@@ -641,6 +717,12 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
         defaults.update(vina_params)
         vina_params = defaults
 
+    # Each Vina process uses every core by default, so N workers would
+    # oversubscribe the CPU N-fold. Split the cores between workers unless
+    # the user chose a limit. Seeded Vina output does not depend on --cpu.
+    if not vina_params.get('threads') and num_processes > 1:
+        vina_params['threads'] = max(1, runner.available_cpus() // num_processes)
+
     checkpoint_file = os.path.join(outdir, ".docking_checkpoint.json")
     journal_file = os.path.join(outdir, ".docking_checkpoint.jsonl")
     if not resume:
@@ -648,22 +730,30 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
             if os.path.exists(_f):
                 os.remove(_f)
 
-    checkpoint = runner.DockingCheckpoint(outdir)
+    ligand_hashes = {runner.ligand_name(lig): _file_sha256(lig) for lig in ligands}
+    checkpoint = runner.DockingCheckpoint(
+        outdir, fingerprint=_run_fingerprint(receptor, grid_file, flex_file, vina_params))
 
     if resume:
         ligands_todo = [
             lig for lig in ligands
-            if not checkpoint.is_completed(os.path.basename(lig).replace(".pdbqt", ""))
+            if not checkpoint.is_completed(runner.ligand_name(lig),
+                                           ligand_hashes[runner.ligand_name(lig)])
         ]
     else:
         ligands_todo = ligands
+    # A ligand docked again (its file changed) must not keep its old result.
+    for lig in ligands_todo:
+        checkpoint.completed.pop(runner.ligand_name(lig), None)
 
     logger.info(
-        f"[*] Docking {len(ligands_todo)} new ligands ({len(checkpoint.completed)} cached)")
+        f"[*] Docking {len(ligands_todo)} new ligands "
+        f"({len(ligands) - len(ligands_todo)} cached)")
     logger.info(f"[*] Vina parameters: exhaustiveness={vina_params['exhaustiveness']}, "
                 f"modes={vina_params['binding_modes']}, "
                 f"range={vina_params['energy_range']} kcal/mol, "
                 f"seed={vina_params['seed']}, "
+                f"cpu_per_process={vina_params.get('threads') or 'all'}, "
                 f"min_valid_affinity={vina_params['min_valid_affinity']} kcal/mol")
     if num_processes > 1:
         logger.info("[*] Parallel mode enabled with unique per-ligand outputs")
@@ -671,14 +761,39 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
 
     if not ligands_todo:
         logger.info("[✔] All ligands already docked!")
-        results = checkpoint.get_results()
-        return results, checkpoint, checkpoint.get_metrics()
+        results = checkpoint.get_results(ligand_names)
+        return results, checkpoint, checkpoint.get_metrics(ligand_names)
 
     args_list = [(receptor, lig, grid_file, dock_dir, vina_params, flex_file)
                  for lig in ligands_todo]
 
-    results = []
-    metrics_dict = checkpoint.get_metrics() if resume else {}
+    metrics_dict = checkpoint.get_metrics(ligand_names) if resume else {}
+    failed_results = []
+    min_valid_affinity = float(vina_params.get('min_valid_affinity', -1.0))
+
+    def record(result):
+        """Store one ligand's result as soon as it arrives, so an interrupted
+        screen keeps everything docked so far."""
+        name, score, metrics = result
+        metrics_dict[name] = metrics
+        if score is None:
+            if str(metrics.get("status", "")).startswith("REJECTED"):
+                # A seeded run that scored outside the window gives the same
+                # score again, so the rejection is cached like a success.
+                checkpoint.save_result(name, None, metrics,
+                                       ligand_hash=ligand_hashes.get(name))
+                return
+            logger.warning(
+                f"  [!] {name}: FAILED (see {metrics.get('log_file', 'log')})")
+            # Failures are not checkpointed; they are retried on resume.
+            failed_results.append((name, None))
+            return
+        if not isinstance(score, float) or (score >= min_valid_affinity or score < -20):
+            logger.error(f"  [❌] {name}: Invalid score {score} - not saving")
+            failed_results.append((name, None))
+            return
+        logger.info(f"  [+] {name}: {score:.2f} kcal/mol")
+        checkpoint.save_result(name, score, metrics, ligand_hash=ligand_hashes.get(name))
 
     start_time = time.time()
     total = len(args_list)
@@ -693,41 +808,21 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
             f"({rate_per_min:.2f} ligands/min, ETA {eta_minutes:.1f} min)"
         )
 
-    if num_processes > 1:
-        with Pool(num_processes) as pool:
-            for idx, result in enumerate(pool.imap_unordered(dock_ligand, args_list), 1):
-                results.append(result)
+    try:
+        if num_processes > 1:
+            with Pool(num_processes) as pool:
+                for idx, result in enumerate(pool.imap_unordered(dock_ligand, args_list), 1):
+                    record(result)
+                    log_progress(idx)
+        else:
+            for idx, args in enumerate(args_list, 1):
+                record(dock_ligand(args))
                 log_progress(idx)
-    else:
-        for idx, args in enumerate(args_list, 1):
-            results.append(dock_ligand(args))
-            log_progress(idx)
+    finally:
+        checkpoint.flush()  # consolidate O(1) journal writes into the JSON file
 
-    failed_results = []
-    success_count = 0
-    for name, score, metrics in results:
-        metrics_dict[name] = metrics
-        if score is None:
-            logger.warning(
-                f"  [!] {name}: FAILED (see {metrics.get('log_file', 'log')})")
-            failed_results.append((name, score))
-            # DO NOT save failed results to checkpoint - they need investigation
-            continue
-
-        # Validate score before saving to checkpoint
-        min_valid_affinity = float(vina_params.get('min_valid_affinity', -1.0))
-        if not isinstance(score, float) or (score >= min_valid_affinity or score < -20):
-            logger.error(f"  [❌] {name}: Invalid score {score} - not saving")
-            failed_results.append((name, None))
-            continue
-
-        logger.info(f"  [+] {name}: {score:.2f} kcal/mol")
-        checkpoint.save_result(name, score, metrics)
-        success_count += 1
-
-    all_results = checkpoint.get_results()
+    all_results = checkpoint.get_results(ligand_names)
     all_results.extend(failed_results)
-    checkpoint.flush()  # consolidate O(1) journal writes into the JSON file
 
     # Fail loud only when the *whole* screen produced no valid score.
     # On a resumed run, cached successes may already exist while the only

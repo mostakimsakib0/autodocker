@@ -35,6 +35,108 @@ import runner  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# Modified amino acids deposited as HETATM; they are part of the protein and
+# dropping them would leave holes in the backbone or side chains.
+MODIFIED_RESIDUES = {
+    "MSE", "SEP", "TPO", "PTR", "CSO", "CSD", "CME", "MLY", "HYP", "KCX",
+    "PCA", "CSS", "OCS", "SCH", "NEP", "ALY", "M3L", "TYS",
+}
+
+
+def _translate_pdbqt(path: str, offset: Tuple[float, float, float]) -> None:
+    """Subtract ``offset`` from every ATOM/HETATM coordinate of a PDBQT file."""
+    dx, dy, dz = offset
+    out = []
+    with open(path) as f:
+        for line in f:
+            if line.startswith(("ATOM", "HETATM")) and len(line) >= 54:
+                x = float(line[30:38]) - dx
+                y = float(line[38:46]) - dy
+                z = float(line[46:54]) - dz
+                line = f"{line[:30]}{x:8.3f}{y:8.3f}{z:8.3f}{line[54:]}"
+            out.append(line)
+    with open(path, "w") as f:
+        f.writelines(out)
+
+
+def _restore_residue_labels(pdbqt_file: str, pdb_file: str) -> int:
+    """Copy atom names and residue labels from ``pdb_file`` back onto the
+    PDBQT that Open Babel wrote from it.
+
+    ``obabel -p`` re-perceives residues, and on a receptor with a chain break
+    it renames, renumbers and re-chains most atoms. Heavy-atom coordinates
+    are untouched, so each heavy atom is matched to its input record by
+    coordinates; each added hydrogen takes the labels of the heavy atom it is
+    bonded to. Returns the number of relabelled atoms; raises if a heavy atom
+    has no match.
+    """
+    def key(line):
+        return (round(float(line[30:38]), 3), round(float(line[38:46]), 3),
+                round(float(line[46:54]), 3))
+
+    labels = {}
+    with open(pdb_file) as f:
+        for line in f:
+            if line.startswith(("ATOM", "HETATM")) and len(line) >= 54:
+                # columns 13-27: atom name, altloc, resname, chain, resnum, icode
+                labels.setdefault(key(line), (line[:6], line[12:27]))
+
+    with open(pdbqt_file) as f:
+        lines = f.readlines()
+    atoms = [(i, l) for i, l in enumerate(lines) if l.startswith(("ATOM", "HETATM"))]
+    heavy_xyz = []
+    changed = 0
+    for i, line in atoms:
+        if line[77:79].strip() in ("HD", "H"):
+            continue
+        found = labels.get(key(line))
+        if found is None:
+            raise RuntimeError(
+                f"Receptor atom at ({line[30:54].strip()}) in {pdbqt_file} has no "
+                f"matching record in {pdb_file}; cannot restore residue labels")
+        record, label = found
+        new = record + line[6:12] + label + line[27:]
+        changed += new != line
+        lines[i] = new
+        heavy_xyz.append((key(line), label))
+    # Spatial hash (2 A cells) so each hydrogen only checks nearby heavy atoms.
+    cell = 2.0
+    grid = defaultdict(list)
+    for xyz, label in heavy_xyz:
+        grid[tuple(int(math.floor(c / cell)) for c in xyz)].append((xyz, label))
+    for i, line in atoms:
+        if line[77:79].strip() not in ("HD", "H"):
+            continue
+        x, y, z = key(line)
+        cx, cy, cz = (int(math.floor(c / cell)) for c in (x, y, z))
+        nearby = [hk for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+                  for hk in grid.get((cx + dx, cy + dy, cz + dz), ())]
+        if not nearby:
+            raise RuntimeError(f"Hydrogen at ({line[30:54].strip()}) has no heavy atom "
+                               f"within {cell} A in {pdbqt_file}")
+        near = min(nearby, key=lambda hk: (hk[0][0] - x) ** 2 + (hk[0][1] - y) ** 2
+                   + (hk[0][2] - z) ** 2)
+        # Hydrogen keeps its own name ("H"); residue fields come from its heavy atom.
+        new = line[:17] + near[1][5:] + line[27:]
+        changed += new != line
+        lines[i] = new
+    with open(pdbqt_file, "w") as f:
+        f.writelines(lines)
+    return changed
+
+
+def _count_polar_atoms(pdbqt_file: str) -> Tuple[int, int]:
+    """(polar hydrogens, N/O heavy atoms) in a PDBQT file."""
+    hd = no = 0
+    with open(pdbqt_file) as f:
+        for line in f:
+            if line.startswith(("ATOM", "HETATM")):
+                t = line[77:79].strip()
+                hd += t == "HD"
+                no += t in ("N", "NA", "NS", "OA", "OS", "O")
+    return hd, no
+
+
 class ProteinPreparation:
     """Advanced protein preparation with chain selection."""
 
@@ -80,34 +182,57 @@ class ProteinPreparation:
             "Specify --chain to choose explicitly.")
         return chains[0]
 
-    def prepare_receptor(self, chain: str = "A", keep_hetero: bool = False) -> List[str]:
+    def prepare_receptor(self, chain: str = "A", keep_hetero: bool = False,
+                         ph: float = 7.4) -> List[str]:
         """Clean protein and convert to PDBQT."""
         available_chains = runner.get_chains(self.pdb_file)
         selected_chains = runner._parse_chain_selection(chain, available_chains)
         logger.info(
             f"[*] Preparing receptor (chain(s): {', '.join(selected_chains)})...")
 
+        if os.path.realpath(self.pdb_file) == os.path.realpath(self.pdb_clean):
+            raise ValueError(
+                f"Receptor input {self.pdb_file} is the file the cleaned receptor "
+                "is written to; move it out of the output directory")
+
         kept_atoms = 0
         skipped_hetero = 0
+        skipped_altloc = 0
+        seen_atoms = set()
         try:
             with open(self.pdb_file, "r") as src, open(self.pdb_clean, "w") as dst:
                 for line in src:
-                    if line.startswith("ATOM"):
-                        if len(line) > 21:
-                            chain = line[21].strip() or "A"
-                            if chain in selected_chains:
-                                dst.write(line)
-                                kept_atoms += 1
-                    elif keep_hetero and line.startswith("HETATM"):
-                        if len(line) > 21:
-                            chain = line[21].strip() or "A"
-                            if chain in selected_chains:
-                                dst.write(line)
-                                kept_atoms += 1
-                    elif line.startswith("HETATM"):
-                        skipped_hetero += 1
-                    elif line.startswith(("TER", "END")):
+                    # NMR ensembles: keep the first model only; stacking every
+                    # model superimposes copies of the receptor.
+                    if line.startswith("ENDMDL"):
+                        break
+                    is_atom = line.startswith("ATOM")
+                    is_het = line.startswith("HETATM")
+                    if is_het and line[17:20].strip() in MODIFIED_RESIDUES:
+                        line = "ATOM  " + line[6:]
+                        is_atom, is_het = True, False
+                    if is_atom or (keep_hetero and is_het):
+                        if len(line) <= 21:
+                            continue
+                        chain = line[21].strip() or "A"
+                        if chain not in selected_chains:
+                            continue
+                        # Alternate locations: keep the first conformer of
+                        # each atom so side chains are not duplicated.
+                        atom_key = (line[21], line[22:27], line[12:16])
+                        if line[16] != " ":
+                            if atom_key in seen_atoms:
+                                skipped_altloc += 1
+                                continue
+                            line = line[:16] + " " + line[17:]
+                        seen_atoms.add(atom_key)
                         dst.write(line)
+                        kept_atoms += 1
+                    elif is_het:
+                        skipped_hetero += 1
+                    elif line.startswith("TER"):
+                        dst.write(line)
+                dst.write("END\n")
         except IOError as e:
             raise IOError(
                 f"Failed to filter chain(s) {', '.join(selected_chains)}: {e}")
@@ -116,26 +241,42 @@ class ProteinPreparation:
             raise ValueError(
                 f"Selected chain(s) '{', '.join(selected_chains)}' have no atoms in {self.pdb_file}")
 
+        if skipped_altloc:
+            logger.info(f"[*] Kept the first alternate location; dropped "
+                        f"{skipped_altloc} alternate-location atom records")
+
         try:
-            # Use basic obabel conversion; QuickVina-compatible PDBQT format
+            # -p adds hydrogens for the given pH. Vina's atom typing needs
+            # them: without polar hydrogens every N is typed as an acceptor
+            # and the receptor has no hydrogen-bond donors. The PDBQT writer
+            # (-xr) keeps the polar hydrogens and merges the non-polar ones.
             runner.run([
                 runner.OBABEL,
                 "-ipdb", self.pdb_clean,
                 "-opdbqt", "-O", self.receptor_pdbqt,
-                "-xr", "-c", "--partialcharge", "gasteiger",
+                "-xr", "-p", f"{ph:g}", "--partialcharge", "gasteiger",
             ])
+            # obabel -p re-perceives residues; put the input's labels back.
+            _restore_residue_labels(self.receptor_pdbqt, self.pdb_clean)
+            # Center on the heavy atoms of pdb_clean (the frame offset written
+            # to frame_offset.txt), not on all atoms as obabel -c would now
+            # that hydrogens are present.
+            _translate_pdbqt(self.receptor_pdbqt, self._receptor_centroid())
 
             # Receptor PDBQT must not contain ligand torsion tags (ROOT/BRANCH/TORSDOF).
             runner._sanitize_receptor_pdbqt(self.receptor_pdbqt)
 
-            # Verify charges were computed
             if not runner._ensure_pdbqt_has_charges(self.receptor_pdbqt):
-                logger.warning(
-                    f"[!] Receptor PDBQT has no charges - attempting Gasteiger computation...")
-                runner._fix_pdbqt_charges(self.receptor_pdbqt, self.pdb_clean)
-                runner._sanitize_receptor_pdbqt(self.receptor_pdbqt)
+                raise RuntimeError(
+                    f"Open Babel assigned no partial charges to {self.receptor_pdbqt}")
+            n_hd, n_polar = _count_polar_atoms(self.receptor_pdbqt)
+            if n_hd == 0 and n_polar > 0:
+                raise RuntimeError(
+                    f"Receptor {self.receptor_pdbqt} has no polar hydrogens after "
+                    f"protonation at pH {ph:g}; Vina would see no H-bond donors")
 
-            logger.info(f"[✔] Receptor prepared: {self.receptor_pdbqt}")
+            logger.info(f"[✔] Receptor prepared: {self.receptor_pdbqt} "
+                        f"(protonated at pH {ph:g}, {n_hd} polar hydrogens)")
             if skipped_hetero and not keep_hetero:
                 logger.info(
                     f"[*] Removed {skipped_hetero} HETATM records during receptor cleaning")
@@ -166,8 +307,10 @@ class ProteinPreparation:
             offset=self.frame_offset())
 
         if appended == 0:
-            raise ValueError(
-                "No matching HETATM residues found to keep in receptor")
+            logger.warning(
+                "[!] None of the requested HETATM residues could be added to the "
+                "receptor; docking without them")
+            return self.receptor_pdbqt
 
         runner._sanitize_receptor_pdbqt(self.receptor_pdbqt)
         logger.info(
@@ -213,7 +356,7 @@ class ProteinPreparation:
                 f"fpocket failed: {e}. Using centroid fallback grid.")
             return self.centroid_grid(padding)
 
-        pocket_root = fpocket_target.replace(".pdb", "_out")
+        pocket_root = Path(fpocket_target).with_suffix("").as_posix() + "_out"
         pocket_dir = os.path.join(pocket_root, "pockets")
 
         if not os.path.exists(pocket_dir):

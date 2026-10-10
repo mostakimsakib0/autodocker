@@ -124,3 +124,21 @@ def test_append_hetatm_applies_frame_offset(tmp_path):
                                   {"A"}, offset=(10.0, 20.0, 30.0))
     het = [l for l in rec.read_text().splitlines() if l.startswith("HETATM")][0]
     assert (float(het[30:38]), float(het[38:46]), float(het[46:54])) == (1.0, 2.0, 3.0)
+
+
+def test_kept_hetatm_columns_with_four_digit_resnum():
+    parsed = pk._parse_hetatm(
+        "HETATM 1601  O   HOH A1001      10.000  20.000  30.000  1.00 20.00           O\n")
+    line = pk._hetatm_to_pdbqt_line(parsed, 123456)
+    assert line[22:26] == "1001"
+    assert (float(line[30:38]), float(line[38:46]), float(line[46:54])) == (10.0, 20.0, 30.0)
+    assert line[6:11] == "23456"
+    assert line[77:79].strip() == "OA"
+
+
+def test_element_from_blank_element_column():
+    assert pk._element_from_atom_name(" CA ") == "C"   # C-alpha
+    assert pk._element_from_atom_name("CA  ") == "CA"  # calcium
+    assert pk._element_from_atom_name("HG21") == "H"   # methyl hydrogen
+    assert pk._element_from_atom_name("ZN  ") == "ZN"
+    assert pk._element_from_atom_name(" NA ") == "N"   # heme nitrogen

@@ -4,6 +4,7 @@ import shutil
 import pytest
 
 import runner
+from vspipeline import docking
 
 
 def test_duplicate_names_rejected(tmp_path, charged_pdbqt):
@@ -92,14 +93,39 @@ def test_build_vina_command_quickvina_uses_config():
 
 
 def test_build_vina_command_threads(monkeypatch):
-    monkeypatch.setattr(runner, "_vina_supports_threads", lambda p: True)
+    monkeypatch.setattr(runner, "_vina_cpu_flag", lambda p: "--cpu")
     cmd = runner._build_vina_command(
         "/usr/bin/vina", "rec.pdbqt", "lig.pdbqt", "out.pdbqt",
         {"center_x": 1, "size_x": 24},
         {"exhaustiveness": 8, "binding_modes": 9, "energy_range": 3.0,
          "seed": 42, "threads": 2})
-    assert "--threads" in cmd
-    assert cmd[cmd.index("--threads") + 1] == "2"
+    assert "--cpu" in cmd
+    assert cmd[cmd.index("--cpu") + 1] == "2"
+
+
+def test_build_vina_command_threads_unsupported(monkeypatch):
+    monkeypatch.setattr(runner, "_vina_cpu_flag", lambda p: None)
+    cmd = runner._build_vina_command(
+        "/usr/bin/vina", "rec.pdbqt", "lig.pdbqt", "out.pdbqt",
+        {"center_x": 1, "size_x": 24},
+        {"exhaustiveness": 8, "binding_modes": 9, "energy_range": 3.0,
+         "seed": 42, "threads": 2})
+    assert "--cpu" not in cmd and "--threads" not in cmd
+
+
+@pytest.mark.parametrize("help_text,expected", [
+    ("  --cpu arg (=0)   the number of CPUs to use", "--cpu"),
+    ("  --threads arg    number of threads", "--threads"),
+    ("  --seed arg       explicit random seed", None),
+])
+def test_vina_cpu_flag_detection(monkeypatch, help_text, expected):
+    class Result:
+        stdout = help_text
+        stderr = ""
+    monkeypatch.setattr(docking.subprocess, "run", lambda *a, **k: Result())
+    docking._VINA_CPU_FLAG_CACHE.clear()
+    assert docking._vina_cpu_flag("/fake/vina") == expected
+    docking._VINA_CPU_FLAG_CACHE.clear()
 
 
 def test_build_vina_command_no_threads_by_default():
@@ -108,7 +134,7 @@ def test_build_vina_command_no_threads_by_default():
         {"center_x": 1, "size_x": 24},
         {"exhaustiveness": 8, "binding_modes": 9, "energy_range": 3.0,
          "seed": 42})
-    assert "--threads" not in cmd
+    assert "--threads" not in cmd and "--cpu" not in cmd
 
 
 def test_parallel_equals_serial(tmp_path, protein_pdb):

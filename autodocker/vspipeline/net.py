@@ -32,6 +32,17 @@ class _RetryableHTTPError(Exception):
     """Internal marker for a transient failure worth retrying."""
 
 
+def _http_status(error: BaseException) -> Optional[int]:
+    """HTTP status of a permanent HTTP error (requests or urllib), else None."""
+    status = getattr(error, "code", None)  # urllib.error.HTTPError
+    response = getattr(error, "response", None)  # requests.HTTPError
+    if status is None and response is not None:
+        status = getattr(response, "status_code", None)
+    if isinstance(status, int) and status not in RETRYABLE_STATUS:
+        return status
+    return None
+
+
 def _http_get_once(url: str, timeout: int = 30) -> bytes:
     """Single fetch attempt, using requests when available and urllib otherwise."""
     if requests is not None:
@@ -70,7 +81,11 @@ def _http_get_bytes(url: str, timeout: int = 30,
             last_error = e
         except (OSError, RuntimeError) as e:
             # requests raises requests.exceptions.* subclasses of OSError;
-            # urllib raises URLError (subclass of OSError).
+            # urllib raises URLError (subclass of OSError). Their HTTPError
+            # subclasses carry a status: a 4xx (other than 429) is permanent
+            # and is raised at once instead of being retried.
+            if _http_status(e) is not None:
+                raise
             last_error = e
         if attempt < attempts:
             sleep_for = backoff * (2 ** (attempt - 1))

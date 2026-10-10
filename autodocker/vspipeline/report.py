@@ -80,16 +80,21 @@ def extract_coordinates_from_pdbqt(pdbqt_file: str) -> Tuple[str, List[Tuple[flo
     return name, coords
 
 
-_cluster_cache: Dict[Tuple[str, float], Dict] = {}
+_cluster_cache: Dict[Tuple, Dict] = {}
 
 
-def cluster_poses(poses_dir: str, rmsd_threshold: float = 2.0) -> Dict[str, List[Dict]]:
+def cluster_poses(poses_dir: str, rmsd_threshold: float = 2.0,
+                  ligands: Optional[List[str]] = None) -> Dict[str, List[Dict]]:
     """Cluster poses by RMSD. Returns mapping of ligands to pose clusters.
 
-    Results are cached per (poses_dir, threshold) so the same directory isn't
-    re-scanned when the report and results phases both request clustering.
+    ``ligands`` limits clustering to the ligands of the current screen, so
+    output files left in ``docked/`` by an earlier run are ignored.
+    Results are cached per (poses_dir, threshold, ligands) so the same
+    directory isn't re-scanned when the report and results phases both
+    request clustering.
     """
-    cache_key = (poses_dir, rmsd_threshold)
+    keep = None if ligands is None else set(ligands)
+    cache_key = (poses_dir, rmsd_threshold, None if keep is None else frozenset(keep))
     if cache_key in _cluster_cache:
         return _cluster_cache[cache_key]
     clusters = defaultdict(list)
@@ -99,14 +104,31 @@ def cluster_poses(poses_dir: str, rmsd_threshold: float = 2.0) -> Dict[str, List
 
     # Group poses by ligand
     ligand_poses = defaultdict(list)
-    for file in os.listdir(poses_dir):
+    vina_outputs = {}
+    for file in sorted(os.listdir(poses_dir)):
         # match pose files like: <ligand>_pose_1_aff_-7.123.pdbqt or <ligand>_pose_1.pdbqt
         if fnmatch.fnmatch(file, '*_pose_*.pdbqt'):
             ligand = file.split('_pose_')[0]
             ligand_poses[ligand].append(file)
+        else:
+            # Vina (<ligand>_out.pdbqt) and SMINA (<ligand>_smina.pdbqt) write
+            # every mode of a ligand as a MODEL in one file; Vina wins if both.
+            for suffix in ('_out.pdbqt', '_smina.pdbqt'):
+                if file.endswith(suffix):
+                    lig = file[:-len(suffix)]
+                    if suffix == '_out.pdbqt' or lig not in vina_outputs:
+                        vina_outputs[lig] = file
+
+    for ligand, out_file in vina_outputs.items():
+        if ligand in ligand_poses or (keep is not None and ligand not in keep):
+            continue
+        pose_data = _models_from_vina_output(os.path.join(poses_dir, out_file))
+        _cluster_into(clusters, ligand, pose_data, rmsd_threshold)
 
     # Cluster each ligand's poses
     for ligand, pose_files in ligand_poses.items():
+        if keep is not None and ligand not in keep:
+            continue
         pose_data = []
         for pose_file in sorted(pose_files):
             name, coords = extract_coordinates_from_pdbqt(
@@ -123,26 +145,66 @@ def cluster_poses(poses_dir: str, rmsd_threshold: float = 2.0) -> Dict[str, List
                     pass
                 pose_data.append(
                     {'file': pose_file, 'coords': coords, 'affinity': affinity})
-
-        # Cluster poses
-        assigned = [False] * len(pose_data)
-        cluster_id = 0
-        for i, pose_i in enumerate(pose_data):
-            if not assigned[i]:
-                cluster = {'id': cluster_id, 'poses': [pose_i]}
-                assigned[i] = True
-                for j in range(i+1, len(pose_data)):
-                    if not assigned[j]:
-                        rmsd = calculate_rmsd(
-                            pose_i['coords'], pose_data[j]['coords'])
-                        if rmsd <= rmsd_threshold:
-                            cluster['poses'].append(pose_data[j])
-                            assigned[j] = True
-                clusters[ligand].append(cluster)
-                cluster_id += 1
+        _cluster_into(clusters, ligand, pose_data, rmsd_threshold)
 
     _cluster_cache[cache_key] = dict(clusters)
     return dict(clusters)
+
+
+def _models_from_vina_output(path: str) -> List[Dict]:
+    """One pose per MODEL of a Vina output file, with its affinity."""
+    poses = []
+    current, affinity, model, in_flex = [], 0.0, 0, False
+    try:
+        with open(path) as f:
+            for line in f:
+                # Flexible side chains (BEGIN_RES..END_RES) are receptor atoms.
+                if line.startswith('BEGIN_RES'):
+                    in_flex = True
+                elif line.startswith('END_RES'):
+                    in_flex = False
+                elif in_flex:
+                    continue
+                elif line.startswith('MODEL'):
+                    current, affinity = [], 0.0
+                    model += 1
+                elif line.startswith('REMARK VINA RESULT:'):
+                    try:
+                        affinity = float(line.split()[3])
+                    except (IndexError, ValueError):
+                        pass
+                elif line.startswith(('ATOM', 'HETATM')):
+                    try:
+                        current.append((float(line[30:38]), float(line[38:46]),
+                                        float(line[46:54])))
+                    except ValueError:
+                        pass
+                elif line.startswith('ENDMDL') and current:
+                    poses.append({'file': f"{os.path.basename(path)}#{model}",
+                                  'coords': current, 'affinity': affinity})
+    except OSError as e:
+        logger.debug(f"Could not read poses from {path}: {e}")
+    return poses
+
+
+def _cluster_into(clusters: Dict, ligand: str, pose_data: List[Dict],
+                  rmsd_threshold: float) -> None:
+    """Greedy RMSD clustering of one ligand's poses (best pose first)."""
+    assigned = [False] * len(pose_data)
+    cluster_id = 0
+    for i, pose_i in enumerate(pose_data):
+        if not assigned[i]:
+            cluster = {'id': cluster_id, 'poses': [pose_i]}
+            assigned[i] = True
+            for j in range(i+1, len(pose_data)):
+                if not assigned[j]:
+                    rmsd = calculate_rmsd(
+                        pose_i['coords'], pose_data[j]['coords'])
+                    if rmsd <= rmsd_threshold:
+                        cluster['poses'].append(pose_data[j])
+                        assigned[j] = True
+            clusters[ligand].append(cluster)
+            cluster_id += 1
 
 
 NGL_CDN_URL = "https://cdn.jsdelivr.net/npm/ngl@2.4.0/dist/ngl.min.js"
@@ -155,7 +217,7 @@ _PDBQT_KEEP_PREFIXES = ("ATOM", "HETATM", "MODEL", "ENDMDL", "REMARK",
                         "MASTER", "END")
 
 
-def _pdbqt_to_pdb_string(pdbqt_path: str) -> Optional[str]:
+def _pdbqt_to_pdb_string(pdbqt_path: str, first_model_only: bool = False) -> Optional[str]:
     """Convert a (possibly multi-model) PDBQT ligand/receptor to plain PDB text.
 
     NGL does not parse PDBQT directly, so we emit a faithful PDB by dropping
@@ -169,6 +231,9 @@ def _pdbqt_to_pdb_string(pdbqt_path: str) -> Optional[str]:
         with open(pdbqt_path) as src:
             for line in src:
                 s = line.strip()
+                if first_model_only and s.startswith("ENDMDL"):
+                    lines.append(line)
+                    break
                 if s.startswith(_PDBQT_STRIP_PREFIXES):
                     continue
                 if s.startswith(_PDBQT_KEEP_PREFIXES):
@@ -496,16 +561,23 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
         name = str(lig.get('Ligand', lig) if isinstance(lig, dict) else lig)
         if not os.path.isdir(poses_dir):
             break
-        # Docked output is <name>_out.pdbqt (multi-model). Prefer the
-        # first model as the representative (best) pose.
-        candidates = sorted(glob.glob(os.path.join(
-            poses_dir, f"{name}_out.pdbqt")))
+        # The pose file recorded in ranking.csv (Vina <name>_out.pdbqt or
+        # SMINA <name>_smina.pdbqt; multi-model) is authoritative; the first
+        # model is the representative (best) pose.
+        recorded = lig.get('Docked_File', '') if isinstance(lig, dict) else ''
+        candidates = []
+        if recorded:
+            local = os.path.join(poses_dir, os.path.basename(recorded))
+            candidates = [p for p in (recorded, local) if os.path.isfile(p)][:1]
         if not candidates:
             candidates = sorted(glob.glob(os.path.join(
-                poses_dir, f"{name}_pose_*.pdbqt")))
+                poses_dir, f"{glob.escape(name)}_out.pdbqt")))
+        if not candidates:
+            candidates = sorted(glob.glob(os.path.join(
+                poses_dir, f"{glob.escape(name)}_pose_*.pdbqt")))
         if not candidates:
             continue
-        pose_text = _pdbqt_to_pdb_string(candidates[0])
+        pose_text = _pdbqt_to_pdb_string(candidates[0], first_model_only=True)
         if not pose_text:
             continue
         hits.append({
@@ -524,14 +596,14 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
     </div>
 """
 
-    # Inline all data as one JSON blob; escape closing-script tags so the
-    # PDB text cannot break out of the <script> context.
+    # Inline all data as one JSON blob; escape every "<" so the PDB text
+    # cannot close or confuse the <script> element (</script>, <!--).
     data = {
         "receptor": receptor_text or "",
         "hits": hits,
         "gridBox": grid_box,
     }
-    data_json = json.dumps(data).replace("</", "<\\/")
+    data_json = json.dumps(data).replace("<", "\\u003c")
     ngl_script = ngl_js.decode("utf-8", errors="replace")
 
     section = f"""
@@ -688,7 +760,8 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                           receptor_pdbqt: Optional[str] = None,
                           meta: Optional[Dict] = None,
                           grid_file: Optional[str] = None,
-                          scorer_agreement: Optional[Dict] = None) -> None:
+                          scorer_agreement: Optional[Dict] = None,
+                          rmsd_threshold: float = 2.0) -> bool:
     """Generate a self-contained, professional HTML screening report.
 
     Includes a table of contents, run metadata, summary stat cards, an
@@ -705,10 +778,10 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
             ligands = list(csv.DictReader(f))
     except Exception as e:
         logger.warning(f"Could not parse results CSV: {e}")
-        return
+        return False
     if not ligands:
         logger.warning("No results to report")
-        return
+        return False
 
     valid_affinities = []
     for lig in ligands:
@@ -745,8 +818,9 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
     if grid_file and os.path.exists(grid_file):
         try:
             gc = runner._parse_grid_config(grid_file)
-            if gc and gc.get('center') and gc.get('size'):
-                grid_box = {"center": list(gc['center']), "size": list(gc['size'])}
+            if gc:
+                grid_box = {"center": [gc['center_x'], gc['center_y'], gc['center_z']],
+                            "size": [gc['size_x'], gc['size_y'], gc['size_z']]}
         except Exception as e:
             logger.debug(f"Could not parse grid config for viewer: {e}")
 
@@ -762,7 +836,9 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
             scatter_data.append({"name": lig.get('Ligand', '?'),
                                  "mw": mw, "aff": av})
 
-    clusters = cluster_poses(poses_dir) if os.path.isdir(poses_dir) else {}
+    clusters = (cluster_poses(poses_dir, rmsd_threshold=rmsd_threshold,
+                              ligands=[l.get('Ligand') for l in ligands])
+                if os.path.isdir(poses_dir) else {})
 
     css = _REPORT_CSS(bool(ranked_ligands))
     generated = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -942,7 +1018,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
 
             <div class="section" id="clusters">
                 <h2>🔬 Pose Clustering Analysis</h2>
-                <p class="muted"><em>Grouping of similar poses by RMSD (threshold: 2.0 Å).</em></p>
+                <p class="muted"><em>Grouping of similar poses by RMSD (threshold: {rmsd_threshold:g} Å).</em></p>
 """
 
     if clusters:
@@ -991,5 +1067,9 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
         with open(output_file, 'w') as f:
             f.write(html_content)
         logger.info(f"[✔] HTML report generated: {output_file}")
+        return True
     except Exception as e:
         logger.warning(f"Could not write HTML report: {e}")
+        if os.path.exists(output_file):
+            os.remove(output_file)  # never leave a stale report from an earlier run
+        return False

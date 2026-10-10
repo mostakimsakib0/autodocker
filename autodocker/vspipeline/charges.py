@@ -119,25 +119,26 @@ def _sanitize_receptor_pdbqt(pdbqt_file: str) -> None:
 
 
 def _fix_pdbqt_charges(pdbqt_file: str, source_file: str) -> None:
-    """
-    STRICT charge assignment.
-    No silent guessing. Only real tools allowed.
+    """Rebuild a ligand PDBQT from its source with Gasteiger charges.
+
+    STRICT charge assignment: no silent guessing, only real tools.
     """
 
     logger.warning(f"[!] Fixing charges for: {pdbqt_file}")
 
+    # Read the source in its own format (a MOL2 read as PDB yields nothing).
+    ext = os.path.splitext(source_file)[1].lower().lstrip(".")
+    in_fmt = {"sdf": "sdf", "sd": "sdf", "mol": "mol", "mol2": "mol2",
+              "pdbqt": "pdbqt"}.get(ext, "pdb")
+    cmd = [runner.OBABEL, f"-i{in_fmt}", source_file, "-opdbqt", "-O", pdbqt_file,
+           "--partialcharge", "gasteiger"]
+    # Ligands are rebuilt from their source, so add hydrogens again; without
+    # -h the polar hydrogens added by the first conversion would be lost.
+    cmd.append("-h")
+
     # Try OpenBabel only (most reliable baseline)
     try:
-        runner.run([
-            runner.OBABEL,
-            "-isdf" if source_file.endswith(".sdf") else "-ipdb",
-            source_file,
-            "-opdbqt",
-            "-O",
-            pdbqt_file,
-            "--partialcharge",
-            "gasteiger"
-        ], capture=False)
+        runner.run(cmd, capture=False)
 
         if _ensure_pdbqt_has_charges(pdbqt_file):
             logger.info("[✔] Charges assigned via OpenBabel Gasteiger")

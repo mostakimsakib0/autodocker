@@ -211,3 +211,123 @@ def test_minimization_is_repeatable_with_real_obabel(tmp_path):
         lm._prepare_sdf_to_pdbqt(str(sdf), str(pdbqt), "aspirin")
         outputs.append(pdbqt.read_text())
     assert outputs[0] == outputs[1] == outputs[2]
+
+
+def test_multi_model_pdbqt_rejected(tmp_path):
+    p = tmp_path / "vina_out.pdbqt"
+    p.write_text("MODEL 1\n" + _LIGAND_PDBQT + "ENDMDL\nMODEL 2\n"
+                 + _LIGAND_PDBQT + "ENDMDL\n")
+    assert "several models" in library._ligand_pdbqt_problem(str(p))
+
+
+def test_multi_molecule_sdf_rejected(tmp_path, monkeypatch):
+    indir = tmp_path / "in"
+    indir.mkdir()
+    (indir / "two.sdf").write_text(_molblock(0.8) * 2)
+    (indir / "ok.pdbqt").write_text(_LIGAND_PDBQT)
+    monkeypatch.setattr(runner, "run", lambda *a, **k: None)
+    lm = library.LibraryManager(str(tmp_path / "out"), str(indir))
+    assert lm.prepare_local(apply_admet=False) == [str(indir / "ok.pdbqt")]
+
+
+def test_failed_minimization_falls_back_to_input(tmp_path, monkeypatch):
+    """Open Babel exits 0 but writes nothing when MMFF94 cannot be set up."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        out = cmd[cmd.index("-O") + 1]
+        if "--minimize" in cmd:
+            open(out, "w").close()
+        else:
+            with open(out, "w") as f:
+                f.write(_LIGAND_PDBQT)
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(runner, "_ensure_pdbqt_has_charges", lambda p: True)
+    sdf = tmp_path / "boron.sdf"
+    sdf.write_text(_molblock(0.8))
+    lm = library.LibraryManager(str(tmp_path / "out"), str(tmp_path))
+    lm._prepare_sdf_to_pdbqt(str(sdf), str(tmp_path / "boron.pdbqt"), "boron")
+    assert calls[1][calls[1].index("-isdf") + 1] == str(sdf)
+    assert lm.metadata["boron"]["minimized"] is False
+
+
+def test_unminimized_2d_sdf_gets_hydrogens_and_3d(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        with open(cmd[cmd.index("-O") + 1], "w") as f:
+            f.write(_LIGAND_PDBQT)
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(runner, "_ensure_pdbqt_has_charges", lambda p: True)
+    sdf = tmp_path / "flat.sdf"
+    sdf.write_text(_molblock(0.0))
+    lm = library.LibraryManager(str(tmp_path / "out"), str(tmp_path), minimize=False)
+    lm._prepare_sdf_to_pdbqt(str(sdf), str(tmp_path / "flat.pdbqt"), "flat")
+    assert len(calls) == 1
+    assert "-h" in calls[0] and "--gen3d" in calls[0]
+
+
+def test_failed_file_does_not_block_same_stem(tmp_path, monkeypatch):
+    indir = tmp_path / "in"
+    indir.mkdir()
+    (indir / "x.sdf").write_text("not an sdf\n")
+    (indir / "x.pdbqt").write_text(_LIGAND_PDBQT)
+    monkeypatch.setattr(runner, "run", lambda *a, **k: None)
+    lm = library.LibraryManager(str(tmp_path / "out"), str(indir))
+    assert lm.prepare_local(apply_admet=True) == [str(indir / "x.pdbqt")]
+
+
+def test_pdb_ligand_gets_polar_hydrogens_with_real_obabel(tmp_path):
+    """A heavy-atom-only PDB ligand (e.g. a crystal ligand) must be docked
+    with its polar hydrogens, otherwise Vina sees no H-bond donors."""
+    import shutil
+    import subprocess
+
+    import pytest
+    if not shutil.which("obabel"):
+        pytest.skip("obabel not installed")
+    indir = tmp_path / "in"
+    indir.mkdir()
+    pdb = indir / "acetamide.pdb"
+    subprocess.run(["obabel", "-:CC(=O)NCCO", "--gen3d", "-d", "-opdb",
+                    "-O", str(pdb)], check=True, capture_output=True)
+    lm = library.LibraryManager(str(tmp_path / "out"), str(indir))
+    (out,) = lm.prepare_local(apply_admet=False)
+    types = [line[77:79].strip() for line in open(out)
+             if line.startswith(("ATOM", "HETATM"))]
+    assert types.count("HD") == 2  # amide N-H and hydroxyl O-H
+
+
+def test_pubchem_unreachable_stops_early(monkeypatch, tmp_path):
+    import pytest
+    calls = []
+
+    def offline(url):
+        calls.append(url)
+        raise ConnectionRefusedError("refused")
+
+    monkeypatch.setattr(runner, "_http_get_bytes", offline)
+    lm = library.LibraryManager(str(tmp_path / "out"), str(tmp_path / "in"))
+    with pytest.raises(RuntimeError, match="unreachable"):
+        lm.create_fda_library()
+    assert len(calls) == library.LibraryManager.MAX_NETWORK_FAILURES
+
+
+def test_pubchem_unknown_name_is_not_a_network_failure(monkeypatch, tmp_path):
+    class Resp:
+        status_code = 404
+
+    class NotFound(OSError):
+        response = Resp()
+
+    def not_found(url):
+        raise NotFound("404")
+
+    monkeypatch.setattr(runner, "_http_get_bytes", not_found)
+    lm = library.LibraryManager(str(tmp_path / "out"), str(tmp_path / "in"))
+    for _ in range(5):
+        assert lm._pubchem_cid_for_name("nosuchdrug") == []

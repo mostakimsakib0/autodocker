@@ -78,3 +78,26 @@ def test_obabel_descriptors_real(tmp_path):
     p.write_text(VALID_SDF)
     result = admet._obabel_descriptors(str(p))
     assert result is None or isinstance(result, dict)
+
+
+def test_small_valid_sdf_containing_404_is_accepted(tmp_path):
+    p = tmp_path / "a.sdf"
+    p.write_text("mol\n  test\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n"
+                 "    0.4040    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n"
+                 "M  END\n$$$$\n")
+    ok, msg = admet._is_valid_sdf(str(p))
+    assert ok, msg
+
+
+def test_sdf_data_items_used_when_obabel_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(admet, "_obabel_descriptors", lambda p: None)
+    p = tmp_path / "a.sdf"
+    p.write_text("mol\n  test\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n"
+                 "    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n"
+                 "M  END\n"
+                 "> <PUBCHEM_MOLECULAR_WEIGHT>\n180.16\n\n"
+                 "> <PUBCHEM_XLOGP3>\n1.2\n\n"
+                 "> <PUBCHEM_CACTVS_HBOND_DONOR>\n1\n\n"
+                 "> <PUBCHEM_CACTVS_HBOND_ACCEPTOR>\n4\n\n$$$$\n")
+    props = admet.ADMETFilter.parse_sdf_properties(str(p))
+    assert (props["mw"], props["logp"], props["hbd"], props["hba"]) == (180.16, 1.2, 1, 4)

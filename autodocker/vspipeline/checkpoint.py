@@ -38,11 +38,45 @@ logger = logging.getLogger(__name__)
 class DockingCheckpoint:
     """Manages docking progress and resume capability."""
 
-    def __init__(self, outdir: str):
+    def __init__(self, outdir: str, fingerprint: Optional[str] = None):
         self.outdir = outdir
         self.checkpoint_file = os.path.join(outdir, ".docking_checkpoint.json")
         self.journal_file = os.path.join(outdir, ".docking_checkpoint.jsonl")
+        self.meta_file = os.path.join(outdir, ".docking_checkpoint.meta.json")
         self.completed = self._load_checkpoint()
+        if fingerprint is not None:
+            self._check_fingerprint(fingerprint)
+
+    def _check_fingerprint(self, fingerprint: str):
+        """Discard cached results produced with a different receptor, box,
+        docking parameters or engine (the fingerprint covers all of them)."""
+        stored = None
+        if os.path.exists(self.meta_file):
+            try:
+                with open(self.meta_file) as f:
+                    stored = json.load(f).get("fingerprint")
+            except Exception:
+                stored = None
+        if self.completed and stored != fingerprint:
+            reason = ("was written by an older version without a run fingerprint"
+                      if stored is None else
+                      "was made with a different receptor, box, docking parameters or engine")
+            logger.warning(
+                f"[!] Checkpoint {reason}; discarding {len(self.completed)} cached "
+                "result(s) and docking every ligand again")
+            self.clear()
+        try:
+            with open(self.meta_file, "w") as f:
+                json.dump({"fingerprint": fingerprint}, f)
+        except Exception as e:
+            logger.warning(f"Could not write checkpoint fingerprint: {e}")
+
+    def clear(self):
+        """Forget all cached results, in memory and on disk."""
+        self.completed = {}
+        for path in (self.checkpoint_file, self.journal_file):
+            if os.path.exists(path):
+                os.remove(path)
 
     def _load_checkpoint(self) -> Dict:
         """Load previous docking progress.
@@ -73,6 +107,7 @@ class DockingCheckpoint:
                                 "score": rec["score"],
                                 "timestamp": rec.get("timestamp"),
                                 "metrics": rec.get("metrics", {}),
+                                "ligand_hash": rec.get("ligand_hash"),
                             }
                         except Exception:
                             continue
@@ -83,12 +118,18 @@ class DockingCheckpoint:
                 f"[✔] Loaded checkpoint: {len(data)} ligands already docked")
         return data
 
-    def is_completed(self, ligand_name: str) -> bool:
-        """Check if ligand already docked."""
-        return ligand_name in self.completed
+    def is_completed(self, ligand_name: str, ligand_hash: Optional[str] = None) -> bool:
+        """Check if ligand already docked (from the same file, when a hash is given)."""
+        entry = self.completed.get(ligand_name)
+        if entry is None:
+            return False
+        return ligand_hash is None or entry.get("ligand_hash") == ligand_hash
 
-    def save_result(self, ligand_name: str, score: float, metrics: Optional[Dict] = None):
-        """Save docking result to checkpoint.
+    def save_result(self, ligand_name: str, score: Optional[float],
+                    metrics: Optional[Dict] = None,
+                    ligand_hash: Optional[str] = None):
+        """Save docking result to checkpoint (``score`` is None for a cached
+        rejection: a valid run whose score was outside the accepted window).
 
         Updates the in-memory record and appends one O(1) line to the journal
         (instead of rewriting the whole JSON each call), eliminating the
@@ -99,6 +140,7 @@ class DockingCheckpoint:
             "score": score,
             "timestamp": datetime.now().isoformat(),
             "metrics": metrics or {},
+            "ligand_hash": ligand_hash,
         }
         try:
             with open(self.journal_file, "a") as f:
@@ -107,6 +149,7 @@ class DockingCheckpoint:
                     "score": score,
                     "timestamp": self.completed[ligand_name]["timestamp"],
                     "metrics": metrics or {},
+                    "ligand_hash": ligand_hash,
                 }) + "\n")
         except Exception as e:
             logger.warning(f"Failed to journal checkpoint: {e}")
@@ -134,10 +177,15 @@ class DockingCheckpoint:
         """Write the consolidated JSON checkpoint (call once at run end)."""
         self._persist()
 
-    def get_results(self) -> List[Tuple[str, float]]:
-        """Return all completed results as (ligand_name, score) tuples."""
-        return [(name, data["score"]) for name, data in self.completed.items()]
+    def get_results(self, names: Optional[List[str]] = None) -> List[Tuple[str, float]]:
+        """Return completed results as (ligand_name, score) tuples, limited to
+        ``names`` (the current library) when given."""
+        keep = None if names is None else set(names)
+        return [(name, data["score"]) for name, data in self.completed.items()
+                if keep is None or name in keep]
 
-    def get_metrics(self) -> Dict:
-        """Return cached metrics keyed by ligand name."""
-        return {name: data.get("metrics", {}) for name, data in self.completed.items()}
+    def get_metrics(self, names: Optional[List[str]] = None) -> Dict:
+        """Return cached metrics keyed by ligand name (limited to ``names``)."""
+        keep = None if names is None else set(names)
+        return {name: data.get("metrics", {}) for name, data in self.completed.items()
+                if keep is None or name in keep}

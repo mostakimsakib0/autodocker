@@ -197,3 +197,24 @@ class TestNglViewer:
         assert "3D viewer unavailable" in content
         assert runner.NGL_CDN_URL not in content
         assert "viewer-container" not in content
+
+def test_cluster_poses_reads_vina_output_and_skips_other_ligands(tmp_path):
+    from vspipeline import report
+    docked = tmp_path / "docked"
+    docked.mkdir()
+
+    def model(i, dx, aff):
+        return (f"MODEL {i}\nREMARK VINA RESULT:    {aff}      0.000      0.000\n"
+                + "".join(f"ATOM  {k:5d}  C   UNL     1    {k + dx:8.3f}   0.000   0.000"
+                          "  0.00  0.00    +0.000 C \n" for k in range(1, 4))
+                + "BEGIN_RES SER A  45\nATOM      9  CB  SER A  45      50.000  50.000  50.000"
+                  "  0.00  0.00    +0.000 C \nEND_RES SER A  45\nENDMDL\n")
+
+    (docked / "lig_out.pdbqt").write_text(model(1, 0.0, -8.0) + model(2, 0.5, -7.5)
+                                          + model(3, 6.0, -7.0))
+    (docked / "old_out.pdbqt").write_text(model(1, 0.0, -6.0))
+    report._cluster_cache.clear()
+    clusters = report.cluster_poses(str(docked), rmsd_threshold=2.0, ligands=["lig"])
+    assert list(clusters) == ["lig"]
+    # Models 1 and 2 are 0.5 A apart (flex atoms ignored); model 3 is separate.
+    assert [len(c["poses"]) for c in clusters["lig"]] == [2, 1]
