@@ -110,10 +110,10 @@ def cluster_poses(poses_dir: str, rmsd_threshold: float = defaults.RMSD_THRESHOL
     # mode of a ligand as a MODEL in one file; Vina wins if both exist.
     vina_outputs = {}
     for file in sorted(os.listdir(poses_dir)):
-        for suffix in ('_out.pdbqt', '_smina.pdbqt'):
+        for suffix in (outputs.POSE_SUFFIX, outputs.SMINA_POSE_SUFFIX):
             if file.endswith(suffix):
                 lig = file[:-len(suffix)]
-                if suffix == '_out.pdbqt' or lig not in vina_outputs:
+                if suffix == outputs.POSE_SUFFIX or lig not in vina_outputs:
                     vina_outputs[lig] = file
 
     for ligand, out_file in vina_outputs.items():
@@ -520,7 +520,7 @@ def _pose_file(lig, name: str, poses_dir: str,
             base = base_dir or os.path.dirname(os.path.abspath(poses_dir))
             candidates.append(os.path.join(base, recorded))
         candidates.append(os.path.join(poses_dir, os.path.basename(recorded)))
-    candidates.append(os.path.join(poses_dir, f"{name}_out.pdbqt"))
+    candidates.append(os.path.join(poses_dir, name + outputs.POSE_SUFFIX))
     return next((p for p in candidates if os.path.isfile(p)), None)
 
 

@@ -30,6 +30,8 @@ import sys
 # that the two agree.
 RANKING_CSV = "ranking.csv"
 DOCKED_DIR = "docked"
+POSE_SUFFIX = "_out.pdbqt"
+VINA_LOG_SUFFIX = "_vina.log"
 FRAME_OFFSET_TXT = "frame_offset.txt"
 COL_LIGAND = "Ligand"
 COL_AFFINITY = "Binding_Affinity"

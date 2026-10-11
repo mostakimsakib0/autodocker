@@ -335,8 +335,8 @@ def smina_dock_all(receptor: str, ligands: List[str], outdir: str,
         name = runner.ligand_name(lig)
         jobs.append(SminaDockJob(
             name=name, receptor=receptor, ligand=lig,
-            out=os.path.join(dock_dir, name + "_smina.pdbqt"),
-            log_file=os.path.join(dock_dir, name + "_smina.log"),
+            out=os.path.join(dock_dir, name + outputs.SMINA_POSE_SUFFIX),
+            log_file=os.path.join(dock_dir, name + outputs.SMINA_LOG_SUFFIX),
             grid=tuple(grid), exhaustiveness=exhaustiveness, seed=seed, cpu=cpu,
             flex_file=flex_file, min_valid=min_valid, smina=smina, timeout=timeout))
 
@@ -487,10 +487,10 @@ def rescoring_command(smina: str, receptor: str, pose: str, out: str, scoring: s
 
 def _smina_rescore_one(job: SminaRescoreJob):
     """Worker: rescore Vina's top pose of one ligand. Picklable for Pool."""
-    log_file = os.path.join(job.dock_dir, job.name + "_smina.log")
-    pose = os.path.join(job.dock_dir, job.name + "_vina_top.pdbqt")
-    pose_flex = os.path.join(job.dock_dir, job.name + "_vina_top_flex.pdbqt")
-    out = os.path.join(job.dock_dir, job.name + "_smina_rescore.pdbqt")
+    log_file = os.path.join(job.dock_dir, job.name + outputs.SMINA_LOG_SUFFIX)
+    pose = os.path.join(job.dock_dir, job.name + outputs.VINA_TOP_POSE_SUFFIX)
+    pose_flex = os.path.join(job.dock_dir, job.name + outputs.VINA_TOP_FLEX_SUFFIX)
+    out = os.path.join(job.dock_dir, job.name + outputs.SMINA_RESCORE_SUFFIX)
     try:
         if os.path.exists(out):
             os.remove(out)
@@ -541,15 +541,15 @@ def rescore_with_smina(receptor: str, results: List[Tuple[str, Optional[float]]]
 
     names = sorted(name for name, score in results if score is not None)
     dock_files = {n: metrics_dict.get(n, {}).get("dock_file")
-                  or os.path.join(dock_dir, n + "_out.pdbqt") for n in names}
+                  or os.path.join(dock_dir, n + outputs.POSE_SUFFIX) for n in names}
     scores: Dict[str, Optional[float]] = {name: None for name, _ in results}
     if not names:
         return scores, scoring or SMINA_RESCORING_FUNCTIONS[0]
 
     if scoring is None:
-        probe_pose = os.path.join(dock_dir, names[0] + "_vina_top.pdbqt")
+        probe_pose = os.path.join(dock_dir, names[0] + outputs.VINA_TOP_POSE_SUFFIX)
         _extract_top_pose(dock_files[names[0]], probe_pose,
-                          os.path.join(dock_dir, names[0] + "_vina_top_flex.pdbqt"))
+                          os.path.join(dock_dir, names[0] + outputs.VINA_TOP_FLEX_SUFFIX))
         scoring = select_rescoring_function(smina, receptor, probe_pose, timeout)
     logger.info(f"[*] Consensus: rescoring Vina top poses with smina --score_only "
                 f"--scoring {scoring}")

@@ -839,8 +839,8 @@ def dock_ligand(job: Union[DockJob, Sequence]) -> Tuple[str, Optional[float], Di
     """
     job = _as_job(job)
     name = runner.ligand_name(job.ligand)
-    out = os.path.join(job.dock_dir, name + "_out.pdbqt")
-    log_path = os.path.join(job.dock_dir, name + "_vina.log")
+    out = os.path.join(job.dock_dir, name + outputs.POSE_SUFFIX)
+    log_path = os.path.join(job.dock_dir, name + outputs.VINA_LOG_SUFFIX)
 
     try:
         grid_config = _preflight(job)

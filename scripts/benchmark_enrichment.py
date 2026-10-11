@@ -71,6 +71,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _benchlib  # noqa: E402
 
 DUD_E_BASE = "https://dude.docking.org/targets/{t}/{f}"
+# File names on the DUD-E server (also used for the local copies).
+DUD_E_RECEPTOR = "receptor.pdb"
+DUD_E_CRYSTAL_LIGAND = "crystal_ligand.mol2"
+DUD_E_ACTIVES = "actives_final.mol2.gz"
+DUD_E_DECOYS = "decoys_final.mol2.gz"
 
 # Functional diversity across protein families so screening power is not
 # claimed on a single receptor class.
@@ -614,12 +619,12 @@ def process_target(target, workdir, opts):
     tdir = os.path.join(workdir, target)
     target_seed = int(hashlib.md5(target.encode()).hexdigest()[:8], 16)
     try:
-        receptor = os.path.join(tdir, "receptor.pdb")
-        actives_gz = os.path.join(tdir, "actives_final.mol2.gz")
-        decoys_gz = os.path.join(tdir, "decoys_final.mol2.gz")
-        download(DUD_E_BASE.format(t=target, f="receptor.pdb"), receptor)
-        download(DUD_E_BASE.format(t=target, f="actives_final.mol2.gz"), actives_gz)
-        download(DUD_E_BASE.format(t=target, f="decoys_final.mol2.gz"), decoys_gz)
+        receptor = os.path.join(tdir, DUD_E_RECEPTOR)
+        actives_gz = os.path.join(tdir, DUD_E_ACTIVES)
+        decoys_gz = os.path.join(tdir, DUD_E_DECOYS)
+        download(DUD_E_BASE.format(t=target, f=DUD_E_RECEPTOR), receptor)
+        download(DUD_E_BASE.format(t=target, f=DUD_E_ACTIVES), actives_gz)
+        download(DUD_E_BASE.format(t=target, f=DUD_E_DECOYS), decoys_gz)
 
         lig_dir = os.path.join(tdir, "ligands")
         scratch = os.path.join(tdir, "ligands_mol2")
@@ -638,8 +643,8 @@ def process_target(target, workdir, opts):
         expected = [os.path.basename(p)[:-len(".pdbqt")] for p in actives + decoys]
 
         if opts["box_source"] == "crystal":
-            crystal = os.path.join(tdir, "crystal_ligand.mol2")
-            download(DUD_E_BASE.format(t=target, f="crystal_ligand.mol2"), crystal)
+            crystal = os.path.join(tdir, DUD_E_CRYSTAL_LIGAND)
+            download(DUD_E_BASE.format(t=target, f=DUD_E_CRYSTAL_LIGAND), crystal)
             center, size = crystal_box(crystal, opts["padding"], opts["min_box"])
             rec["box_center"] = [round(c, 3) for c in center]
             rec["box_size"] = round(size, 3)

@@ -120,7 +120,7 @@ class ResultsAnalyzer:
 
     def _dock_file(self, name: str, metrics: Dict) -> str:
         return self._relative_path(metrics.get(
-            "dock_file", os.path.join(self.outdir, outputs.DOCKED_DIR, f"{name}_out.pdbqt")))
+            "dock_file", os.path.join(self.outdir, outputs.DOCKED_DIR, name + outputs.POSE_SUFFIX)))
 
     @staticmethod
     def _affinity_csv(status: Status, affinity: Optional[float]):
@@ -256,7 +256,7 @@ class ResultsAnalyzer:
 
                     f.write(f"   Interpretation: {self._interpretation(status, affinity)}\n")
                     if status is Status.FAILED:
-                        f.write(f"   Log: docked/{name}_vina.log\n")
+                        f.write(f"   Log: {outputs.DOCKED_DIR}/{name}{outputs.VINA_LOG_SUFFIX}\n")
 
                 f.write("\n" + "=" * 70 + "\n")
             logger.info(f"[*] Top hits saved: {self.top_hits_file}")

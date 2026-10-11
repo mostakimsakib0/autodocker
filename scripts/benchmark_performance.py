@@ -209,7 +209,7 @@ def time_run(receptor, lig_dir, outdir, processes, exhaustive, seed, runner,
 
 def vina_threads(dock_dir):
     """``--cpu`` value of the first logged Vina command (None if absent)."""
-    for log in sorted(glob.glob(os.path.join(dock_dir, _benchlib.DOCKED_DIR, "*_vina.log"))):
+    for log in sorted(glob.glob(os.path.join(dock_dir, _benchlib.DOCKED_DIR, "*" + _benchlib.VINA_LOG_SUFFIX))):
         with open(log, encoding="utf-8") as f:
             for line in f:
                 m = re.search(r"--cpu\s+(\d+)", line) if line.startswith("# Command:") else None

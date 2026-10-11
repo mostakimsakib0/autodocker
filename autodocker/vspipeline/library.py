@@ -162,6 +162,8 @@ class LibraryManager:
     """Sources ligands (local files or PubChem) and prepares docking PDBQTs."""
 
     PUBCHEM_REST = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+    # Human-readable compound page, recorded as each compound's source_url.
+    PUBCHEM_COMPOUND_URL = "https://pubchem.ncbi.nlm.nih.gov/compound/"
     MAX_COMPOUNDS = DEFAULT_MAX_COMPOUNDS
     MAX_NETWORK_FAILURES = 3
 
@@ -412,7 +414,7 @@ class LibraryManager:
             "pubchem_cid": cid,
             # The first CID PubChem returned for the name; records can
             # change over time, so the retrieval time is recorded too.
-            "source_url": f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}",
+            "source_url": f"{self.PUBCHEM_COMPOUND_URL}{cid}",
             **provenance,
         })
         return pdbqt_file

@@ -189,7 +189,7 @@ def run_docking(pdbid, complex_dir, work, opts):
         f.write(" ".join(cmd) + "\n")
         f.write(proc.stdout or "")
         f.write(proc.stderr or "")
-    out_pdbqt = os.path.join(work, _benchlib.DOCKED_DIR, f"{pdbid}_ligand_out.pdbqt")
+    out_pdbqt = os.path.join(work, _benchlib.DOCKED_DIR, f"{pdbid}_ligand" + _benchlib.POSE_SUFFIX)
     if proc.returncode != 0 or not os.path.exists(out_pdbqt):
         raise RuntimeError(
             f"docking failed (rc={proc.returncode}): "
@@ -210,7 +210,7 @@ def process_complex(job):
     protein = os.path.join(complex_dir, f"{pdbid}_protein.pdb")
     crystal = os.path.join(complex_dir, f"{pdbid}_ligand.mol2")
     work = os.path.join(workroot, pdbid)
-    out_pdbqt = os.path.join(work, _benchlib.DOCKED_DIR, f"{pdbid}_ligand_out.pdbqt")
+    out_pdbqt = os.path.join(work, _benchlib.DOCKED_DIR, f"{pdbid}_ligand" + _benchlib.POSE_SUFFIX)
     try:
         if not (os.path.exists(protein) and os.path.exists(crystal)):
             rec["status"] = "missing"

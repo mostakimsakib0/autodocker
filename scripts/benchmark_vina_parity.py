@@ -82,12 +82,12 @@ def check_complex(workdir, pdbid, tmpdir, timeout, vina_bin=None, runner=run_vin
            "max_diff": None, "ranking_affinity": None, "raw_mode1": None,
            "ranking_numeric_match": None, "ranking_string_match": None,
            "output_identical": None, "binary": None, "error": None}
-    logs = sorted(glob.glob(os.path.join(workdir, _benchlib.DOCKED_DIR, "*_vina.log")))
+    logs = sorted(glob.glob(os.path.join(workdir, _benchlib.DOCKED_DIR, "*" + _benchlib.VINA_LOG_SUFFIX)))
     if not logs:
         rec["error"] = "no *_vina.log found"
         return rec
     log = logs[0]
-    ligand = os.path.basename(log)[:-len("_vina.log")]
+    ligand = os.path.basename(log)[:-len(_benchlib.VINA_LOG_SUFFIX)]
     cmd = extract_command(log)
     if not cmd:
         rec["error"] = "no command header in log"
@@ -100,7 +100,7 @@ def check_complex(workdir, pdbid, tmpdir, timeout, vina_bin=None, runner=run_vin
     for i, c in enumerate(cmd):
         if c == "--out" and i + 1 < len(cmd):
             pipeline_out = cmd[i + 1]
-    local_out = os.path.join(workdir, _benchlib.DOCKED_DIR, f"{ligand}_out.pdbqt")
+    local_out = os.path.join(workdir, _benchlib.DOCKED_DIR, ligand + _benchlib.POSE_SUFFIX)
     if not pipeline_out or not os.path.exists(pipeline_out):
         pipeline_out = local_out
     if not os.path.exists(pipeline_out):

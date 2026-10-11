@@ -33,6 +33,15 @@ FRAME_OFFSET_TXT = "frame_offset.txt"
 # Docking
 DOCKED_DIR = "docked"   # <name>_out.pdbqt poses and <name>_vina.log per ligand
 
+# Per-ligand files in DOCKED_DIR: <ligand name> + suffix
+POSE_SUFFIX = "_out.pdbqt"                  # Vina/QuickVina poses
+VINA_LOG_SUFFIX = "_vina.log"               # exact command + engine output
+SMINA_POSE_SUFFIX = "_smina.pdbqt"          # --smina-only poses
+SMINA_LOG_SUFFIX = "_smina.log"
+VINA_TOP_POSE_SUFFIX = "_vina_top.pdbqt"    # --consensus: Vina's top pose
+VINA_TOP_FLEX_SUFFIX = "_vina_top_flex.pdbqt"  # its flexible side chains
+SMINA_RESCORE_SUFFIX = "_smina_rescore.pdbqt"  # --consensus: SMINA rescoring output
+
 # ranking.csv columns, in file order
 COL_LIGAND = "Ligand"
 COL_AFFINITY = "Binding_Affinity"
