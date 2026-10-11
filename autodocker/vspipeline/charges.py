@@ -1,39 +1,23 @@
 #!/usr/bin/env python3
-"""PDBQT CHARGE VALIDATION & FIXING.
+"""PDBQT charge inspection and Gasteiger charge assignment.
 
-Split out of runner.py (behavior-preserving refactor). All cross-module
-references go through the ``runner`` namespace at call time so the public
-entry point and its monkeypatch surface stay unchanged.
+Split out of runner.py. Cross-module references (OBABEL, run) go through the
+``runner`` namespace at call time so the monkeypatch surface stays unchanged.
+
+Note: the Vina, Vinardo and default SMINA scoring functions do not use
+partial charges, so all-zero charges are reported as a warning by the docking
+step, not treated as a failure.
 """
-import os
-import re
-import csv
-import json
-import math
-import time
-import shlex
-import uuid
-import shutil
-import fnmatch
-import glob
-import html
-import statistics
-import subprocess
 import logging
-from collections import defaultdict
-from datetime import datetime
-from pathlib import Path
-from typing import List, Tuple, Optional, Dict
-from urllib.parse import quote
-from multiprocessing import Pool, cpu_count as mp_cpu_count
+import os
+from typing import List, Optional, Tuple
 
-# The runner module owns the tool-path globals (OBABEL, VINA*, SMINA,
-# COMMAND_TIMEOUT) and every public name; import it lazily-safe: during the
-# initial import of runner this binds the partially-initialized module
-# object, which is fine because attributes are only accessed at call time.
+# The runner module owns the tool-path globals; attributes are only accessed
+# at call time, so binding the partially-initialized module is fine.
 import runner  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
 
 def _extract_pdbqt_charge(line: str) -> Optional[float]:
     """Return the atomic charge from a PDBQT ATOM/HETATM line, or None.
@@ -50,28 +34,27 @@ def _extract_pdbqt_charge(line: str) -> Optional[float]:
     return None
 
 
-def _ensure_pdbqt_has_charges(pdbqt_file: str) -> bool:
-    """Check if PDBQT file contains at least one atom with a NONZERO charge.
+def _pdbqt_has_nonzero_charges(pdbqt_file: str) -> bool:
+    """True if the PDBQT has at least one ATOM/HETATM with a nonzero charge.
 
-    A file whose atoms all carry 0.000 charge is chemically unusable for
-    docking and is treated as 'no charges' (zero-charge receptors would
-    otherwise pass validation and silently produce garbage results).
+    Only inspects the file. False for all-zero charges, no atoms, or an
+    unreadable file.
     """
     try:
-        saw_atom = False
         with open(pdbqt_file, 'r') as f:
             for line in f:
                 if line.startswith(("ATOM", "HETATM")):
-                    saw_atom = True
                     charge = _extract_pdbqt_charge(line)
                     if charge is not None and charge != 0.0:
                         return True
-        if saw_atom:
-            return False
         return False
     except Exception as e:
         logger.warning(f"Charge check failed: {e}")
         return False
+
+
+# Backwards-compatible name (re-exported by runner.py, monkeypatched by tests).
+_ensure_pdbqt_has_charges = _pdbqt_has_nonzero_charges
 
 
 def _pdbqt_has_atoms(pdbqt_file: str) -> bool:
@@ -118,43 +101,138 @@ def _sanitize_receptor_pdbqt(pdbqt_file: str) -> None:
             f"Failed to sanitize receptor PDBQT {pdbqt_file}: {e}")
 
 
-def _fix_pdbqt_charges(pdbqt_file: str, source_file: str) -> None:
-    """Rebuild a ligand PDBQT from its source with Gasteiger charges.
+_OBABEL_INPUT_FORMATS = {"sdf": "sdf", "sd": "sdf", "mol": "mol", "mol2": "mol2",
+                         "pdbqt": "pdbqt"}
 
-    STRICT charge assignment: no silent guessing, only real tools.
+# Coordinates whose z values all lie within this of 0 (or whose atoms all
+# share one position) are treated as 2D / missing geometry.
+_FLAT_TOLERANCE = 1e-4
+
+
+def _read_coordinates(path: str) -> List[Tuple[float, float, float]]:
+    """Atom coordinates of a PDB/PDBQT, SDF/MOL (V2000) or MOL2 file
+    (first molecule only); [] when none can be read."""
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    coords: List[Tuple[float, float, float]] = []
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return coords
+    if ext in ("sdf", "sd", "mol"):
+        if len(lines) > 3:
+            try:
+                n_atoms = int(lines[3][0:3])
+            except ValueError:
+                return coords
+            for line in lines[4:4 + n_atoms]:
+                try:
+                    coords.append((float(line[0:10]), float(line[10:20]), float(line[20:30])))
+                except ValueError:
+                    continue
+        return coords
+    if ext == "mol2":
+        in_atoms = False
+        for line in lines:
+            if line.startswith("@<TRIPOS>"):
+                if in_atoms:
+                    break
+                in_atoms = line.startswith("@<TRIPOS>ATOM")
+                continue
+            parts = line.split()
+            if in_atoms and len(parts) >= 5:
+                try:
+                    coords.append((float(parts[2]), float(parts[3]), float(parts[4])))
+                except ValueError:
+                    continue
+        return coords
+    for line in lines:
+        if line.startswith(("ATOM", "HETATM")):
+            try:
+                coords.append((float(line[30:38]), float(line[38:46]), float(line[46:54])))
+            except ValueError:
+                continue
+        elif line.startswith("ENDMDL"):
+            break
+    return coords
+
+
+def _has_3d_coordinates(path: str) -> bool:
+    """True when the file holds atoms with a non-planar (z != 0) geometry."""
+    coords = _read_coordinates(path)
+    if not coords:
+        return False
+    if all(abs(c[2]) < _FLAT_TOLERANCE for c in coords):
+        return False
+    return len(set(coords)) > 1
+
+
+def _fix_pdbqt_charges(pdbqt_file: str, source_file: str,
+                       gen3d: Optional[bool] = None) -> None:
+    """Rebuild a ligand PDBQT with Open Babel Gasteiger charges, never
+    discarding 3D coordinates.
+
+    The geometry comes from, in order: the existing ``pdbqt_file`` when it
+    already has 3D coordinates (rebuilt from itself); else ``source_file``.
+    ``--gen3d`` is added when ``gen3d`` is True, or, when ``gen3d`` is None,
+    when the chosen input has no 3D coordinates (2D SDF, flat PDB), so a 2D
+    source is never docked flat.
+
+    All-zero charges after the rebuild (pure hydrocarbons once nonpolar
+    hydrogens are merged, e.g. benzene) are accepted with a warning: the
+    Vina, Vinardo and default SMINA scoring functions do not use partial
+    charges. Raises RuntimeError only when Open Babel fails or writes no atoms.
     """
+    logger.warning(f"[!] Recomputing Gasteiger charges for: {pdbqt_file}")
 
-    logger.warning(f"[!] Fixing charges for: {pdbqt_file}")
+    rebuild_in_place = os.path.exists(pdbqt_file) and _has_3d_coordinates(pdbqt_file)
+    input_file = pdbqt_file if rebuild_in_place else source_file
+    ext = os.path.splitext(input_file)[1].lower().lstrip(".")
+    in_fmt = "pdbqt" if rebuild_in_place else _OBABEL_INPUT_FORMATS.get(ext, "pdb")
+    if gen3d is None:
+        gen3d = not rebuild_in_place and not _has_3d_coordinates(input_file)
 
-    # Read the source in its own format (a MOL2 read as PDB yields nothing).
-    ext = os.path.splitext(source_file)[1].lower().lstrip(".")
-    in_fmt = {"sdf": "sdf", "sd": "sdf", "mol": "mol", "mol2": "mol2",
-              "pdbqt": "pdbqt"}.get(ext, "pdb")
-    cmd = [runner.OBABEL, f"-i{in_fmt}", source_file, "-opdbqt", "-O", pdbqt_file,
-           "--partialcharge", "gasteiger"]
-    # Ligands are rebuilt from their source, so add hydrogens again; without
-    # -h the polar hydrogens added by the first conversion would be lost.
-    cmd.append("-h")
+    target = pdbqt_file + ".charges.tmp.pdbqt" if rebuild_in_place else pdbqt_file
+    # -h: hydrogens are added again (the PDBQT keeps polar H only, and a
+    # source rebuild would otherwise lose the H added by the first conversion).
+    cmd = [runner.OBABEL, f"-i{in_fmt}", input_file, "-opdbqt", "-O", target,
+           "--partialcharge", "gasteiger", "-h"]
+    if gen3d:
+        logger.warning(f"[!] {input_file} has no 3D coordinates; generating them (--gen3d)")
+        cmd.append("--gen3d")
 
-    # Try OpenBabel only (most reliable baseline)
+    if not os.path.exists(input_file):
+        raise RuntimeError(
+            f"Cannot assign valid charges for {pdbqt_file}: source {input_file} not found")
+    if not rebuild_in_place and os.path.exists(pdbqt_file):
+        os.remove(pdbqt_file)  # rebuilt from the source; never keep the old file
     try:
         runner.run(cmd, capture=False)
-
-        if _ensure_pdbqt_has_charges(pdbqt_file):
-            logger.info("[✔] Charges assigned via OpenBabel Gasteiger")
-            return
-
+        if rebuild_in_place:
+            os.replace(target, pdbqt_file)
     except Exception as e:
-        logger.error(f"Charge assignment failed: {e}")
+        if rebuild_in_place and os.path.exists(target):
+            os.remove(target)
+        raise RuntimeError(
+            f"Cannot assign valid charges for {pdbqt_file}: Open Babel failed ({e})")
 
-    raise RuntimeError(
-        f"CRITICAL: Cannot assign valid charges for {pdbqt_file}. "
-        "Install OpenBabel with Gasteiger support."
-    )
+    if not os.path.exists(pdbqt_file) or not _pdbqt_has_atoms(pdbqt_file):
+        raise RuntimeError(
+            f"Cannot assign valid charges for {pdbqt_file}: Open Babel wrote no atoms")
+    if _pdbqt_has_nonzero_charges(pdbqt_file):
+        logger.info("[*] Charges assigned via OpenBabel Gasteiger")
+    else:
+        logger.warning(
+            f"[!] All Gasteiger charges are zero in {pdbqt_file} (e.g. a pure "
+            "hydrocarbon); accepted, since Vina-family scoring ignores charges")
 
 
 def _assign_simple_charges(pdbqt_file: str) -> None:
-    """Deprecated legacy helper (kept for backward compatibility; not used)."""
+    """Deprecated, unused by the pipeline: heuristic per-atom-type charges.
+
+    Kept only because runner.py still re-exports the name (and one unit test
+    covers it); remove together with that re-export.
+    """
     # Simple charge assignment based on common atom types
     charge_map = {
         'C': 0.0,    # Carbon

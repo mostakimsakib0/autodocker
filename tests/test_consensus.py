@@ -131,6 +131,7 @@ def fake_smina(monkeypatch):
             out_idx = cmd.index("-o") + 1
             with open(cmd[out_idx], "w") as fh:
                 fh.write("MODEL        1\n"
+                         "REMARK minimizedAffinity -8.12345\n"
                          "ATOM      1  C   ALA A   1      0.0 0.0 0.0\n"
                          "ENDMDL\n")
         return FakeResult()
@@ -148,7 +149,7 @@ def test_run_smina_docking(fake_smina, tmp_path):
     score = cons.run_smina_docking(
         str(rec), str(lig), str(out), 1, 2, 3, 20, 20, 20,
         exhaustiveness=16, seed=42)
-    assert score == -8.1
+    assert score == -8.12345   # PDBQT value, not the rounded stdout -8.1
     assert "--exhaustiveness" in fake_smina["cmd"]
     assert "16" in fake_smina["cmd"]
     assert "--seed" in fake_smina["cmd"]
@@ -172,7 +173,7 @@ def test_run_smina_scoring(fake_smina, tmp_path):
         str(rec), ligs, str(tmp_path / "out"), (1, 2, 3, 20, 20, 20),
         {"exhaustiveness": 8, "seed": 1}, num_processes=1)
     assert len(scores) == 3
-    assert all(abs(v + 8.1) < 1e-9 for v in scores.values())
+    assert all(abs(v + 8.12345) < 1e-9 for v in scores.values())
 
 
 def test_run_smina_scoring_parallel(fake_smina, tmp_path):
@@ -187,3 +188,153 @@ def test_run_smina_scoring_parallel(fake_smina, tmp_path):
         str(rec), ligs, str(tmp_path / "out"), (1, 2, 3, 20, 20, 20),
         {"exhaustiveness": 8}, num_processes=2)
     assert len(scores) == 4
+
+
+def test_smina_docking_writes_log(fake_smina, tmp_path):
+    rec = tmp_path / "r.pdbqt"
+    rec.write_text("ATOM\n")
+    lig = tmp_path / "l.pdbqt"
+    lig.write_text("ATOM\n")
+    cons._run_smina_scoring(str(rec), [str(lig)], str(tmp_path / "out"),
+                            (1, 2, 3, 20, 20, 20), {"exhaustiveness": 8}, num_processes=1)
+    log = (tmp_path / "out" / "docked" / "l_smina.log").read_text()
+    assert log.startswith("# Command: smina -r ")
+
+
+VINA_OUT = """MODEL 1
+REMARK VINA RESULT:    -7.512      0.000      0.000
+ROOT
+ATOM      1  C   LIG A   1       0.000   0.000   0.000  0.00  0.00    +0.000 C
+ENDROOT
+TORSDOF 0
+ENDMDL
+MODEL 2
+REMARK VINA RESULT:    -6.803      1.213      2.147
+ROOT
+ATOM      1  C   LIG A   1       1.000   0.000   0.000  0.00  0.00    +0.000 C
+ENDROOT
+TORSDOF 0
+ENDMDL
+"""
+
+
+@pytest.fixture
+def fake_rescore(monkeypatch):
+    calls = []
+
+    class R:
+        def __init__(self, rc=0, out="", err=""):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+
+    def fake_run(cmd, capture_output=False, text=False, timeout=None):
+        calls.append(cmd)
+        if "__autodocker_list__" in cmd:
+            return R(1, "", "Usage error: Invalid builtin scoring function: x. Options are:\n"
+                             "ad4_scoring\ndefault\ndkoes_scoring\nvina\nvinardo\n")
+        lig = cmd[cmd.index("-l") + 1]
+        if "fail" in os.path.basename(lig):
+            return R(1, "", "boom")
+        with open(cmd[cmd.index("-o") + 1], "w") as fh:
+            fh.write("MODEL 1\nREMARK minimizedAffinity -5.43219\n"
+                     "REMARK VINA RESULT:    -7.512      0.000      0.000\nENDMDL\n")
+        return R(0, "Affinity: -5.43219 (kcal/mol)\n")
+
+    monkeypatch.setattr(cons.subprocess, "run", fake_run)
+    return calls
+
+
+def _dock_outputs(tmp_path, names):
+    d = tmp_path / "out" / "docked"
+    d.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (d / f"{n}_out.pdbqt").write_text(VINA_OUT)
+    return str(tmp_path / "out")
+
+
+def test_consensus_rescores_vina_top_pose_with_vinardo(fake_rescore, tmp_path):
+    outdir = _dock_outputs(tmp_path, ["a", "b"])
+    results = [("a", -7.512), ("b", -6.0), ("c", None)]
+    scores, scoring = cons.rescore_with_smina(
+        "rec.pdbqt", results, outdir, smina="smina", timeout=10)
+    assert scoring == "vinardo"
+    assert scores == {"a": -5.43219, "b": -5.43219, "c": None}
+    cmd = [c for c in fake_rescore if "__autodocker_list__" not in c][0]
+    assert cmd[:2] == ["smina", "-r"]
+    assert "--score_only" in cmd
+    assert cmd[cmd.index("--scoring") + 1] == "vinardo"
+    assert "--exhaustiveness" not in cmd     # no re-docking
+    pose = open(cmd[cmd.index("-l") + 1]).read()
+    assert "1.000" not in pose and "MODEL" not in pose   # first model only
+    log = open(os.path.join(outdir, "docked", "a_smina.log")).read()
+    assert log.startswith("# Command: smina -r rec.pdbqt")
+
+
+def test_rescoring_falls_back_to_dkoes_when_vinardo_missing(monkeypatch):
+    monkeypatch.setitem(cons._SMINA_SCORING_CACHE, "old_smina", ("default", "dkoes_scoring"))
+    assert cons.select_rescoring_function("old_smina", "r", "l", 5) == "dkoes_scoring"
+
+
+def test_rescoring_flex_residues_passed(fake_rescore, tmp_path):
+    outdir = _dock_outputs(tmp_path, [])
+    flex_out = VINA_OUT.replace("TORSDOF 0\nENDMDL", "TORSDOF 0\nBEGIN_RES LYS A  10\n"
+                                "ATOM      2  NZ  LYS A  10       2.000   0.000   0.000  0.00  0.00    -0.300 N\n"
+                                "END_RES LYS A  10\nENDMDL", 1)
+    (tmp_path / "out" / "docked" / "f_out.pdbqt").write_text(flex_out)
+    scores, _ = cons.rescore_with_smina("rec.pdbqt", [("f", -7.0)], outdir,
+                                        flex_file="flex.pdbqt", scoring="vinardo",
+                                        smina="smina", timeout=10)
+    cmd = fake_rescore[-1]
+    flex = open(cmd[cmd.index("--flex") + 1]).read()
+    assert flex.startswith("BEGIN_RES") and "NZ  LYS" in flex
+    assert "NZ  LYS" not in open(cmd[cmd.index("-l") + 1]).read()
+    assert scores["f"] == -5.43219
+
+
+def test_consensus_outputs_summary_json_and_no_agreement_column(tmp_path):
+    import csv
+    import json
+    results = [("a", -9.0), ("b", -8.0), ("c", -7.0), ("d", None)]
+    smina = {"a": -6.0, "b": -5.0, "c": -4.0, "d": None}
+    agreement = cons.write_consensus_outputs(str(tmp_path), results, smina, "vinardo")
+    assert agreement["n"] == 3 and abs(agreement["rho"] - 1.0) < 1e-9
+    with open(tmp_path / "consensus_ranking.csv") as f:
+        rows = list(csv.reader(f))
+    assert rows[0] == ["Ligand", "Vina_Affinity", "SMINA_Affinity", "Consensus"]
+    assert not any(r and r[0].startswith("#") for r in rows)
+    assert rows[-1] == ["d", "FAILED", "FAILED", "NA"]
+    summary = json.loads((tmp_path / "consensus_summary.json").read_text())
+    assert summary["n"] == 3 and summary["metric"] == "spearman_rho"
+    assert "vinardo" in summary["scorer_b"]
+
+
+def test_pool_failure_retries_only_unfinished(monkeypatch):
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True)
+    class J:
+        name: str
+
+    done = []
+
+    class BrokenPool:
+        def __init__(self, n):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def imap_unordered(self, fn, jobs):
+            yield fn(jobs[0])
+            raise RuntimeError("pool died")
+
+    def worker(job):
+        done.append(job.name)
+        return job.name, -1.0, None
+
+    monkeypatch.setattr(cons, "Pool", BrokenPool)
+    out = cons._collect_with_retry(worker, [J("a"), J("b"), J("c")], 2, "t")
+    assert set(out) == {"a", "b", "c"}
+    assert sorted(done) == ["a", "b", "c"]   # "a" ran once, not again serially
