@@ -90,6 +90,13 @@ TARGET_FAMILY = {
     "aces": "esterase",
 }
 
+# Conventional significance marks for the Mann-Whitney p-values.
+SIGNIFICANCE_STARS = ((0.001, "***"), (0.01, "**"), (0.05, "*"))
+# Mixed into the target's seed so decoys are drawn from a different random
+# stream than actives (fixed: changing it changes the sampled decoys).
+DECOY_SEED_SALT = 0xDEAD
+# Seconds for converting one DUD-E MOL2 file to PDBQT with Open Babel.
+MOL2_CONVERSION_TIMEOUT = 300
 BEDROC_ALPHA = 80.5
 EF_FRACTIONS = (0.01, 0.05)
 ROCE_FRACTIONS = (0.01, 0.05)
@@ -156,7 +163,7 @@ def download(url, dest, retries=5, backoff=10.0):
 def mol2_to_pdbqt(mol2_path, pdbqt_path):
     proc = subprocess.run(
         ["obabel", "-imol2", mol2_path, "-opdbqt", "-O", pdbqt_path],
-        capture_output=True, text=True, timeout=300)
+        capture_output=True, text=True, timeout=MOL2_CONVERSION_TIMEOUT)
     if (proc.returncode != 0 or not os.path.exists(pdbqt_path)
             or os.path.getsize(pdbqt_path) == 0):
         if os.path.exists(pdbqt_path):
@@ -520,12 +527,9 @@ def bootstrap_ci(scores, labels, n_boot, seed, ci=0.95):
 def _sig(p):
     if p is None:
         return ""
-    if p < 0.001:
-        return "***"
-    if p < 0.01:
-        return "**"
-    if p < 0.05:
-        return "*"
+    for cutoff, stars in SIGNIFICANCE_STARS:
+        if p < cutoff:
+            return stars
     return ""
 
 
@@ -620,7 +624,7 @@ def process_target(target, workdir, opts):
         actives, fail_a = sample_ligands(actives_gz, lig_dir, "A_",
                                          opts["max_actives"], target_seed, scratch)
         decoys, fail_d = sample_ligands(decoys_gz, lig_dir, "D_",
-                                        opts["max_decoys"], target_seed ^ 0xDEAD,
+                                        opts["max_decoys"], target_seed ^ DECOY_SEED_SALT,
                                         scratch)
         clean_ligand_dir(lig_dir, actives + decoys)
         rec["n_actives"], rec["n_decoys"] = len(actives), len(decoys)
@@ -751,11 +755,11 @@ def main(argv=None):
     ap.add_argument("--workdir", default="/tmp/autodocker-bench/dude")
     ap.add_argument("--outdir", default="benchmarks/results/enrichment")
     ap.add_argument("--runner", default="autodocker/runner.py")
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=_benchlib.PIPELINE_DEFAULTS.SEED)
     ap.add_argument("--exhaustiveness", type=int, default=4)
     ap.add_argument("--processes", type=int, default=_benchlib.available_cpus(),
                     help="Ligands docked in parallel (default: available CPUs)")
-    ap.add_argument("--timeout", type=int, default=7200)
+    ap.add_argument("--timeout", type=int, default=_benchlib.ENRICHMENT_RUN_TIMEOUT)
     args = ap.parse_args(argv)
     if not 0.0 < args.ci < 1.0:
         ap.error("--ci must be between 0 and 1")

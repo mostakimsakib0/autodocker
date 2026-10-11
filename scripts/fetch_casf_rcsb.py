@@ -285,7 +285,7 @@ def normalize_sdf_elements(sdf):
     return "\n".join(lines)
 
 
-def build(pdbid, smiles, outdir, hetatm="metals", conformer_seed=42):
+def build(pdbid, smiles, outdir, hetatm="metals", conformer_seed=_benchlib.BENCH_SEED):
     pdb_text = fetch(PDB_URL.format(pdbid=pdbid.upper())).decode()
     records = filter_altlocs(first_model_records(pdb_text))
     target = smiles_formula(smiles)
@@ -347,12 +347,12 @@ def main(argv=None):
     ap.add_argument("--ids", default=DEFAULT_IDS, help="CSV with pdbid,smiles columns")
     ap.add_argument("--sample", type=int, default=40,
                     help="Seeded random sample size (default 40; 0 = all IDs)")
-    ap.add_argument("--sample-seed", type=int, default=42)
+    ap.add_argument("--sample-seed", type=int, default=_benchlib.BENCH_SEED)
     ap.add_argument("--first", "--max-complexes", dest="first", type=int, default=None,
                     help="Legacy 1.1.x selection: first N IDs in sorted order")
     ap.add_argument("--hetatm", choices=["none", "metals", "all"], default="metals",
                     help="HETATM records kept in the receptor (default metals)")
-    ap.add_argument("--conformer-seed", type=int, default=42,
+    ap.add_argument("--conformer-seed", type=int, default=_benchlib.BENCH_SEED,
                     help="ETKDG seed of the precomputed RDKit start conformer")
     args = ap.parse_args(argv)
 

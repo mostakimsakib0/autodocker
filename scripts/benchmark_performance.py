@@ -288,11 +288,11 @@ def host_info(vina_bin=None):
             "psutil": getattr(psutil, "__version__", None)}
     try:
         out = subprocess.run(["lscpu", "-p=CORE,SOCKET"], capture_output=True,
-                             text=True, timeout=30).stdout
+                             text=True, timeout=_benchlib.VERSION_TIMEOUT).stdout
         cores = {ln for ln in out.splitlines() if ln and not ln.startswith("#")}
         info["physical_cores"] = len(cores) or None
         model = subprocess.run(["lscpu"], capture_output=True, text=True,
-                               timeout=30).stdout
+                               timeout=_benchlib.VERSION_TIMEOUT).stdout
         m = re.search(r"^Model name:\s*(.+)$", model, re.M)
         info["cpu_model"] = m.group(1).strip() if m else None
     except (OSError, subprocess.TimeoutExpired):
@@ -321,7 +321,7 @@ def main(argv=None):
     ap.add_argument("--mem-interval", type=float, default=0.5,
                     help="Memory sampling interval in seconds (default 0.5)")
     ap.add_argument("--exhaustiveness", type=int, default=4)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=_benchlib.PIPELINE_DEFAULTS.SEED)
     ap.add_argument("--outdir", default="benchmarks/results/performance")
     ap.add_argument("--runner", default="autodocker/runner.py")
     args = ap.parse_args(argv)

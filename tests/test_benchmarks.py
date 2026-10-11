@@ -678,11 +678,16 @@ class TestPerformance:
         import time
         proc = subprocess.Popen([sys.executable, "-c",
                                  "import subprocess,sys,time;"
-                                 "subprocess.Popen([sys.executable,'-c','import time;time.sleep(5)']);"
-                                 "time.sleep(5)"])
+                                 "subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);"
+                                 "time.sleep(60)"])
         try:
-            time.sleep(1.5)
+            # Wait for the child to appear (no fixed delay: a loaded machine
+            # can take seconds to start it); the processes are killed below.
+            deadline = time.monotonic() + 30
             pids = bperf._proc_tree_pids(proc.pid)
+            while len(pids) < 2 and time.monotonic() < deadline:
+                time.sleep(0.1)
+                pids = bperf._proc_tree_pids(proc.pid)
             rss, _pss = bperf.tree_memory_kb(proc.pid)
             assert len(pids) >= 2
             assert rss > 0

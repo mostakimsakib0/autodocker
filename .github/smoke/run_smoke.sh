@@ -34,7 +34,6 @@ screen() {
 		-e EXHAUSTIVENESS=2 \
 		-e BINDING_MODES=3 \
 		-e PROCESSES=1 \
-		-e VS_SEED=42 \
 		-e RESUME=0 \
 		"$IMAGE"
 }

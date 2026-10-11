@@ -315,7 +315,7 @@ def main(argv=None):
     ap.add_argument("--sample", type=int, default=40,
                     help="Seeded random sample size from --ids-csv (default 40; "
                          "0 = the whole core set)")
-    ap.add_argument("--sample-seed", type=int, default=42,
+    ap.add_argument("--sample-seed", type=int, default=_benchlib.BENCH_SEED,
                     help="Seed of the complex sample (default 42)")
     ap.add_argument("--ids-csv", default=DEFAULT_IDS,
                     help="CSV with a pdbid column (default: CASF-2016 core set)")
@@ -325,17 +325,18 @@ def main(argv=None):
     ap.add_argument("--runner", default="autodocker/runner.py")
     ap.add_argument("--processes", type=int, default=_benchlib.available_cpus(),
                     help="Complexes docked in parallel (default: available CPUs)")
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--exhaustiveness", type=int, default=8)
-    ap.add_argument("--binding-modes", type=int, default=9)
-    ap.add_argument("--energy-range", type=float, default=3.0)
+    pipeline = _benchlib.PIPELINE_DEFAULTS
+    ap.add_argument("--seed", type=int, default=pipeline.SEED)
+    ap.add_argument("--exhaustiveness", type=int, default=pipeline.EXHAUSTIVENESS)
+    ap.add_argument("--binding-modes", type=int, default=pipeline.BINDING_MODES)
+    ap.add_argument("--energy-range", type=float, default=pipeline.ENERGY_RANGE)
     ap.add_argument("--padding", type=float, default=_benchlib.BENCH_BOX_PADDING)
     ap.add_argument("--min-box", type=float, default=_benchlib.BENCH_MIN_BOX_EDGE)
     ap.add_argument("--threads", type=int, default=0,
                     help="Vina threads per complex (0 = runner default)")
     ap.add_argument("--start-conformer", choices=["rdkit", "crystal"], default="rdkit",
                     help="Ligand start geometry (default rdkit: seeded ETKDGv3 + MMFF)")
-    ap.add_argument("--conformer-seed", type=int, default=42,
+    ap.add_argument("--conformer-seed", type=int, default=_benchlib.BENCH_SEED,
                     help="ETKDG randomSeed for --start-conformer rdkit (default 42)")
     ap.add_argument("--receptor-hetatm", choices=sorted(HETATM_FLAGS), default="metals",
                     help="Receptor HETATM records kept by the runner: metals "
@@ -343,7 +344,7 @@ def main(argv=None):
     ap.add_argument("--max-receptor-atoms", type=int, default=0,
                     help="Skip receptors with more ATOM records (0 = no filter, default)")
     ap.add_argument("--rmsd-cutoff", type=float, default=2.0)
-    ap.add_argument("--timeout", type=int, default=1800)
+    ap.add_argument("--timeout", type=int, default=_benchlib.DOCKING_RUN_TIMEOUT)
     args = ap.parse_args(argv)
 
     os.makedirs(args.outdir, exist_ok=True)

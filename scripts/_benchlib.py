@@ -440,16 +440,32 @@ def select_sample(ids, n, seed):
 # Start conformers (RDKit)
 # ---------------------------------------------------------------------------
 
-def _pipeline_conformers():
-    """The pipeline's conformer module (autodocker/vspipeline/conformers.py),
-    so benchmark start conformers use exactly the pipeline's recipe. The
+def _pipeline_module(name):
+    """A module of the pipeline package (autodocker/vspipeline/<name>.py), so
+    the benchmarks use the pipeline's own defaults and conformer recipe. The
     scripts live next to autodocker/ in the repository (also in the image's
     /repo mount)."""
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "autodocker")
     if root not in sys.path:
         sys.path.insert(0, root)
-    from vspipeline import conformers
-    return conformers
+    import importlib
+    return importlib.import_module(f"vspipeline.{name}")
+
+
+def _pipeline_conformers():
+    return _pipeline_module("conformers")
+
+
+# The pipeline's defaults (vspipeline/defaults.py): docking settings that the
+# benchmarks use unless told otherwise.
+PIPELINE_DEFAULTS = _pipeline_module("defaults")
+
+# Seed of the benchmarks' own random choices (which complexes, ligands and
+# start conformers are used); recorded in every summary.json.
+BENCH_SEED = 42
+# Timeouts (seconds) of whole benchmark steps.
+DOCKING_RUN_TIMEOUT = 1800        # one re-docked complex / one parity re-run
+ENRICHMENT_RUN_TIMEOUT = 7200     # docking one DUD-E target's ligand set
 
 
 def rdkit_start_conformer(src, out_mol2, seed, mmff_iters=None):

@@ -56,7 +56,7 @@ def extract_command(log_path):
     return cmd
 
 
-def run_vina(cmd, timeout=1800):
+def run_vina(cmd, timeout=_benchlib.DOCKING_RUN_TIMEOUT):
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
         raise RuntimeError(
@@ -177,7 +177,7 @@ def main(argv=None):
     ap.add_argument("--outdir", default="benchmarks/results/parity")
     ap.add_argument("--vina-bin", default=None,
                     help="Docking binary for the raw runs (default: the logged one)")
-    ap.add_argument("--timeout", type=int, default=1800)
+    ap.add_argument("--timeout", type=int, default=_benchlib.DOCKING_RUN_TIMEOUT)
     args = ap.parse_args(argv)
 
     if args.pdbids:
