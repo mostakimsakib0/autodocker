@@ -475,6 +475,73 @@ def test_review_valid_options_accepted(cli, fake_tools, monkeypatch, extra):
     assert _manifest(out)["status"] == "completed"
 
 
+def _receptor_atoms(path, chains):
+    """A minimal receptor PDB: one SER (N, CA, CB, OG) per (chain, resnum)."""
+    lines, serial = [], 1
+    for chain, resnum in chains:
+        for name, x in (("N", 0.0), ("CA", 1.0), ("CB", 2.0), ("OG", 3.0)):
+            lines.append(f"ATOM  {serial:5d} {name:<4s} SER {chain:1s}{resnum:>4d}    "
+                         f"{x:8.3f}{0.0:8.3f}{0.0:8.3f}  1.00 20.00           "
+                         f"{name[0]}\n")
+            serial += 1
+    path.write_text("".join(lines) + "END\n")
+    return str(path)
+
+
+def _with_receptor(argv, receptor):
+    argv = list(argv)
+    argv[argv.index("-r") + 1] = receptor
+    return argv
+
+
+def test_blank_chain_next_to_chain_A_exit_2(cli, fake_tools, tmp_path, capsys):
+    """A receptor with blank-chain ATOM records next to a real chain A stops
+    the run at validation with a clean message, not a traceback."""
+    receptor = _receptor_atoms(tmp_path / "mixed.pdb", [("A", 45), (" ", 46)])
+    argv, out = cli
+    assert _exit_code(_with_receptor(argv, receptor)) == runner.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "-r/--receptor:" in err and "blank chain ID" in err
+    assert "Traceback" not in err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("chains, residues", [
+    ([("a", 45)], "a45"),                # lowercase chain ID, matched exactly
+    ([(" ", 46)], "A46"),                # blank chain is chain A
+    ([(" ", 46)], "46"),                 # ... or no chain at all
+    ([(" ", 46)], "46,A46"),
+    ([("1", 45)], "1:45"),               # chain:number for digit chains
+])
+def test_flexible_residue_keys_accepted(cli, fake_tools, monkeypatch, tmp_path,
+                                        chains, residues):
+    monkeypatch.setattr(runner, "_run_pipeline", lambda args, state: runner.EXIT_OK)
+    receptor = _receptor_atoms(tmp_path / "rec.pdb", chains)
+    argv, out = cli
+    runner.main(_with_receptor(argv, receptor) + ["--flexible-residues", residues])
+    assert _manifest(out)["status"] == "completed"
+
+
+@pytest.mark.parametrize("chains, residues, missing", [
+    ([("a", 45), ("B", 45)], "A45", "A45"),   # case-sensitive: chain a is not A
+    ([(" ", 46)], "A47", "A47"),
+    ([(" ", 46)], "B46", "B46"),
+    ([("1", 45)], "1:46", "1:46"),
+])
+def test_flexible_residue_nonexistent_exit_2(cli, fake_tools, tmp_path, capsys,
+                                             chains, residues, missing):
+    receptor = _receptor_atoms(tmp_path / "rec.pdb", chains)
+    argv, out = cli
+    extra = ["--flexible-residues", residues]
+    if chains[0][0] == "a":
+        extra = ["--chain", "a"] + extra
+    assert _exit_code(_with_receptor(argv, receptor) + extra) == runner.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "no such residue in the docked chain(s)" in err and err.rstrip().endswith(missing)
+    assert "Traceback" not in err
+    assert not out.exists()
+
+
 def test_vs_seed_out_of_range_exit_2(cli, fake_tools, monkeypatch, capsys):
     monkeypatch.setenv("VS_SEED", "0")
     argv, out = cli

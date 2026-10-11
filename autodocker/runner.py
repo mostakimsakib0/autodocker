@@ -254,6 +254,7 @@ from vspipeline.flexible import (  # noqa: E402
     _resnum_matches,
     build_flexible_residue_pdbqt,
     detect_flexible_residues,
+    missing_residues,
 )
 from vspipeline.consensus import (  # noqa: E402
     _run_smina_scoring,
@@ -463,7 +464,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Deprecated alias of --no-lipinski")
     lib.add_argument("--no-minimize", action="store_true",
                      help="Skip MMFF94 ligand minimization (applies to SDF and PubChem "
-                     "ligands only; MOL2/PDB/PDBQT keep their input coordinates)")
+                     "ligands only; MOL2/PDB/PDBQT keep their input coordinates, except "
+                     "2D MOL2/PDB, which get seeded RDKit 3D coordinates)")
     lib.add_argument("--minimize-steps", type=int, default=defaults.MINIMIZE_STEPS,
                      help="MMFF94 minimization steps (SDF and PubChem ligands only)")
 
@@ -475,7 +477,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="pH at which receptor hydrogens are added (Open Babel -p); "
                      f"{PH_RANGE[0]:g} to {PH_RANGE[1]:g}")
     rec.add_argument("--keep-hetero", action="store_true",
-                     help="Keep matching HETATM records during receptor cleaning")
+                     help="Keep HETATM records of the selected chains (single-atom metal "
+                     "ions are added with Vina metal types; other elements without Open "
+                     "Babel Gasteiger parameters stop the run)")
     rec.add_argument("--pockets",
                      help="fpocket pocket number(s), e.g. 1 or 2,3. Default: best fpocket "
                      "score (druggability breaks ties). Not combinable with --no-fpocket or "
@@ -513,7 +517,9 @@ def build_parser() -> argparse.ArgumentParser:
                       "rigid docking. Implied by --flexible-residues or --auto-flexible")
     flex.add_argument("--flexible-residues",
                       help="Flexible residues, e.g. 'A45,A78,B102' (chain + residue "
-                      "number). Every residue must exist in the docked chain(s) and be "
+                      "number [+ insertion code]; chain IDs are case-sensitive; "
+                      "'chain:number' for any chain, e.g. 1:45; a blank chain is A: A45 "
+                      "or 45). Every residue must exist in the docked chain(s) and be "
                       "buildable as a flexible side chain, else the run stops. Not "
                       "combinable with --auto-flexible")
     flex.add_argument("--auto-flexible", type=int,
@@ -658,6 +664,8 @@ def _check_receptor_selection(args) -> None:
         available = get_chains(args.receptor)
     except OSError as e:
         raise ConfigError(f"-r/--receptor: cannot read {args.receptor}: {e}") from None
+    except ValueError as e:  # utils.ChainAmbiguityError: blank chain next to chain A
+        raise ConfigError(f"-r/--receptor: {e}") from None
     if args.chain is not None:
         try:
             selected = _parse_chain_selection(args.chain, available)
@@ -672,16 +680,8 @@ def _check_receptor_selection(args) -> None:
         lines, _ = protein_module.read_pdb_records(args.receptor)
     except (OSError, UnicodeDecodeError) as e:
         raise ConfigError(f"-r/--receptor: cannot read {args.receptor}: {e}") from None
-    present = set()
-    for line in lines:
-        if (line.startswith(("ATOM", "HETATM")) and len(line) > 26
-                and protein_module.record_chain(line) in selected):
-            present.add((line[21].strip().upper(), line[22:27].strip()))
-    missing = []
-    for key in _flexible_residue_keys(args.flexible_residues):
-        chain, resnum = _parse_residue_key(key)
-        if not any(c == chain and _resnum_matches(r, resnum) for c, r in present):
-            missing.append(key)
+    missing = missing_residues(lines, selected,
+                               _flexible_residue_keys(args.flexible_residues))
     if missing:
         raise ConfigError(
             f"--flexible-residues: no such residue in the docked chain(s) "
@@ -800,7 +800,8 @@ def _validate_args(args, explicit) -> None:
         if invalid:
             raise ConfigError(
                 f"--flexible-residues: invalid residue key(s) {', '.join(invalid)} "
-                "(expected chain + residue number, e.g. A45 or A100B)")
+                "(expected chain + residue number, e.g. A45 or A100B; chain:number "
+                "for any chain, e.g. 1:45; a blank chain is A: A45 or 45)")
 
     if args.vina_bin and not shutil.which(args.vina_bin):
         raise ConfigError(f"--vina-bin {args.vina_bin!r} does not exist or is not executable")

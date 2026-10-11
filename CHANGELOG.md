@@ -21,10 +21,15 @@ changes (below) are part of 2.0.0.
   unchanged.
 - **(results)** Ligand hydrogens are deterministic: the same two-run check
   is applied to every ligand conversion that adds or keeps hydrogens (some
-  MOL2 inputs got randomly placed amine hydrogens).
+  MOL2 inputs got randomly placed amine hydrogens). When the two runs agree,
+  a third run is compared, because runs started within the same clock tick
+  share Open Babel's seed and can agree by chance; files are compared byte
+  for byte (not by `filecmp`'s size/mtime shortcut).
 - **(results)** 2D ligands get 3D coordinates from RDKit ETKDGv3 seeded with
   `--seed` (Open Babel `--gen3d` gave different coordinates on every run; it
-  remains a fallback without RDKit, with a warning).
+  remains a fallback without RDKit, with a warning). This includes 2D MOL2
+  and PDB files (also with `--no-minimize`), which were docked flat; the
+  ligand path never uses `--gen3d`.
 - **(results)** A 2D SDF with `--no-minimize`, or after an MMFF94 failure,
   was docked flat (all z = 0) because the charge repair rebuilt it from the
   2D input; it is now converted from 3D coordinates and a flat result is
@@ -37,7 +42,10 @@ changes (below) are part of 2.0.0.
   the screen output had rounded them (Vina to 4 significant digits, QuickVina
   and SMINA to 0.1 kcal/mol).
 - **(results)** Polar hydrogens of PDB ligands get Gasteiger charges (charges
-  were computed before hydrogens were added). Vina does not use charges.
+  were computed before hydrogens were added). More generally, hydrogens
+  added by `-h` to any ligand get Gasteiger charges (charge column only),
+  and MOL2 charges are recomputed when hydrogens are added. Vina does not use
+  charges.
 - The run fingerprint includes receptor and flexible-residue hydrogens and
   the SHA-256 and version of each docking binary, so a changed receptor or an
   upgraded engine invalidates the checkpoint. Existing checkpoints are
@@ -67,7 +75,9 @@ changes (below) are part of 2.0.0.
   docked unfiltered; same-name files are resolved by precedence and the
   others are reported as superseded.
 - An output directory inside the ligand folder is no longer docked as
-  ligands on the next run.
+  ligands on the next run: output directories of earlier runs inside `-l`
+  are skipped (and logged), and an `-l` that is itself an output directory
+  is refused.
 - `--mw-min/--mw-max/--logp-max` are rejected outside `--library custom`
   instead of being ignored; in custom mode they replace Lipinski's limits.
 - `-v` enables debug logging in every module.
@@ -165,6 +175,38 @@ changes (below) are part of 2.0.0.
   builds are discarded once.
 - Docking results are collected in library order, independent of the order
   in which the workers finish.
+- **(results)** Receptor: selenomethionine (MSE) is written as methionine
+  (residue `MET`, Se -> S). With `--keep-hetero`, single-atom metal ions are
+  added with Vina metal types instead of making Open Babel convert nothing
+  (it has no Gasteiger parameters for them). Any Open Babel run that
+  converts 0 molecules or writes a missing or empty file is an error, and
+  the receptor error names the elements without Gasteiger parameters.
+- Chains: a blank chain ID is chain `A` in `--chain`, the chain list
+  (`get_chains`) and residue keys; a receptor with blank-chain records next
+  to a real chain `A` is refused (exit 2). HETATM-only chains dropped with
+  `--keep-hetero` are logged.
+- `--flexible-residues` keys match chains exactly (case-sensitive; `a45` is
+  chain `a`), accept `chain:number` for any chain (`1:45` for digit chains)
+  and, on a blank-chain receptor, `45` or `A45`. Auto-detected keys use the
+  same syntax.
+- Kept waters, ions and cofactors are identified with their insertion code
+  (`HOH 301` and `HOH 301A` are two residues).
+- **(results)** Ligands: salts keep the largest fragment by heavy atoms
+  (`fragments_removed` in `ligand_metadata.json`; fragments of equal size
+  are rejected) instead of docking every fragment as one ligand. Multi-model
+  PDBs and PDBQTs with several `ROOT` blocks are rejected before docking
+  (every prepared PDBQT is checked). PDB-derived PDBQTs carry the file name,
+  not its path. Tiny SDFs (e.g. methane; there was a byte-size threshold)
+  and molecules of 3 or fewer atoms (which may be planar) are accepted.
+  Unsupported elements are named. PubChem `source_sdf` is relative to the
+  output directory.
+- `results_report.html` contains no wall-clock timestamp (the generation
+  time is in `run_manifest.json`), so identical runs write identical
+  reports.
+- The container stops cleanly with `docker stop`: `entry.sh` runs the
+  pipeline as a child and forwards SIGTERM and SIGINT to it (bash does not
+  pass them to a foreground child), so the run records status
+  `interrupted` and the container exits with 143 (SIGTERM) or 130 (SIGINT).
 
 ### Changed
 
@@ -241,6 +283,26 @@ changes (below) are part of 2.0.0.
   success over docked instead of attempted complexes, and resumed with
   changed parameters.
 - The parity check passed when every complex errored.
+- **(results)** DUD-E enrichment samples unique compounds, not MOL2 entries:
+  DUD-E lists a compound once per protonation state or tautomer (akt1: 423
+  active entries for 293 compounds), so a sample could dock a compound
+  several times. Each sampled compound is docked once (its first entry);
+  decoy duplicates are merged the same way. Defaults are 50 actives and 500
+  decoys, with ROC AUC (CI) and EF5% as the primary metrics; EF1% and
+  BEDROC are reported with their caveats.
+- **(results)** CASF re-docking: the ligand is built from the crystal
+  coordinates with bond orders, charges and hydrogen counts from the
+  core-set SMILES; the InChIKeys of the SDF, MOL2 (also after `obabel -h`)
+  and RDKit start conformer must agree with each other and with the core
+  set, else the complex is skipped with the reason (earlier data
+  directories lost hydrogens in 12 of 39 complexes; **re-fetch** them with
+  `fetch_casf_rcsb.py`). The receptor keeps the pipeline's modified
+  residues, and metals only as single-atom residues (no heme iron without
+  its heme). Best-of-N is counted over the evaluated set like top-1;
+  `params.json` holds the RDKit version and input SHA-256s.
+- The performance benchmark runs one Vina thread per process by default,
+  computes efficiency against total threads and throughput from
+  successfully docked ligands, and records the threads of each run.
 
 ### CI
 

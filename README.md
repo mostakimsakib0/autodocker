@@ -138,7 +138,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `--max-compounds` | PubChem compounds to prepare | `20` |
 | `--no-lipinski` | Skip the Lipinski filter (SDF/PubChem inputs; zero violations allowed). `--no-admet` is a deprecated alias | filter on |
 | `--no-minimize` | Skip MMFF94 minimization (SDF/PubChem ligands only) | off |
-| `--chain` | Chains to keep, e.g. `A`, `A,B`, or `all` (case-sensitive; checked against the receptor before any ligand is prepared) | first chain, with a warning |
+| `--chain` | Chains to keep, e.g. `A`, `A,B`, or `all` (case-sensitive; checked against the receptor before any ligand is prepared); a blank chain ID is chain `A`; a blank chain next to a real chain `A` is refused | first chain, with a warning |
 | `--ph` | pH for receptor hydrogens (Open Babel `-p`), 0 to 14 | `7.4` |
 | `--pockets` | fpocket pocket numbers, e.g. `1` or `2,3` (not with `--no-fpocket`, or with `--grid-center` and `--grid-size` together) | best score |
 | `--padding` | Box padding around the pocket (Å) | `6.0` |
@@ -147,7 +147,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `--grid-center-frame` | `input` or `docking` (≤1.1.4 used `docking`); needs `--grid-center` | `input` |
 | `--grid-size SX,SY,SZ` | Explicit box size (Å) | auto |
 | `--keep-waters`, `--detect-metals`, `--detect-cofactors` | Keep waters near the site, metal ions, known cofactors | off |
-| `--flexible-residues` | Flexible side chains, e.g. `A45,A78`; each must exist in the docked chains (else exit 2) and be buildable (else exit 1) | none |
+| `--flexible-residues` | Flexible side chains, e.g. `A45,A78`, `1:45` for digit chains, `45`/`A45` for a blank chain (case-sensitive); each must exist in the docked chains (else exit 2) and be buildable (else exit 1) | none |
 | `--auto-flexible N` | The N residues closest to the box center become flexible; if none can be built, docking is rigid (warning). Not with `--flexible-residues` | none |
 | `-p, --processes` | Parallel docking processes (`0`/`-1` = all CPUs, `-N` = CPUs ÷ N) | `1` |
 | `--threads` | CPU threads per docking process (`--cpu`) | CPUs ÷ processes |
@@ -209,7 +209,8 @@ options must be finite numbers. Settings are logged in `run_manifest.json`
 On Ctrl-C or SIGTERM the run stops its docking workers and their engine
 processes, keeps the checkpoint (rerun the same command to resume), writes
 `run_manifest.json` with status `interrupted` and releases the output
-directory. A docking worker process that dies (e.g. killed by the
+directory. In the container, `entry.sh` forwards `docker stop`'s SIGTERM (and
+Ctrl-C) to the pipeline and exits with its code. A docking worker process that dies (e.g. killed by the
 out-of-memory killer) does not stop the screen: its unfinished ligands are
 docked again, each in a fresh worker, and a ligand whose worker dies again is
 reported as `FAILED`.
@@ -228,7 +229,8 @@ run with the same inputs, options and image gives byte-identical
 or `--threads`. Whether amd64 and arm64 results are identical is measured in
 CI and not guaranteed. `run_manifest.json` records what is needed to repeat a
 run. See [`docs/reproducibility.md`](docs/reproducibility.md) and
-`scripts/reproducibility_check.sh`.
+`scripts/reproducibility_check.sh`; [`docs/input_validation.md`](docs/input_validation.md)
+lists the input checks and the receptor and ligand preparation rules.
 
 ## Validation
 
@@ -242,6 +244,7 @@ every benchmark is reproducible from `scripts/benchmark_*.py`.
 
 - [`docs/installation.md`](docs/installation.md) — Docker and native setup, troubleshooting
 - [`docs/reproducibility.md`](docs/reproducibility.md) — determinism guarantees and how to verify
+- [`docs/input_validation.md`](docs/input_validation.md) — input checks, receptor and ligand preparation rules
 - [`docs/user_testing.md`](docs/user_testing.md) — fresh-machine testing template and bug report form
 - [JOSS-style paper](paper/paper.md) — manuscript and references
 - [Contributing guide](CONTRIBUTING.md)

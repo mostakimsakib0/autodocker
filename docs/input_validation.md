@@ -56,6 +56,9 @@ fails, with Open Babel's messages, in either of these cases:
 - A residue named twice is built once, and both keys count as built.
 - Keys written for auto-detected residues use the same syntax. A digit chain gives
   `1:45`.
+- A residue with no atoms in the docked chain(s) stops the run before any ligand is
+  prepared (exit 2). A residue that cannot be built as a flexible side chain (missing
+  atoms, or none rotatable, e.g. GLY, ALA, PRO) stops it at receptor setup (exit 1).
 
 **Kept HETATM residues** (`--keep-waters`, `--detect-metals`, `--detect-cofactors`)
 are identified by chain, residue number with insertion code, and residue name.
