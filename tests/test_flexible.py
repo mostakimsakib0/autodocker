@@ -252,3 +252,32 @@ def test_flex_files_are_accepted_by_vina(tmp_path):
                            "--size_x", "30", "--size_y", "30", "--size_z", "30",
                            "--score_only"], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_detect_flexible_residues_ignores_hydrogens(tmp_path):
+    rec = tmp_path / "r.pdbqt"
+    _write_receptor(rec, [
+        _atom(1, "CA", "SER", "A", "45", 5.0, 0.0, 0.0, "C"),
+        _atom(2, "OG", "SER", "A", "45", 5.5, 0.0, 0.0, "OA"),
+        _atom(3, "H", "SER", "A", "45", 0.1, 0.0, 0.0, "HD"),  # misplaced H near site
+        _atom(4, "CA", "THR", "A", "46", 3.0, 0.0, 0.0, "C"),
+    ])
+    assert fl.detect_flexible_residues(str(rec), (0.0, 0.0, 0.0), radius=8.0) == ["A46", "A45"]
+
+
+def test_build_flexible_duplicate_keys_built_once(tmp_path):
+    rec = tmp_path / "r.pdbqt"
+    _write_receptor(rec, [
+        _atom(1, "N", "SER", "A", "45", 0.0, 0.0, 0.0, "N"),
+        _atom(2, "CA", "SER", "A", "45", 1.45, 0.0, 0.0, "C"),
+        _atom(3, "C", "SER", "A", "45", 2.0, 1.4, 0.0, "C"),
+        _atom(4, "CB", "SER", "A", "45", 2.0, -0.8, 1.2, "C"),
+        _atom(5, "OG", "SER", "A", "45", 3.4, -0.8, 1.2, "OA"),
+    ])
+    built = []
+    flex = fl.build_flexible_residue_pdbqt(str(rec), ["A45", "A45", "A99"], str(tmp_path),
+                                           built=built)
+    text = open(flex).read()
+    assert built == ["A45"]
+    assert text.count("BEGIN_RES") == 1
+    assert text.splitlines()[0] == "REMARK flexible residues: A45"

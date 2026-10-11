@@ -1,79 +1,54 @@
 #!/usr/bin/env python3
-"""PHASE 3: FLEXIBLE DOCKING.
+"""Flexible receptor residues: selection and the Vina flex PDBQT.
 
-Split out of runner.py (behavior-preserving refactor). All cross-module
-references go through the ``runner`` namespace at call time so the public
-entry point and its monkeypatch surface stay unchanged.
+Builds the BEGIN_RES/END_RES blocks Vina reads with --flex and the rigid
+receptor without those residues' side chains.
 """
+import logging
+import math
 import os
 import re
-import csv
-import json
-import math
-import time
-import shlex
-import uuid
-import shutil
-import fnmatch
-import glob
-import html
-import statistics
-import subprocess
-import logging
-from collections import defaultdict
-from datetime import datetime
-from pathlib import Path
-from typing import List, Tuple, Optional, Dict
-from urllib.parse import quote
-from multiprocessing import Pool, cpu_count as mp_cpu_count
-
-# The runner module owns the tool-path globals (OBABEL, VINA*, SMINA,
-# COMMAND_TIMEOUT) and every public name; import it lazily-safe: during the
-# initial import of runner this binds the partially-initialized module
-# object, which is fine because attributes are only accessed at call time.
-import runner  # noqa: E402
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# PDBQT hydrogen atom types; hydrogens do not count towards residue distances.
+_PDBQT_HYDROGEN_TYPES = ("H", "HD", "HS")
+
 
 def detect_flexible_residues(pdbqt_file: str, binding_site_coords: Tuple[float, float, float],
                              radius: float = 8.0, max_residues: int = 10) -> List[str]:
     """Auto-detect residues near the binding site that can be made flexible.
 
-    Residues are ranked by their closest atom to the site; residues without
-    rotatable side-chain bonds (GLY, ALA, PRO) are skipped.
+    Residues are ranked by their closest heavy atom to the site (ties: by
+    residue key); residues without rotatable side-chain bonds (GLY, ALA,
+    PRO) are skipped. Raises if the receptor cannot be read.
     """
-    flexible = []
+    cx, cy, cz = binding_site_coords
+    residues = {}
+    with open(pdbqt_file, 'r') as f:
+        for line in f:
+            if not line.startswith('ATOM'):
+                continue
+            if line[17:20].strip() not in SIDE_CHAIN_TORSIONS:
+                continue
+            if line[77:79].strip() in _PDBQT_HYDROGEN_TYPES:
+                continue
+            try:
+                x = float(line[30:38])
+                y = float(line[38:46])
+                z = float(line[46:54])
+            except ValueError:
+                logger.warning(f"[!] Skipping malformed receptor line: {line.rstrip()}")
+                continue
+            dist = math.sqrt((x - cx) ** 2 + (y - cy) ** 2 + (z - cz) ** 2)
+            if dist <= radius:
+                res_key = (f"{line[21].strip()}{line[22:26].strip()}"
+                           f"{line[26:27].strip()}")
+                residues[res_key] = min(dist, residues.get(res_key, dist))
 
-    try:
-        cx, cy, cz = binding_site_coords
-        residues = {}
-
-        with open(pdbqt_file, 'r') as f:
-            for line in f:
-                if line.startswith('ATOM'):
-                    if line[17:20].strip() not in SIDE_CHAIN_TORSIONS:
-                        continue
-                    try:
-                        x = float(line[30:38].strip())
-                        y = float(line[38:46].strip())
-                        z = float(line[46:54].strip())
-
-                        dist = math.sqrt((x-cx)**2 + (y-cy)**2 + (z-cz)**2)
-                        if dist <= radius:
-                            res_key = (f"{line[21].strip()}{line[22:26].strip()}"
-                                       f"{line[26].strip()}")
-                            residues[res_key] = min(dist, residues.get(res_key, dist))
-                    except (ValueError, IndexError):
-                        pass
-
-        # Sort by distance and take closest
-        sorted_residues = sorted(residues.items(), key=lambda x: (x[1], x[0]))
-        flexible = [res[0] for res in sorted_residues[:max_residues]]
-
-    except Exception as e:
-        logger.debug(f"Could not detect flexible residues: {e}")
-
-    return flexible
+    sorted_residues = sorted(residues.items(), key=lambda x: (x[1], x[0]))
+    return [res[0] for res in sorted_residues[:max_residues]]
 
 
 # Rotatable side-chain bonds (chi angles, plus the hydroxyl/thiol/amine
@@ -104,6 +79,8 @@ for _alias, _base in (("HID", "HIS"), ("HIE", "HIS"), ("HIP", "HIS"), ("CYX", "C
 
 
 FLEX_BACKBONE_NAMES = {"N", "C", "O", "H", "HN", "OXT"}
+# Bond if closer than the sum of covalent radii plus this tolerance (A), as
+# Open Babel's ConnectTheDots does.
 _BOND_TOLERANCE = 0.45
 
 _ATOMIC_RADII = {
@@ -216,8 +193,7 @@ def _build_flex_residue_block(atoms: List[Dict]) -> List[str]:
         by_name.setdefault(a["name"], a)
     ca = by_name.get("CA")
     if ca is None:
-        logger.warning(
-            f"[!] Cannot build flex residue: no CA atom found")
+        logger.warning("[!] Cannot build flex residue: no CA atom found")
         return []
 
     # Open Babel names every added hydrogen "H", so a hydrogen belongs to the
@@ -233,8 +209,7 @@ def _build_flex_residue_block(atoms: List[Dict]) -> List[str]:
             continue
         nodes.append(a)
     if len(nodes) < 2:
-        logger.warning(
-            f"[!] Residue has no flexible side-chain atoms; skipping")
+        logger.warning("[!] Residue has no flexible side-chain atoms; skipping")
         return []
 
     bonded = _bonded
@@ -300,8 +275,7 @@ def _build_flex_residue_block(atoms: List[Dict]) -> List[str]:
 
     emit(fragment_of[ca["serial"]])
     if len(placed) < 2:
-        logger.warning(
-            f"[!] No side-chain atoms bonded to CA; skipping residue")
+        logger.warning("[!] No side-chain atoms bonded to CA; skipping residue")
         return []
     if len(placed) != len(fragments):
         logger.warning(f"[!] {resname}: side-chain atoms not connected to CA; skipping")
@@ -315,40 +289,52 @@ def build_flexible_residue_pdbqt(receptor_pdbqt: str, residues: List[str],
                                  built: Optional[List[str]] = None) -> Optional[str]:
     """Build a Vina flexible-receptor PDBQT for the given residue keys.
 
-    Residues are given as e.g. ``['A45', 'B102']``. Returns the flex file
-    path, or None if no residue could be converted. When ``built`` is given,
-    the keys of the residues actually written are appended to it, so only
-    those are removed from the rigid receptor.
+    Residues are given as e.g. ``['A45', 'B102']``; a residue given twice
+    is built once. Returns the flex file path, or None (and no file) if no
+    residue could be converted. The file's REMARK lists the residues
+    actually written. When ``built`` is given, the keys of those residues
+    are appended to it, so only they are removed from the rigid receptor.
     """
     if not residues:
         return None
 
     flex_file = os.path.join(outdir, "flex.pdbqt")
-    written = 0
-    with open(flex_file, "w") as dst:
-        dst.write("REMARK flexible residues: " + ", ".join(residues) + "\n")
-        for key in residues:
-            atoms = _residue_atoms_from_pdbqt(receptor_pdbqt, key)
-            if not atoms:
-                logger.warning(
-                    f"[!] Residue '{key}' not found in receptor; skipping")
-                continue
-            block = _build_flex_residue_block(atoms)
-            if not block:
-                logger.warning(f"[!] Could not build flex block for '{key}'")
-                continue
-            dst.writelines(block)
-            written += 1
-            if built is not None:
-                built.append(key)
+    blocks = []
+    written_keys = []
+    seen = set()
+    for key in residues:
+        key = key.strip()
+        parsed_key = _parse_residue_key(key)
+        if parsed_key is not None and parsed_key in seen:
+            logger.warning(f"[!] Residue '{key}' given more than once; using it once")
+            continue
+        seen.add(parsed_key)
+        atoms = _residue_atoms_from_pdbqt(receptor_pdbqt, key)
+        if not atoms:
+            logger.warning(
+                f"[!] Residue '{key}' not found in receptor; skipping")
+            continue
+        block = _build_flex_residue_block(atoms)
+        if not block:
+            logger.warning(f"[!] Could not build flex block for '{key}'")
+            continue
+        blocks.extend(block)
+        written_keys.append(key)
+
+    written = len(written_keys)
+    if written:
+        with open(flex_file, "w") as dst:
+            dst.write("REMARK flexible residues: " + ", ".join(written_keys) + "\n")
+            dst.writelines(blocks)
+        if built is not None:
+            built.extend(written_keys)
 
     if written == 0:
-        logger.warning(
-            f"[!] No flexible residues could be built; flex docking disabled")
+        logger.warning("[!] No flexible residues could be built; flex docking disabled")
         return None
 
     logger.info(
-        f"[✔] Flexible receptor PDBQT written: {flex_file} "
+        f"[*] Flexible receptor PDBQT written: {flex_file} "
         f"({written} residue(s))")
     return flex_file
 

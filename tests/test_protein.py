@@ -85,18 +85,21 @@ def test_receptor_centroid(tmp_path):
     assert c == (59.5, 59.5, 59.5)
 
 
-def test_detect_pocket_fallback(tmp_path, monkeypatch):
+def test_detect_pocket_fails_loudly_when_fpocket_fails(tmp_path, monkeypatch):
+    # No silent whole-receptor fallback: --no-fpocket is the explicit way.
+    import subprocess
     p = tmp_path / "prot.pdb"
     _pdb(p, _protein_pdb(120))
 
-    def fake_run(*a, **k):
-        raise RuntimeError("fpocket missing")
+    def fake_run(cmd, *a, **k):
+        raise subprocess.CalledProcessError(1, cmd, output="", stderr="segfault")
 
+    monkeypatch.setattr(runner, "find_tool", lambda *names: "/usr/bin/fpocket")
+    monkeypatch.setattr(prot, "_fpocket_version", lambda path: None)
     monkeypatch.setattr(runner, "run", fake_run)
     pp = prot.ProteinPreparation(str(p), str(tmp_path))
-    grid = pp.detect_pocket(padding=6.0)
-    # fallback grid: non-zero size, centroid on receptor
-    assert grid[3] >= 24.0
+    with pytest.raises(RuntimeError, match="fpocket failed"):
+        pp.detect_pocket(padding=6.0)
 
 
 def test_parse_fpocket_info(tmp_path):
