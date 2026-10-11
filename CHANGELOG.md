@@ -83,8 +83,60 @@ changes (below) are part of 2.0.0.
   interpretation guide matches the score colours, and the NGL viewer
   download is pinned and hash-checked.
 - The PyMOL box script draws the box in the intended colour.
+- The container forwards `LIPINSKI`, `OMP_NUM_THREADS` and
+  `AUTODOCKER_VERSION` to the pipeline (`LIPINSKI=0` was dropped by
+  `setpriv --reset-env` and had no effect); a test checks the forwarded list
+  against `entry.sh` and the README.
+- `--flexible-residues` naming a residue that is not in the docked chains
+  stops the run before ligand preparation (exit 2), and one that cannot be
+  built as a flexible side chain stops it with exit 1; the run no longer
+  docks rigidly while reporting flexible residues. `--auto-flexible` that
+  finds no buildable residue docks rigidly with a warning.
+  `run_manifest.json` records the flexible residues actually docked
+  (`flexible_residues`, `[]` for rigid docking).
+- fpocket is neither run nor required when `--grid-center` and `--grid-size`
+  give the whole box; when pockets are detected, a missing fpocket is
+  reported before any work (exit 2).
+- Invalid values are rejected before any work (exit 2): non-finite numbers
+  (`nan`, `inf`) for every numeric option, `--seed`/`VS_SEED` outside 1 to
+  2147483647 (the engines take a 32-bit seed, Vina treats 0 as random and
+  RDKit rejects negative seeds), `--ph` outside 0-14, `--min-valid-affinity`
+  at or below the -20 kcal/mol floor (empty window), malformed `--pockets`,
+  `--chain` IDs absent from the receptor (the message lists the available
+  chains), and an `-o` that is a file, empty or cannot be created.
+  `run_manifest.json` is strict JSON.
+- Options that were accepted but had no effect are rejected (exit 2):
+  `--auto-flexible` with `--flexible-residues`, `--pockets` with
+  `--no-fpocket` or with both `--grid-center` and `--grid-size`, an empty
+  `--flexible-residues` list, `--grid-center-frame` without `--grid-center`.
+- Outputs of an earlier run in the same output directory (HTML report, pose
+  clusters, consensus files, pocket summary, flexible-receptor files, ...;
+  `outputs.DERIVED_OUTPUTS`) are removed when a run starts, so the summary
+  and the container's closing list show only this run's files. Docked poses
+  and the checkpoint are kept. The HTML report also removes an old report
+  when it has nothing to write.
+- A screen in which every ligand fails writes all outputs (ranking.csv with
+  `FAILED` rows, summaries, report, manifest with failure counts) and exits
+  with 3 like any other excess of failures (0 with
+  `--max-failure-fraction 1.0`), instead of stopping with exit 1.
+- `entry.sh`: invalid input (missing `INPUT` file, protein, ligand folder or
+  ligand files, an output directory that cannot be created) exits with 2;
+  `--help` and `--version` work without a workspace; `-lPATH`, `-l=PATH`,
+  `-oPATH`, `-rPATH` and `--opt=value` are recognised; `INPUT` is ignored
+  with a warning by `--library fda/custom` (it made the container fail).
+- Messages: an interrupt during `--smina-only` docking is reported as such;
+  a conflict caused by `VS_ENABLE_QVINA_FALLBACK=1` names the variable; the
+  HTML report shows "n/a" instead of 0.00 for the best and average affinity
+  when no ligand has an in-window score, drops the dead 3D-viewer link when
+  there is no viewer, and clicking the scatter point of a ligand outside the
+  top hits says so instead of reloading the current hit.
 
 ### Changed
+
+- **CLI:** abbreviated long options are no longer accepted (`--lig`,
+  `--out`, `--mw-ma`, ...; write `--ligands`, `--output`, `--mw-max`). The
+  container entry point has to recognise `-r/-l/-o/--library` exactly as the
+  runner does, and abbreviations made the two disagree.
 
 - Consensus scoring rescores Vina's top pose with SMINA's Vinardo function
   (it re-docked with SMINA's default function, which is Vina's, so the

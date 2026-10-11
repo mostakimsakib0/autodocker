@@ -608,24 +608,30 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
     """
     logger.info("[*] Generating HTML report...")
 
+    def no_report(message: str) -> bool:
+        logger.warning(message)
+        if os.path.exists(output_file):
+            os.remove(output_file)  # never leave a stale report from an earlier run
+        return False
+
     ligands = []
     try:
         with open(results_csv, 'r', encoding='utf-8') as f:
             ligands = list(csv.DictReader(f))
     except Exception as e:
-        logger.warning(f"Could not parse results CSV: {e}")
-        return False
+        return no_report(f"Could not parse results CSV: {e}")
     if not ligands:
-        logger.warning("No results to report")
-        return False
+        return no_report("No results to report")
 
     scores = [_valid_score(lig) for lig in ligands]
     valid_affinities = [v for v in scores if v is not None]
 
     out_of_window_count = sum(1 for lig in ligands if _is_out_of_window(lig))
     failed_count = len(ligands) - len(valid_affinities) - out_of_window_count
-    avg_affinity = statistics.mean(valid_affinities) if valid_affinities else 0.0
-    best_affinity = min(valid_affinities) if valid_affinities else 0.0
+    # Without any in-window score there is no best or average affinity.
+    avg_affinity = (f"{statistics.mean(valid_affinities):.2f}"
+                    if valid_affinities else "n/a")
+    best_affinity = f"{min(valid_affinities):.2f}" if valid_affinities else "n/a"
     strong_binders = sum(1 for a in valid_affinities if a < STRONG_BINDER_CUTOFF)
     success_rate = (len(valid_affinities) / len(ligands) * 100) if ligands else 0.0
 
@@ -732,6 +738,14 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
             </div>
 """
 
+    viewer_section = _build_viewer_section(
+        ranked_ligands, poses_dir, receptor_pdbqt, output_file, grid_box=grid_box,
+        base_dir=os.path.dirname(os.path.abspath(results_csv)), top_n=top_n)
+    # The table of contents links the viewer only when the report has one
+    # (no section without an in-window hit).
+    viewer_toc = ('\n                <li><a href="#viewer">3D Viewer</a></li>'
+                  if 'id="viewer"' in viewer_section else "")
+
     html_content = f"""<!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
@@ -748,8 +762,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
             <h3>Contents</h3>
             <ul>
                 <li><a href="#summary">Summary</a></li>
-                <li><a href="#top">Top Hits</a></li>
-                <li><a href="#viewer">3D Viewer</a></li>
+                <li><a href="#top">Top Hits</a></li>{viewer_toc}
                 <li><a href="#dist">Affinity Distribution</a></li>
                 <li><a href="#scatter">MW vs Affinity</a></li>
                 <li><a href="#all">All Results</a></li>
@@ -769,8 +782,8 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                 <h2 style="margin-top:18px;">Key Statistics</h2>
                 <div class="stat-grid">
                     {_stat_card(len(ligands), "Ligands Screened")}
-                    {_stat_card(f"{best_affinity:.2f}", "Best Binder (kcal/mol)")}
-                    {_stat_card(f"{avg_affinity:.2f}", "Average Affinity")}
+                    {_stat_card(best_affinity, "Best Binder (kcal/mol)")}
+                    {_stat_card(avg_affinity, "Average Affinity")}
                     {_stat_card(f"{strong_binders}/{len(valid_affinities)}", f"Score &lt; {STRONG_BINDER_CUTOFF:g} kcal/mol")}
                     {_stat_card(f"{success_rate:.1f}%", "Scored ligands")}
                     {_stat_card(out_of_window_count, "Outside the accepted window")}
@@ -789,7 +802,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                 </table>
             </div>
 
-            {_build_viewer_section(ranked_ligands, poses_dir, receptor_pdbqt, output_file, grid_box=grid_box, base_dir=os.path.dirname(os.path.abspath(results_csv)), top_n=top_n)}
+            {viewer_section}
 
             <div class="section" id="dist">
                 <h2>Affinity Distribution</h2>
@@ -799,7 +812,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
 
             <div class="section" id="scatter">
                 <h2>Molecular Weight vs Affinity</h2>
-                <p class="muted"><em>Each point is a ligand; click a point to load it in the 3D viewer.</em></p>
+                <p class="muted"><em>Each point is a ligand; click a top hit's point to load it in the 3D viewer.</em></p>
                 {_scatter_chart(scatter_data)}
             </div>
 

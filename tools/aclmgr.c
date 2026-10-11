@@ -13,13 +13,15 @@
 extern char **environ;
 
 /* setpriv --reset-env clears the environment for the unprivileged child, so
- * the pipeline's own settings (README "Environment variables", plus any VS_*
- * knob) are forwarded explicitly through /usr/bin/env. */
+ * the pipeline's own settings (README "Environment variables", every variable
+ * entry.sh reads, the variables runner.py records in run_manifest.json, plus
+ * any VS_* knob) are forwarded explicitly through /usr/bin/env.
+ * tests/test_container_env.py checks this list against entry.sh and README. */
 static const char* const forwarded_env[] = {
-	"ADMET", "BINDING_MODES", "CHAIN", "ENERGY_RANGE", "EXHAUST",
-	"EXHAUSTIVENESS", "INPUT", "LIGAND_MODE", "LIGS", "MAX_WORKERS",
-	"NO_MINIMIZE", "PADDING", "PDB", "POCKETS", "PROCESSES", "PUBCHEM_REST",
-	"RESUME", "TIMEOUT", "TOP_N",
+	"ADMET", "AUTODOCKER_VERSION", "BINDING_MODES", "CHAIN", "ENERGY_RANGE",
+	"EXHAUST", "EXHAUSTIVENESS", "INPUT", "LIGAND_MODE", "LIGS", "LIPINSKI",
+	"MAX_WORKERS", "NO_MINIMIZE", "OMP_NUM_THREADS", "PADDING", "PDB",
+	"POCKETS", "PROCESSES", "PUBCHEM_REST", "RESUME", "TIMEOUT", "TOP_N",
 	/* proxies, so PubChem library modes work behind one */
 	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy",
 	"no_proxy", NULL

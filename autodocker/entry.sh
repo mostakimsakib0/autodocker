@@ -19,45 +19,94 @@ WORK="/workspace"
 OUT="$WORK/output"
 SCRIPT="$DIR/runner.py"
 
+# Invalid input exits with 2, like an invalid option of runner.py.
+EXIT_USAGE=2
+usage_error() {
+	local line
+	for line in "$@"; do echo "[!] $line"; done
+	exit "$EXIT_USAGE"
+}
+
+# --help and --version need no workspace: hand them straight to the runner.
+for arg in "$@"; do
+	case "$arg" in
+		--) break ;;
+		-h | --help | --version) exec "$SCRIPT" "$@" ;;
+	esac
+done
+
 LIGS="${LIGS:-/workspace/ligs}"
 PDB="${PDB:-}"
 
-# -r/-l/-o given on the command line override the workspace defaults
-# (argparse keeps the last value); validate and report what will be used.
-USER_PDB="" USER_LIGS="" USER_OUT=""
-for ((i = 1; i <= $#; i++)); do
-	next=$((i + 1))
-	case "${!i}" in
-		-r|--receptor) USER_PDB="${!next:-}" ;;
-		--receptor=*) USER_PDB="${!i#*=}" ;;
-		-l|--ligands) USER_LIGS="${!next:-}" ;;
-		--ligands=*) USER_LIGS="${!i#*=}" ;;
-		-o|--output) USER_OUT="${!next:-}" ;;
-		--output=*) USER_OUT="${!i#*=}" ;;
+# -r/-l/-o and --library given on the command line override the workspace
+# defaults (argparse keeps the last value); validate and report what will be
+# used. Recognised in every form runner.py accepts: "-r FILE", "-rFILE",
+# "-r=FILE", "-vrFILE", "--receptor FILE" and "--receptor=FILE" (runner.py
+# rejects abbreviated long options). A token starting with "-" is always an
+# option to argparse, so option values cannot be mistaken for options here.
+USER_PDB="" USER_LIGS="" USER_OUT="" LIBRARY=""
+ARGS=("$@")
+for ((i = 0; i < ${#ARGS[@]}; i++)); do
+	arg="${ARGS[i]}"
+	value="${ARGS[i + 1]:-}"
+	case "$arg" in
+		--) break ;;
+		--receptor) USER_PDB="$value"; i=$((i + 1)) ;;
+		--receptor=*) USER_PDB="${arg#*=}" ;;
+		--ligands) USER_LIGS="$value"; i=$((i + 1)) ;;
+		--ligands=*) USER_LIGS="${arg#*=}" ;;
+		--output) USER_OUT="$value"; i=$((i + 1)) ;;
+		--output=*) USER_OUT="${arg#*=}" ;;
+		--library) LIBRARY="$value"; i=$((i + 1)) ;;
+		--library=*) LIBRARY="${arg#*=}" ;;
+		--*) ;;
+		-?*)
+			# Short options; -v takes no value and may precede another one.
+			short="${arg#-}"
+			while [ "${short:0:1}" = "v" ]; do short="${short:1}"; done
+			case "$short" in
+				r) USER_PDB="$value"; i=$((i + 1)) ;;
+				r=*) USER_PDB="${short#r=}" ;;
+				r?*) USER_PDB="${short#r}" ;;
+				l) USER_LIGS="$value"; i=$((i + 1)) ;;
+				l=*) USER_LIGS="${short#l=}" ;;
+				l?*) USER_LIGS="${short#l}" ;;
+				o) USER_OUT="$value"; i=$((i + 1)) ;;
+				o=*) USER_OUT="${short#o=}" ;;
+				o?*) USER_OUT="${short#o}" ;;
+			esac
+			;;
 	esac
 done
 if [ -n "$USER_OUT" ]; then OUT="$USER_OUT"; fi
 
-mkdir -p "$OUT"
+# PubChem library modes (--library fda|custom) download their own ligands,
+# so no local ligand files are required and INPUT/LIGS/-l are not used.
+PUBCHEM_LIBRARY=0
+case "$LIBRARY" in fda | custom) PUBCHEM_LIBRARY=1 ;; esac
 
 INPUT="${INPUT:-}"
 
-# -l on the command line replaces INPUT/LIGS from the environment.
-if [ -n "$USER_LIGS" ]; then
+if [ "$PUBCHEM_LIBRARY" = "1" ]; then
+	if [ -n "$INPUT" ]; then
+		echo "[!] INPUT=$INPUT is ignored with --library $LIBRARY (ligands come from PubChem)"
+		INPUT=""
+	fi
+elif [ -n "$USER_LIGS" ]; then
+	# -l on the command line replaces INPUT/LIGS from the environment.
 	LIGS="$USER_LIGS"
 	if [ -f "$LIGS" ]; then INPUT="$LIGS"; else INPUT=""; fi
 fi
 
 if [ -n "${INPUT}" ] && [ ! -f "${INPUT}" ]; then
-	echo "[!] INPUT is set but the file does not exist: $INPUT"
-	exit 1
+	usage_error "INPUT is set but the file does not exist: $INPUT"
 fi
 
-if [ -n "${INPUT}" ] && [ -f "${INPUT}" ]; then
+if [ -n "${INPUT}" ]; then
 	echo  "[INFO] Single ligand mode detected: $INPUT"
 	LIGAND_MODE="single"
 	LIGS="$INPUT"
-else
+elif [ "$PUBCHEM_LIBRARY" != "1" ]; then
 	echo  "[INFO] Batch mode: scanning $LIGS"
 	LIGAND_MODE="batch"
 fi
@@ -80,33 +129,13 @@ echo "======================================"
 
 # Check if required files exist
 if [ ! -f "$PDB" ]; then
-	echo "[!] Protein file not found: $PDB"
-	echo "[!] Please place protein.pdb in workspace/ or set PDB=/path/to/file.pdb"
-	exit 1
+	usage_error "Protein file not found: $PDB" \
+		"Please place protein.pdb in workspace/ or set PDB=/path/to/file.pdb"
 fi
 
-# PubChem library modes (--library fda|custom) download their own ligands,
-# so no local ligand files are required.
-PUBCHEM_LIBRARY=0
-for ((i = 1; i <= $#; i++)); do
-	case "${!i}" in
-		--library=fda|--library=custom) PUBCHEM_LIBRARY=1 ;;
-		--library)
-			next=$((i + 1))
-			case "${!next:-}" in fda|custom) PUBCHEM_LIBRARY=1 ;; esac
-			;;
-	esac
-done
-
 if [ "$PUBCHEM_LIBRARY" = "1" ]; then
-	mkdir -p "$LIGS"
 	echo "[*] PubChem library mode: ligands will be downloaded"
 elif [ "$LIGAND_MODE" = "single" ]; then
-	if [ ! -f "$LIGS" ]; then
-		echo "[!] Ligand file not found: $LIGS"
-		exit 1
-	fi
-
 	ext="${LIGS##*.}"
 	case "${ext,,}" in
 		sdf)
@@ -134,16 +163,14 @@ elif [ "$LIGAND_MODE" = "single" ]; then
 			PDB_COUNT=1
 			;;
 		*)
-			echo "[!] Unsupported ligand file type: $LIGS"
-			exit 1
+			usage_error "Unsupported ligand file type: $LIGS"
 			;;
 	esac
 	TOTAL_LIGS=1
 else
 	if [ ! -d "$LIGS" ]; then
-		echo "[!] Ligands directory not found: $LIGS"
-		echo "[!] Please create workspace/ligs/ and add .sdf files"
-		exit 1
+		usage_error "Ligands directory not found: $LIGS" \
+			"Please create workspace/ligs/ and add .sdf files"
 	fi
 
 	# Check for ligand files
@@ -157,8 +184,7 @@ fi
 
 if [ "$PUBCHEM_LIBRARY" != "1" ]; then
 	if [ "$TOTAL_LIGS" -eq 0 ]; then
-		echo "[!] No ligand files (.sdf/.pdbqt/.mol2/.pdb) found in $LIGS"
-		exit  1
+		usage_error "No ligand files (.sdf/.pdbqt/.mol2/.pdb) found in $LIGS"
 	fi
 
 	echo "[*] Found $TOTAL_LIGS ligand(s)"
@@ -166,6 +192,10 @@ if [ "$PUBCHEM_LIBRARY" != "1" ]; then
 	echo "    - PDBQT: $PDBQT_COUNT"
 	echo "    - MOL2: $MOL2_COUNT"
 	echo "    - PDB: $PDB_COUNT"
+fi
+
+if ! mkdir -p -- "$OUT"; then
+	usage_error "Cannot create the output directory: $OUT"
 fi
 echo "[*] Protein loaded: $(basename "$PDB")"
 

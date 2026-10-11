@@ -7,7 +7,9 @@ fixed, what is not, and how it is tested.
 ## What is fixed
 
 - Docking seed: `--seed 42` by default (`VS_SEED`), passed to every Vina /
-  SMINA call.
+  SMINA call. Seeds are 1 to 2147483647: the engines take a 32-bit seed,
+  Vina treats 0 as "pick a random seed" and RDKit rejects negative seeds, so
+  other values are refused (exit 2).
 - Pinned software in the Docker image: Vina 1.2.7, QuickVina 2, SMINA and
   fpocket 4.2.3 are compiled from pinned submodules (with
   `-ffp-contract=off`, verified to leave amd64 binaries and results

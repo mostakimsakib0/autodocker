@@ -987,7 +987,9 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
     Returns ``(results, checkpoint, metrics)``. ``results`` holds
     ``(name, score)`` with score None for FAILED and OUT_OF_WINDOW ligands
     (the latter keep their affinity in ``metrics[name]["raw_score"]``).
-    Raises RuntimeError only when no ligand produced any score at all.
+    When no ligand produced any score, an error is logged and every ligand
+    is returned as FAILED (the caller writes the outputs and decides the exit
+    code).
     """
     engine = engine or EngineConfig.from_runner()
     dock_dir = os.path.join(outdir, outputs.DOCKED_DIR)
@@ -1113,16 +1115,16 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
     all_results = checkpoint.get_results(ligand_names)
     all_results.extend(failed_results)
 
-    # Fail loud only when no ligand produced any score (in or out of the
-    # window). A resumed run whose remaining ligands keep failing is a partial
-    # success, and an all-out-of-window screen is still a reportable result.
+    # No ligand produced any score (in or out of the window): say so loudly.
+    # The caller still writes every output (FAILED rows included) and turns
+    # the failure fraction into the exit code (runner: exit 3 above
+    # --max-failure-fraction).
     any_score = any(score is not None for _, score in all_results) or any(
         Status.of(metrics_dict.get(name, {}).get("status")) is Status.OUT_OF_WINDOW
         for name, _ in all_results)
-    if not any_score:
-        raise RuntimeError(
-            "All docking attempts failed; no ligand produced a score. "
-            "Inspect output/docked/*_vina.log for root causes."
-        )
+    if all_results and not any_score:
+        logger.error(
+            "[!] All docking attempts failed; no ligand produced a score. Inspect "
+            f"{os.path.join(dock_dir, '*' + outputs.VINA_LOG_SUFFIX)} for root causes.")
 
     return all_results, checkpoint, metrics_dict

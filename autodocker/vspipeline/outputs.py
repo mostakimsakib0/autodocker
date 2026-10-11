@@ -30,8 +30,24 @@ GRID_BOX_PML = "grid_box.pml"
 POCKET_SUMMARY_CSV = "pocket_summary.csv"
 FRAME_OFFSET_TXT = "frame_offset.txt"
 
+# fpocket's own output directory (next to PROTEIN_CLEAN_PDB, named by fpocket)
+FPOCKET_OUT_DIR = PROTEIN_CLEAN_PDB[:-len(".pdb")] + "_out"
+
 # Docking
 DOCKED_DIR = "docked"   # <name>_out.pdbqt poses and <name>_vina.log per ligand
+
+# Outputs derived from a run's options and results. Every run removes the ones
+# left by an earlier run in the same output directory before it starts, so a
+# file that this run does not write (--no-html-report, no --consensus, no
+# --cluster-poses, no fpocket with an explicit box, rigid docking, a failed
+# report, ...) can never be mistaken for one of its results. The resumable
+# docking results (DOCKED_DIR and the checkpoint) are never in this list.
+DERIVED_OUTPUTS = (
+    RANKING_CSV, TOP_HITS_TXT, METRICS_TXT, RESULTS_FULL_TXT, HTML_REPORT,
+    POSE_CLUSTERS_JSON, CONSENSUS_RANKING_CSV, CONSENSUS_SUMMARY_JSON,
+    POCKET_SUMMARY_CSV, FPOCKET_OUT_DIR, GRID_CONF, GRID_BOX_PML, FRAME_OFFSET_TXT,
+    RIGID_RECEPTOR_PDBQT, FLEX_PDBQT,
+)
 
 # Per-ligand files in DOCKED_DIR: <ligand name> + suffix
 POSE_SUFFIX = "_out.pdbqt"                  # Vina/QuickVina poses

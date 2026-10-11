@@ -25,7 +25,8 @@ def fake_tools(monkeypatch):
     """Use the Python interpreter as a stand-in for every external tool."""
     for name in ("OBABEL", "VINA_PRIMARY", "VINA_FALLBACK"):
         monkeypatch.setattr(runner, name, sys.executable)
-    for name in ("SMINA", "FPOCKET", "REDUCE"):
+    monkeypatch.setattr(runner, "FPOCKET", sys.executable)
+    for name in ("SMINA", "REDUCE"):
         monkeypatch.setattr(runner, name, None)
 
 
@@ -123,7 +124,6 @@ def test_bad_command_timeout_env_is_a_clean_usage_error(monkeypatch, capsys, cli
     (["--energy-range", "0"], "--energy-range must be > 0"),
     (["--vina-bin", "/nonexistent/vina"], "does not exist or is not executable"),
     (["--mw-max", "600"], "only apply to --library custom"),
-    (["--mw-ma", "600"], "only apply to --library custom"),  # abbreviation
     (["--library", "fda", "--logp-max", "4"], "only apply to --library custom"),
     (["--max-compounds", "5"], "--max-compounds only applies"),
     (["--library", "custom", "--mw-min", "600"], "--mw-min (600) must be"),
@@ -260,7 +260,7 @@ def test_run_manifest_on_success(cli, fake_tools, monkeypatch):
     assert obabel["version"].startswith("Python")
     with open(os.path.realpath(sys.executable), "rb") as f:
         assert obabel["sha256"] == hashlib.sha256(f.read()).hexdigest()
-    assert "vina" in m["tools"] and m["tools"]["fpocket"]["path"] is None
+    assert "vina" in m["tools"] and m["tools"]["fpocket"]["path"] == sys.executable
 
 
 def test_run_manifest_and_exit_code_on_failure(cli, fake_tools, monkeypatch, caplog):
@@ -401,3 +401,296 @@ def test_deprecated_qvina_env_enables_the_option(cli, fake_tools, monkeypatch, c
     # With QuickVina missing, the (deprecated) request is validated like the option.
     assert _exit_code(argv) == runner.EXIT_USAGE
     assert "deprecated; use --qvina-fallback" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: validation of values and combinations (exit 2, nothing written)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("extra, message", [
+    # finite numbers only (argparse's float() accepts nan and inf)
+    (["--ph", "nan"], "--ph must be a finite number"),
+    (["--padding", "nan"], "--padding must be a finite number"),
+    (["--padding", "inf"], "--padding must be a finite number"),
+    (["--energy-range", "inf"], "--energy-range must be a finite number"),
+    (["--min-valid-affinity", "nan"], "--min-valid-affinity must be a finite number"),
+    (["--rmsd-threshold", "nan"], "--rmsd-threshold must be a finite number"),
+    (["--water-distance", "inf"], "--water-distance must be a finite number"),
+    (["--max-failure-fraction", "nan"], "--max-failure-fraction must be a finite number"),
+    (["--library", "custom", "--mw-max", "inf"], "--mw-max must be a finite number"),
+    (["--library", "custom", "--mw-min", "nan"], "--mw-min must be a finite number"),
+    (["--library", "custom", "--logp-max", "nan"], "--logp-max must be a finite number"),
+    (["--grid-center", "nan,0,0"], "finite"),
+    (["--grid-size", "20,inf,20"], "finite"),
+    # seed: Vina/QuickVina/SMINA take a 32-bit int, Vina treats 0 as random,
+    # RDKit rejects negative seeds
+    (["--seed", str(2**31)], "--seed must be between 1 and 2147483647"),
+    (["--seed", "99999999999999"], "--seed must be between 1 and 2147483647"),
+    (["--seed", "0"], "--seed must be between 1 and 2147483647"),
+    (["--seed", "-1"], "--seed must be between 1 and 2147483647"),
+    (["--ph", "14.5"], "--ph must be between 0 and 14"),
+    (["--ph", "-1"], "--ph must be between 0 and 14"),
+    (["--min-valid-affinity", "-20"], "--min-valid-affinity must be > -20"),
+    (["--min-valid-affinity", "-100"], "--min-valid-affinity must be > -20"),
+    # options that would be accepted and ignored
+    (["--auto-flexible", "3", "--flexible-residues", "A5"], "cannot be combined"),
+    (["--flexible-residues", ",,"], "--flexible-residues lists no residue"),
+    (["--flexible-residues", "A5,45-"], "invalid residue key(s) 45-"),
+    (["--pockets", "1", "--no-fpocket"], "--pockets cannot be combined with --no-fpocket"),
+    (["--pockets", "1", "--grid-center", "1,2,3", "--grid-size", "20,20,20"],
+     "--pockets cannot be combined with --grid-center and --grid-size"),
+    (["--grid-center-frame", "docking"], "--grid-center-frame only applies to --grid-center"),
+    (["--grid-center", ""], "three comma-separated values"),
+    # --pockets syntax and --chain against the receptor (before ligand prep)
+    (["--pockets", "abc"], "--pockets must list fpocket pocket numbers"),
+    (["--pockets", "0"], "--pockets must list fpocket pocket numbers"),
+    (["--pockets", ","], "--pockets must list fpocket pocket numbers"),
+    (["--pockets", "1,x"], "--pockets must list fpocket pocket numbers"),
+    (["--chain", "Z"], "Invalid chain(s): Z. Available chains: A, B"),
+    (["--chain", "a"], "did you mean 'a' -> 'A'"),
+    # flexible residues must exist in the docked chain(s)
+    (["--flexible-residues", "A9999"], "no such residue in the docked chain(s) A"),
+    (["--flexible-residues", "A5,B80"], "docked chain(s) A of"),  # first chain only
+    (["--chain", "B", "--flexible-residues", "A5"], "no such residue in the docked chain(s) B"),
+])
+def test_review_invalid_options_exit_2(cli, fake_tools, capsys, extra, message):
+    argv, out = cli
+    assert _exit_code(argv + extra) == runner.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert message in err and "Traceback" not in err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("extra", [
+    ["--seed", "1"], ["--seed", str(2**31 - 1)], ["--ph", "0"], ["--ph", "14"],
+    ["--min-valid-affinity", "-19.5"], ["--pockets", "2,3"], ["--pockets", "auto"],
+    ["--chain", "all"], ["--chain", "A,B", "--flexible-residues", "A5,B80"],
+    ["--flexible-residues", " A5 , A6 "], ["--auto-flexible", "2"],
+    ["--grid-center", "1,2,3", "--grid-center-frame", "docking"],
+])
+def test_review_valid_options_accepted(cli, fake_tools, monkeypatch, extra):
+    monkeypatch.setattr(runner, "_run_pipeline", lambda args, state: runner.EXIT_OK)
+    argv, out = cli
+    runner.main(argv + extra)
+    assert _manifest(out)["status"] == "completed"
+
+
+def test_vs_seed_out_of_range_exit_2(cli, fake_tools, monkeypatch, capsys):
+    monkeypatch.setenv("VS_SEED", "0")
+    argv, out = cli
+    assert _exit_code(argv) == runner.EXIT_USAGE
+    assert "$VS_SEED must be between 1 and" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_long_option_abbreviations_are_rejected(cli, fake_tools, capsys):
+    """entry.sh must see the same -r/-l/-o/--library as the runner, so
+    abbreviated long options (--lig, --out, --mw-ma) are not accepted."""
+    argv, out = cli
+    assert _exit_code(argv + ["--mw-ma", "600"]) == runner.EXIT_USAGE
+    assert "unrecognized arguments: --mw-ma" in capsys.readouterr().err
+    receptor, ligands = argv[1], argv[3]
+    assert _exit_code(["--rec", receptor, "--lig", ligands, "--out", str(out)]) \
+        == runner.EXIT_USAGE
+    assert "required" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_attached_short_option_values(cli, fake_tools, monkeypatch):
+    monkeypatch.setattr(runner, "_run_pipeline", lambda args, state: runner.EXIT_OK)
+    argv, out = cli
+    runner.main(["-r" + argv[1], "-l" + argv[3], "-o" + str(out)])
+    assert _manifest(out)["args"]["ligands"] == argv[3]
+
+
+# ---------------------------------------------------------------------------
+# -o validation (exit 2 with a message, no traceback)
+# ---------------------------------------------------------------------------
+
+def test_output_that_is_a_file_exit_2(cli, fake_tools, capsys, tmp_path):
+    argv, _ = cli
+    afile = tmp_path / "afile"
+    afile.write_text("x")
+    assert _exit_code(argv[:4] + ["-o", str(afile)]) == runner.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "exists and is not a directory" in err and "Traceback" not in err
+    assert _exit_code(argv[:4] + ["-o", str(afile / "sub")]) == runner.EXIT_USAGE
+    assert "cannot be created" in capsys.readouterr().err
+    assert afile.read_text() == "x"
+
+
+def test_empty_output_exit_2(cli, fake_tools, capsys):
+    argv, _ = cli
+    assert _exit_code(argv[:4] + ["-o", ""]) == runner.EXIT_USAGE
+    assert "-o/--output must not be empty" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
+def test_unwritable_output_parent_exit_2(cli, fake_tools, capsys, tmp_path):
+    argv, _ = cli
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        assert _exit_code(argv[:4] + ["-o", str(locked / "out")]) == runner.EXIT_USAGE
+        assert "is not writable" in capsys.readouterr().err
+    finally:
+        locked.chmod(0o700)
+
+
+def test_output_creation_failure_after_validation_exit_2(cli, fake_tools, monkeypatch, caplog):
+    def fail(path, exist_ok=False):
+        raise PermissionError(13, "Permission denied", path)
+
+    monkeypatch.setattr(runner.os, "makedirs", fail)
+    argv, out = cli
+    with caplog.at_level(logging.ERROR):
+        assert _exit_code(argv) == runner.EXIT_USAGE
+    assert "-o/--output: cannot create" in caplog.text
+
+
+def test_tool_probe_failure_is_a_clean_pipeline_error(cli, fake_tools, monkeypatch, caplog):
+    def boom(args):
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(runner, "_probe_tools", boom)
+    argv, out = cli
+    with caplog.at_level(logging.ERROR):
+        assert _exit_code(argv) == runner.EXIT_FAILURE
+    m = _manifest(out)
+    assert m["status"] == "failed" and "probe exploded" in m["error"]
+
+
+# ---------------------------------------------------------------------------
+# fpocket: needed only when pockets are detected; checked up front
+# ---------------------------------------------------------------------------
+
+def test_missing_fpocket_exit_2_before_any_work(cli, fake_tools, monkeypatch, caplog):
+    monkeypatch.setattr(runner, "FPOCKET", None)
+    argv, out = cli
+    with caplog.at_level(logging.ERROR):
+        assert _exit_code(argv) == runner.EXIT_USAGE
+    assert "Required tool(s) not found in PATH: fpocket" in caplog.text
+    assert "--no-fpocket" in caplog.text
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("extra", [
+    ["--no-fpocket"], ["--grid-center", "1,2,3", "--grid-size", "20,20,20"]])
+def test_fpocket_not_needed_without_pocket_detection(cli, fake_tools, monkeypatch, extra):
+    monkeypatch.setattr(runner, "FPOCKET", None)
+    monkeypatch.setattr(runner, "_run_pipeline", lambda args, state: runner.EXIT_OK)
+    argv, out = cli
+    runner.main(argv + extra)
+    m = _manifest(out)
+    assert m["status"] == "completed" and "fpocket" not in m["tools"]
+
+
+def test_fpocket_still_needed_with_only_one_explicit_triplet(cli, fake_tools, monkeypatch):
+    monkeypatch.setattr(runner, "FPOCKET", None)
+    argv, _ = cli
+    assert _exit_code(argv + ["--grid-center", "1,2,3"]) == runner.EXIT_USAGE
+
+
+# ---------------------------------------------------------------------------
+# run_manifest.json is strict JSON
+# ---------------------------------------------------------------------------
+
+def _strict_json(text):
+    def reject(constant):
+        raise ValueError(f"non-standard JSON constant {constant}")
+    return json.loads(text, parse_constant=reject)
+
+
+def test_run_manifest_is_strict_json(tmp_path):
+    path = tmp_path / "run_manifest.json"
+    runner.write_run_manifest(str(path), {
+        "a": float("nan"), "b": [float("inf"), 1.5], "c": {"d": float("-inf")}})
+    m = _strict_json(path.read_text())
+    assert m == {"a": "nan", "b": ["inf", 1.5], "c": {"d": "-inf"}}
+
+
+def test_run_manifest_of_a_run_is_strict_json(cli, fake_tools, monkeypatch):
+    def pipeline(args, state):
+        state["consensus"] = {"rho": float("nan"), "n": 1}
+        return runner.EXIT_OK
+
+    monkeypatch.setattr(runner, "_run_pipeline", pipeline)
+    argv, out = cli
+    runner.main(argv)
+    m = _strict_json((out / "run_manifest.json").read_text())
+    assert m["consensus"]["rho"] == "nan"
+
+
+# ---------------------------------------------------------------------------
+# Outputs of an earlier run in the same -o
+# ---------------------------------------------------------------------------
+
+def test_stale_derived_outputs_removed_but_docking_results_kept(cli, fake_tools, monkeypatch,
+                                                                caplog):
+    from vspipeline import outputs
+    argv, out = cli
+    out.mkdir()
+    for name in outputs.DERIVED_OUTPUTS:
+        if name == outputs.FPOCKET_OUT_DIR:
+            (out / name / "pockets").mkdir(parents=True)
+        else:
+            (out / name).write_text("stale")
+    (out / "docked").mkdir()
+    (out / "docked" / "x_out.pdbqt").write_text("pose")
+    (out / ".docking_checkpoint.json").write_text("{}")
+    (out / "ligand_metadata.json").write_text("{}")
+    seen = {}
+
+    def pipeline(args, state):
+        seen["left"] = sorted(n for n in outputs.DERIVED_OUTPUTS if (out / n).exists())
+        return runner.EXIT_OK
+
+    monkeypatch.setattr(runner, "_run_pipeline", pipeline)
+    with caplog.at_level(logging.INFO):
+        runner.main(argv + ["--no-html-report"])
+    assert seen["left"] == []
+    assert "Removed outputs of an earlier run" in caplog.text
+    assert outputs.HTML_REPORT in caplog.text
+    assert (out / "docked" / "x_out.pdbqt").read_text() == "pose"
+    assert (out / ".docking_checkpoint.json").exists()
+    assert (out / "run_manifest.json").exists()
+
+
+def test_derived_outputs_are_defined_once():
+    from vspipeline import outputs
+    for name in ("results_report.html", "pose_clusters.json", "consensus_ranking.csv",
+                 "consensus_summary.json", "pocket_summary.csv", "ranking.csv"):
+        assert name in outputs.DERIVED_OUTPUTS
+    for kept in (outputs.DOCKED_DIR, outputs.RUN_MANIFEST_JSON, outputs.LIGANDS_DIR):
+        assert kept not in outputs.DERIVED_OUTPUTS
+
+
+# ---------------------------------------------------------------------------
+# Messages
+# ---------------------------------------------------------------------------
+
+def test_ctrl_c_during_smina_only_docking(cli, fake_tools, monkeypatch, caplog):
+    monkeypatch.setattr(runner, "SMINA", sys.executable)
+
+    def interrupted(args, state):
+        state["docking_started"] = True
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner, "_run_pipeline", interrupted)
+    argv, out = cli
+    with caplog.at_level(logging.WARNING):
+        assert _exit_code(argv + ["--smina-only"]) == runner.EXIT_INTERRUPTED
+    assert "interrupted during SMINA docking" in caplog.text
+    assert "before docking started" not in caplog.text
+
+
+@pytest.mark.parametrize("extra", [["--vina-bin", sys.executable], ["--smina-only"]])
+def test_qvina_env_conflict_names_the_variable(cli, fake_tools, monkeypatch, capsys, extra):
+    monkeypatch.setenv("VS_ENABLE_QVINA_FALLBACK", "1")
+    monkeypatch.setattr(runner, "QVINA", sys.executable)
+    argv, _ = cli
+    assert _exit_code(argv + extra) == runner.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "$VS_ENABLE_QVINA_FALLBACK=1 in the environment" in err
+    assert "cannot be combined" in err

@@ -353,3 +353,117 @@ class TestNglIntegrity:
         from vspipeline import report
         for name in ("report.css", "report.js", "viewer.html"):
             assert os.path.isfile(os.path.join(report.TEMPLATE_DIR, name))
+
+
+# ---------------------------------------------------------------------------
+# Reports without any in-window score; stale reports; viewer navigation
+# ---------------------------------------------------------------------------
+
+def _failed_rows():
+    return [{"Ligand": "ligA", "Binding_Affinity": "FAILED", "Status": "FAILED"},
+            {"Ligand": "ligB", "Binding_Affinity": "-0.5", "Status": "OUT_OF_WINDOW"}]
+
+
+def test_report_without_scores_shows_na_and_no_viewer_link(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "_fetch_ngljs", lambda: b"/* fake ngl */")
+    outdir = str(tmp_path)
+    csv_path = _ranking_csv(outdir, _failed_rows())
+    report = os.path.join(outdir, "report.html")
+    assert runner.generate_html_report(csv_path, os.path.join(outdir, "docked"), report)
+    content = open(report, encoding="utf-8").read()
+    assert '<div class="stat-value">n/a</div>' in content
+    assert "0.00" not in content  # no invented best/average affinity
+    assert 'href="#viewer"' not in content and 'id="viewer"' not in content
+
+
+def test_report_with_scores_links_the_viewer(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "_fetch_ngljs", lambda: b"/* fake ngl */")
+    outdir = str(tmp_path)
+    os.makedirs(os.path.join(outdir, "docked"))
+    _write(os.path.join(outdir, "docked", "ligA_out.pdbqt"), _pose_pdbqt("ligA"))
+    csv_path = _ranking_csv(outdir, [
+        {"Ligand": "ligA", "Binding_Affinity": "-7.25", "Status": "OK",
+         "Docked_File": "docked/ligA_out.pdbqt"}])
+    report = os.path.join(outdir, "report.html")
+    assert runner.generate_html_report(csv_path, os.path.join(outdir, "docked"), report)
+    content = open(report, encoding="utf-8").read()
+    assert 'href="#viewer"' in content and 'id="viewer"' in content
+    assert '<div class="stat-value">-7.25</div>' in content
+
+
+def test_report_early_return_removes_stale_report(tmp_path):
+    outdir = str(tmp_path)
+    report = _write(os.path.join(outdir, "report.html"), "stale report")
+    csv_path = _ranking_csv(outdir, [])  # header only: nothing to report
+    assert runner.generate_html_report(csv_path, os.path.join(outdir, "docked"),
+                                       report) is False
+    assert not os.path.exists(report)
+    _write(report, "stale report")
+    assert runner.generate_html_report(os.path.join(outdir, "missing.csv"),
+                                       os.path.join(outdir, "docked"), report) is False
+    assert not os.path.exists(report)
+
+
+_VIEWER_DOM_STUB = r"""
+function el(id) {
+  return { id: id, textContent: "", style: {}, checked: true,
+           addEventListener: function () {}, scrollIntoView: function () {},
+           appendChild: function (o) { this.options.push(o); } };
+}
+var elements = {};
+["viewer-select", "viewer-message", "viewer-container", "viewer-log",
+ "viewer-error", "vs-box"].forEach(function (id) { elements[id] = el(id); });
+var sel = elements["viewer-select"];
+sel.options = [];
+sel.selectedIndex = -1;
+Object.defineProperty(sel, "value", {
+  get: function () { return this.selectedIndex >= 0 ? this.options[this.selectedIndex].value : ""; },
+  set: function (v) { for (var i = 0; i < this.options.length; i++)
+                        if (this.options[i].value === v) this.selectedIndex = i; } });
+var loadHandlers = [];
+var document = { getElementById: function (id) { return elements[id]; },
+                 createElement: function () { return {}; } };
+var window = { addEventListener: function (ev, f) { if (ev === "load") loadHandlers.push(f); } };
+"""
+
+_VIEWER_DOM_CHECK = r"""
+loadHandlers.forEach(function (f) { f(); });
+var msg = elements["viewer-message"];
+var shown = [];
+// NGL is not defined here: every (re)load of a hit ends with this message.
+function clicked(name) { msg.textContent = ""; window.selectHit(name); shown.push([sel.value, msg.textContent]); }
+clicked("ligB");      // a top hit: selected and (re)loaded
+clicked("outsider");  // not in the viewer: no reload of the current hit
+console.log(JSON.stringify(shown));
+"""
+
+
+def test_viewer_click_on_ligand_outside_top_hits_does_not_reload_current(tmp_path):
+    """Clicking a scatter point of a ligand that is not in the viewer (outside
+    --top-n) must not silently re-show the currently selected hit."""
+    import json
+    import re
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node") or shutil.which("nodejs")
+    if node is None:
+        pytest.skip("node not available")
+    template = os.path.join(os.path.dirname(runner.__file__), "vspipeline", "templates",
+                            "viewer.html")
+    text = open(template, encoding="utf-8").read()
+    script = re.findall(r"<script>(.*?)</script>", text, re.S)[-1]
+    data = {"receptor": "", "gridBox": None,
+            "hits": [{"name": "ligA", "affinity": -8.0, "pose": "ATOM"},
+                     {"name": "ligB", "affinity": -7.0, "pose": "ATOM"}]}
+    script = script.replace("__VS_DATA_JSON__", json.dumps(data))
+    js = tmp_path / "viewer_test.js"
+    js.write_text(_VIEWER_DOM_STUB + script + _VIEWER_DOM_CHECK, encoding="utf-8")
+    proc = subprocess.run([node, str(js)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    shown = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert shown[0] == ["ligB", "NGL viewer failed to load."]
+    assert shown[1][0] == "ligB"
+    assert "outsider is not among the top hits" in shown[1][1]

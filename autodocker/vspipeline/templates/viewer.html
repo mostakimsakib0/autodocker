@@ -124,9 +124,20 @@
         window.selectHit = function (name) {
             var sel = document.getElementById("viewer-select");
             if (!sel) return;
-            for (var i = 0; i < sel.options.length; i++) { if (sel.options[i].value === name) { sel.selectedIndex = i; break; } }
+            var found = -1;
+            for (var i = 0; i < sel.options.length; i++) { if (sel.options[i].value === name) { found = i; break; } }
+            var container = document.getElementById("viewer-container");
+            if (found < 0) {
+                /* Only the top hits are in the viewer: say so instead of
+                   reloading the ligand that is currently shown. */
+                document.getElementById("viewer-message").textContent =
+                    name + " is not among the top hits shown in the 3D viewer (see --top-n).";
+                container.scrollIntoView({ behavior: "smooth", block: "center" });
+                return;
+            }
+            sel.selectedIndex = found;
             vsShowHit();
-            document.getElementById("viewer-container").scrollIntoView({ behavior: "smooth", block: "center" });
+            container.scrollIntoView({ behavior: "smooth", block: "center" });
         };
 
         window.addEventListener("resize", function () { if (stage && stage.viewer) stage.viewer.requestResize(); });

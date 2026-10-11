@@ -85,7 +85,16 @@ Results are written under `/workspace/output/`:
 - `docked/*_out.pdbqt` — docked poses; `*_vina.log` — per-ligand logs whose
   first line is the exact command
 - `consensus_ranking.csv`, `consensus_summary.json` — with `--consensus`
+- `pose_clusters.json` — with `--cluster-poses`
 - `frame_offset.txt` — translation back to the input PDB's coordinates (see below)
+
+Rerunning into the same output directory first removes the derived outputs
+of the earlier run (the files above, `grid.conf`, `flex.pdbqt`/`rigid.pdbqt`
+and fpocket's output; listed in `autodocker/vspipeline/outputs.py`), so
+every file present belongs to the latest run; for example
+`results_report.html` is gone after a `--no-html-report` rerun, and
+`pocket_summary.csv` after a run with an explicit box. Docked poses and the
+checkpoint (`docked/`, `.docking_checkpoint*.json`) are kept for resuming.
 
 Hydrogens present in the input receptor are removed and the receptor is
 protonated at pH 7.4 (`--ph`); it is centered at the origin
@@ -114,27 +123,27 @@ Direct use (inside the image or with tools on `PATH`):
 | `--max-compounds` | PubChem compounds to prepare | `20` |
 | `--no-lipinski` | Skip the Lipinski filter (SDF/PubChem inputs; zero violations allowed). `--no-admet` is a deprecated alias | filter on |
 | `--no-minimize` | Skip MMFF94 minimization (SDF/PubChem ligands only) | off |
-| `--chain` | Chains to keep, e.g. `A`, `A,B`, or `all` (case-sensitive) | first chain, with a warning |
-| `--ph` | pH for receptor hydrogens (Open Babel `-p`) | `7.4` |
-| `--pockets` | fpocket pocket numbers, e.g. `1` or `2,3` | best score |
+| `--chain` | Chains to keep, e.g. `A`, `A,B`, or `all` (case-sensitive; checked against the receptor before any ligand is prepared) | first chain, with a warning |
+| `--ph` | pH for receptor hydrogens (Open Babel `-p`), 0 to 14 | `7.4` |
+| `--pockets` | fpocket pocket numbers, e.g. `1` or `2,3` (not with `--no-fpocket`, or with `--grid-center` and `--grid-size` together) | best score |
 | `--padding` | Box padding around the pocket (Å) | `6.0` |
 | `--no-fpocket` | Skip fpocket; box around the whole receptor | off |
-| `--grid-center X,Y,Z` | Explicit box center, input-PDB coordinates | auto |
-| `--grid-center-frame` | `input` or `docking` (≤1.1.4 used `docking`) | `input` |
+| `--grid-center X,Y,Z` | Explicit box center, input-PDB coordinates; with `--grid-size` too, fpocket is not run (nor required) | auto |
+| `--grid-center-frame` | `input` or `docking` (≤1.1.4 used `docking`); needs `--grid-center` | `input` |
 | `--grid-size SX,SY,SZ` | Explicit box size (Å) | auto |
 | `--keep-waters`, `--detect-metals`, `--detect-cofactors` | Keep waters near the site, metal ions, known cofactors | off |
-| `--flexible-residues` | Flexible side chains, e.g. `A45,A78` | none |
-| `--auto-flexible N` | The N residues closest to the box center become flexible | none |
+| `--flexible-residues` | Flexible side chains, e.g. `A45,A78`; each must exist in the docked chains (else exit 2) and be buildable (else exit 1) | none |
+| `--auto-flexible N` | The N residues closest to the box center become flexible; if none can be built, docking is rigid (warning). Not with `--flexible-residues` | none |
 | `-p, --processes` | Parallel docking processes (`0`/`-1` = all CPUs, `-N` = CPUs ÷ N) | `1` |
 | `--threads` | CPU threads per docking process (`--cpu`) | CPUs ÷ processes |
 | `--exhaustiveness` | Vina exhaustiveness (≥ 1) | `8` |
 | `--binding-modes`, `--energy-range` | Vina output modes and energy range | `9`, `3.0` |
-| `--seed` | Random seed | `$VS_SEED` or `42` |
-| `--min-valid-affinity` | Scores ≥ this (or < −20) are reported as `OUT_OF_WINDOW` | `-1.0` |
+| `--seed` | Random seed, 1 to 2147483647 | `$VS_SEED` or `42` |
+| `--min-valid-affinity` | Scores ≥ this (or < −20) are reported as `OUT_OF_WINDOW`; must be > −20 | `-1.0` |
 | `--vina-bin`, `--vina-extra` | Custom docking binary; extra engine arguments | auto, none |
 | `--qvina-fallback` | Re-dock a ligand with QuickVina 2 when Vina fails on it (the `Engine` column shows which engine scored each ligand) | off |
 | `--timeout` | Per-command timeout (s) | `$VS_COMMAND_TIMEOUT` or `900` |
-| `--max-failure-fraction` | Exit 3 if more than this fraction of ligands fail | `0.5` |
+| `--max-failure-fraction` | Exit 3 if more than this fraction of ligands fail (also when all fail; `1.0` never fails) | `0.5` |
 | `--no-resume` | Ignore the checkpoint (it is also discarded when receptor, box, parameters or engine binaries change) | off |
 | `--consensus` | Rescore Vina's top pose with SMINA's Vinardo function; writes `consensus_ranking.csv` and `consensus_summary.json` (needs SMINA) | off |
 | `--smina-only` | Dock with SMINA instead of Vina (1 mode, no resume) | off |
@@ -144,12 +153,15 @@ Direct use (inside the image or with tools on `PATH`):
 | `--version` | Print version and exit | — |
 
 `python3 autodocker/runner.py --help` lists every option with its default.
+Long options must be written in full (`--ligands`, not `--lig`); numeric
+options must be finite numbers. Settings are logged in `run_manifest.json`
+(strict JSON) with the flexible residues actually docked.
 
 ## Environment variables
 
 | Variable | Effect | Default |
 |---|---|---|
-| `INPUT` | Single-file ligand input (entry.sh) | unset |
+| `INPUT` | Single-file ligand input (entry.sh); ignored, with a warning, by `--library fda/custom` | unset |
 | `LIGS` | Ligand directory (entry.sh) | `/workspace/ligs` |
 | `PDB` | Protein path (entry.sh) | `/workspace/protein.pdb` |
 | `CHAIN` | Chain selection (`A`, `A,B`, `all`) | first chain |
@@ -164,6 +176,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `PADDING` | Box padding (Å) | `6` |
 | `POCKETS` | fpocket pocket number(s) | best |
 | `RESUME` | Set `0` to disable checkpoint resume | `1` |
+| `OMP_NUM_THREADS` | Recorded in `run_manifest.json` (Open Babel always runs single-threaded) | unset |
 | `VS_SEED` | RNG seed (an explicit `--seed` takes precedence) | `42` |
 | `PUBCHEM_REST` | PubChem REST base (mirrors) | official |
 
@@ -173,12 +186,12 @@ Direct use (inside the image or with tools on `PATH`):
 |---|---|
 | 0 | Screen completed |
 | 1 | Pipeline error |
-| 2 | Invalid options or environment, or a required tool is missing |
-| 3 | More ligands failed than `--max-failure-fraction` allows (all outputs are still written) |
+| 2 | Invalid options, input files or environment, or a required tool is missing (also from the container's `entry.sh`, e.g. a missing protein or ligand folder) |
+| 3 | More ligands failed than `--max-failure-fraction` allows, including all of them (all outputs are still written) |
 | 130 | Interrupted |
 
 For a debug shell as root, run the image with `--root-shell` as the first
-argument.
+argument. `--help` and `--version` work without a workspace.
 
 ## Reproducibility
 

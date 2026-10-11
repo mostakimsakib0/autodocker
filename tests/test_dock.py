@@ -26,18 +26,23 @@ def test_dock_all_empty_ligands(tmp_path, charged_pdbqt):
     assert checkpoint.completed == {}
 
 
-def test_all_fail_raises_with_pointer(tmp_path, empty_pdbqt):
-    """Regression for C8: when every ligand fails, raise with a pointer to logs."""
+def test_all_fail_reports_failed_rows_with_pointer(tmp_path, empty_pdbqt, caplog):
+    """When every ligand fails, dock_all logs an error that points to the
+    logs and returns FAILED rows (the runner writes all outputs and exits 3,
+    see test_runner.py::test_all_ligands_failed_writes_outputs_and_exits_3)."""
     outdir = str(tmp_path / "out")
     os.makedirs(outdir, exist_ok=True)
     receptor = str(tmp_path / "rec.pdbqt")
     with open(receptor, "w", encoding="utf-8") as f:
         f.write("END\n")
-    with pytest.raises(RuntimeError, match="vina.log"):
-        runner.dock_all(
+    with caplog.at_level("ERROR"):
+        results, _checkpoint, metrics = runner.dock_all(
             receptor=receptor, ligands=[empty_pdbqt], grid_file=receptor,
             outdir=outdir, num_processes=1, resume=False,
             vina_params={"seed": 42})
+    assert results == [("empty", None)]
+    assert metrics["empty"]["status"] == "FAILED"
+    assert "All docking attempts failed" in caplog.text and "_vina.log" in caplog.text
 
 
 def test_dock_ligand_missing_ligand_file(tmp_path, charged_pdbqt):
