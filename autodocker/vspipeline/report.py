@@ -323,7 +323,7 @@ STRONG_BINDER_CUTOFF = -6.0  # "Good" or better
 
 # Status values of ranking.csv rows that carry no usable score
 # (OUT_OF_WINDOW rows have a score, but it is outside the accepted window and
-# is not ranked; REJECTED is the pre-1.2 name of OUT_OF_WINDOW).
+# is not ranked; REJECTED is the pre-2.0 name of OUT_OF_WINDOW).
 _UNSCORED_STATUS = ("FAILED", "REJECTED", "ERROR", "OUT_OF_WINDOW")
 # Status values of in-window results.
 _SCORED_STATUS = ("OK", "WEAK")

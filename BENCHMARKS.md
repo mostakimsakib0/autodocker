@@ -14,7 +14,7 @@ repository.
 > handling, top-1 RMSD alignment, success-rate denominators, timing
 > statistics). Numbers obtained with the 1.1.x scripts are withdrawn. Every
 > number on this page is a placeholder until the suite is rerun with
-> AutoDocker 1.2.0.
+> AutoDocker 2.0.0.
 
 Run the suite:
 
@@ -69,18 +69,18 @@ reason in `manifest.csv`.
 A complex is reused on resume only if its stored `params.json` matches the
 current docking parameters.
 
-**Results** (AutoDocker 1.2.0, Vina version as recorded in `summary.json`):
+**Results** (AutoDocker 2.0.0, Vina version as recorded in `summary.json`):
 
 | Metric | Value |
 |---|---|
-| Complexes sampled / built / attempted / evaluated | TBD (rerun with 1.2.0) |
-| Excluded complexes (with reasons) | TBD (rerun with 1.2.0) |
-| Top-1 success, over evaluated complexes | TBD (rerun with 1.2.0) |
-| Top-1 success, over attempted complexes (failures count as misses) | TBD (rerun with 1.2.0) |
-| Best-of-9 success, over evaluated / attempted | TBD (rerun with 1.2.0) |
-| Median top-1 RMSD | TBD (rerun with 1.2.0) |
-| Median best-of-9 RMSD | TBD (rerun with 1.2.0) |
-| Top-1 success with `--start-conformer crystal` (comparison) | TBD (rerun with 1.2.0) |
+| Complexes sampled / built / attempted / evaluated | TBD (rerun with 2.0.0) |
+| Excluded complexes (with reasons) | TBD (rerun with 2.0.0) |
+| Top-1 success, over evaluated complexes | TBD (rerun with 2.0.0) |
+| Top-1 success, over attempted complexes (failures count as misses) | TBD (rerun with 2.0.0) |
+| Best-of-9 success, over evaluated / attempted | TBD (rerun with 2.0.0) |
+| Median top-1 RMSD | TBD (rerun with 2.0.0) |
+| Median best-of-9 RMSD | TBD (rerun with 2.0.0) |
+| Top-1 success with `--start-conformer crystal` (comparison) | TBD (rerun with 2.0.0) |
 
 Files: `results.csv` (per complex: status, ranking.csv affinity, mode-1
 affinity, top-1/best RMSD, RMSD of every mode, reason for any exclusion) and
@@ -124,16 +124,16 @@ depends on input order):
 
 | Target | Family | N (failed act./dec.) | AUC (95 % CI) | EF1% (max) | EF5% (max) | BEDROC | p (M-W, one-sided) |
 |---|---|---|---|---|---|---|---|
-| akt1 | kinase | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
-| braf | kinase | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
-| cdk2 | kinase | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
-| egfr | kinase | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
-| fa10 | serine protease | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
-| hivpr | aspartic protease | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
-| andr | nuclear receptor | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
-| aldr | reductase | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
-| hmdh | reductase | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
-| aces | esterase | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
+| akt1 | kinase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
+| braf | kinase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
+| cdk2 | kinase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
+| egfr | kinase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
+| fa10 | serine protease | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
+| hivpr | aspartic protease | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
+| andr | nuclear receptor | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
+| aldr | reductase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
+| hmdh | reductase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
+| aces | esterase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
 
 Files: `enrichment.csv` (one row per target, all metrics and CIs),
 `<target>/metrics.csv` (ranked ligands incl. failures), `<target>/ranking.csv`
@@ -166,11 +166,11 @@ binary's `--version` is stored in `summary.json`.
 
 | Metric | Value |
 |---|---|
-| Complexes checked / passed | TBD (rerun with 1.2.0) |
-| Modes compared / matched | TBD (rerun with 1.2.0) |
-| ranking.csv equals raw mode 1 | TBD (rerun with 1.2.0) |
-| Output files byte-identical | TBD (rerun with 1.2.0) |
-| Vina binary and version | TBD (rerun with 1.2.0) |
+| Complexes checked / passed | TBD (rerun with 2.0.0) |
+| Modes compared / matched | TBD (rerun with 2.0.0) |
+| ranking.csv equals raw mode 1 | TBD (rerun with 2.0.0) |
+| Output files byte-identical | TBD (rerun with 2.0.0) |
+| Vina binary and version | TBD (rerun with 2.0.0) |
 
 Files: `parity.csv`, `summary.json`.
 
@@ -194,18 +194,18 @@ logical and physical core counts, CPU model, Vina and AutoDocker versions.
 
 | Size | p=1 | p=2 | p=4 | p=8 |
 |---|---|---|---|---|
-| 10 | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
-| 25 | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
-| 50 | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
-| 100 | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
+| 10 | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
+| 25 | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
+| 50 | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
+| 100 | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
 
 (each cell: median wall time [min–max], throughput, speedup vs. p=1)
 
 | Metric | Value |
 |---|---|
-| Fixed preparation time (median) | TBD (rerun with 1.2.0) |
-| Peak process-tree memory (RSS / PSS) | TBD (rerun with 1.2.0) |
-| Host (logical / physical cores, CPU model) | TBD (rerun with 1.2.0) |
+| Fixed preparation time (median) | TBD (rerun with 2.0.0) |
+| Peak process-tree memory (RSS / PSS) | TBD (rerun with 2.0.0) |
+| Host (logical / physical cores, CPU model) | TBD (rerun with 2.0.0) |
 
 Files: `runs.csv` (every run), `performance.csv` (per cell), `summary.json`.
 

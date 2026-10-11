@@ -232,7 +232,7 @@ class LipinskiFilter:
         return len(violations) == 0, violations
 
 
-# Deprecated alias: the filter was called "ADMET" before 1.2.0 although it
+# Deprecated alias: the filter was called "ADMET" before 2.0.0 although it
 # only applies the four Lipinski cut-offs.
 ADMETFilter = LipinskiFilter
 

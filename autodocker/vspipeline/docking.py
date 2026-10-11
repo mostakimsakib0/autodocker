@@ -117,7 +117,7 @@ class Status(str, Enum):
 
     @classmethod
     def of(cls, value, score: Optional[float] = None) -> "Status":
-        """Normalize a stored status string (including the pre-1.2
+        """Normalize a stored status string (including the pre-2.0
         ``REJECTED (x)`` form) to a Status; missing -> OK/FAILED by score."""
         if isinstance(value, cls):
             return value

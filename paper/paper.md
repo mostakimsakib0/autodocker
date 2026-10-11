@@ -93,7 +93,7 @@ capabilities that affect reproducibility or screening quality.
 | Fully scriptable / headless | ✔ | ✔ (binary only) | ✖ (GUI) | ✖ (GUI) | ✔ | ✔ |
 | Pocket detection → grid box (fpocket) | ✔ auto (+centroid fallback) | ✖ manual | ✖ manual box | ✔ | ✔ | ✖ |
 | Library source: local files + PubChem/FDA download | ✔ | ✖ | local only | local only | ZINC | ✖ |
-| ADMET (Lipinski) filter on library | ✔ | ✖ | ✖ | ✖ | ✖ | ✖ |
+| Lipinski rule-of-five filter on library | ✔ | ✖ | ✖ | ✖ | ✖ | ✖ |
 | Ligand minimization (MMFF94) | ✔ | ✖ | ✖ | ✖ | ✖ | ✖ |
 | Input validation (nonzero charges, atom records, fail-loud) | ✔ | ✖ | partial | partial | ✖ | ✖ |
 | Flexible-receptor docking | ✔ (manual + auto residues) | ✔ (manual) | ✖ | ✖ | ✖ | ✖ |
@@ -106,7 +106,7 @@ capabilities that affect reproducibility or screening quality.
 AutoDocker's differentiating value is not a new scoring function — it is a
 *complete, auditable workflow* on top of Vina: automatic pocket-based grid
 placement, chemical validity guards before docking, optional pharmacophore
-meta-features (ADMET, minimization, flexible residues, consensus scoring),
+meta-features (Lipinski filter, minimization, flexible residues, consensus rescoring),
 single-argument scriptability for HPC, and bundled validation so that
 claims are checkable.
 
@@ -119,31 +119,34 @@ arguments (both workflows are scored: `INPUT`/`LIGS`/`PDB` and
 pipeline in five phases:
 
 1. **Library preparation** — local SDF/MOL2/PDB/PDBQT input or PubChem
-   download (FDA-approved and custom libraries), optional Lipinski ADMET
-   filtering (Lipinski et al., 2001, @lipinski2001rule), optional MMFF94
+   download (FDA-approved and custom libraries), optional Lipinski
+   rule-of-five filter (Lipinski et al., 2001, @lipinski2001rule), optional MMFF94
    minimization (Halgren, 1996, @halgren1996mmff94), conversion to PDBQT
    with Open Babel (O'Boyle et al., 2011, @oboyle2011openbabel).
 2. **Protein preparation** — validate/reject undersized inputs, select
    chains, prepare the receptor PDBQT, detect pockets with fpocket
    (Le Guilloux et al., 2009, @leguilloux2009fpocket; Schmidtke et al.,
-   2010, @schmidtke2010fpocket) or fall back to a centroid grid.
+   2010, @schmidtke2010fpocket), or dock in a box around the whole
+   receptor when fpocket is explicitly skipped (`--no-fpocket`).
 3. **Input validation** — before any docking, the receptor and each ligand
-   must pass structural guards (atom records present, nonzero partial
-   charges, minimum size). Truncated or charge-less inputs are rejected
-   instead of being docked silently.
+   must pass structural guards (atom records present, minimum size).
+   Truncated inputs are rejected instead of being docked silently; all-zero
+   partial charges are reported as a warning (the Vina scoring function does
+   not use them).
 4. **Docking** — Vina (primary) with optional QuickVina 2 fallback, seeded
    for reproducibility, parallelized over ligands with
-   `multiprocessing`; optional flexible residues and consensus scoring via
-   SMINA.
+   `multiprocessing`; optional flexible residues, and optional consensus
+   rescoring of Vina's top pose with SMINA's Vinardo function.
 5. **Result analysis** — ranked CSV, top-hit and metrics text files, pocket
    summary, checkpoint file for resume, and an optional self-contained HTML
    report with affinity statistics, pose clustering, and an embedded NGL
    viewer.
 
-The Docker image is multi-stage: all scientific binaries (Vina, QuickVina
-2, Open Babel, fpocket) are compiled from pinned git submodules, which
-removes environment drift, and the runtime image is minimal and
-non-root. The design goal is that the entire pipeline — from raw receptor
+The Docker image is multi-stage: Vina, QuickVina 2, SMINA and fpocket are
+compiled from pinned git submodules, Open Babel and the other system
+packages come from a pinned Debian snapshot, and the runtime image is
+minimal and non-root. Images are published for linux/amd64 and
+linux/arm64. The design goal is that the entire pipeline — from raw receptor
 and ligand files to a ranked, citable hit list — is reproducible with a
 single command and a fixed seed.
 
@@ -152,22 +155,18 @@ single command and a fixed seed.
 AutoDocker ships reproducible benchmark scripts (`scripts/benchmark_*.py`;
 results in `BENCHMARKS.md`):
 
-1. **Re-docking power.** 40 PDBbind v2016 core-set complexes are re-docked;
-   26 dockable complexes give a **76.9%** top-1 success rate within 2 Å
-   RMSD of the crystal pose and **96.2%** when the best of the 9 predicted
-   modes is considered, matching or exceeding the Vina baseline.
+1. **Re-docking power.** PDBbind v2016 core-set complexes are re-docked
+   from seeded RDKit start conformers; top-1 and best-of-9 success rates
+   within 2 Å RMSD of the crystal pose: TBD (rerun pending).
 2. **Screening power.** DUD-E enrichment (Mysinger et al., 2012,
    @mysinger2012dude) on a curated, family-diverse target set (kinases
    akt1/braf, reductase aldr) with seeded sampling (50 actives + 100
    decoys per target), bootstrap 95% confidence intervals and one-sided
-   Mann-Whitney U tests. Reported mean AUC 0.74 (akt1 0.76, braf 0.74,
-   aldr 0.71), all three actives-vs-decoys comparisons significant
-   (p ≤ 1e-5); full per-target results in `BENCHMARKS.md`.
-   Benchmark scripts default to the full 10-target curated set; results
-   above are from the subset that completed on the legacy DUD-E
-   download server ([results][benchmark-results]).
-3. **No hidden corruption.** All affinity values reported by the pipeline
-   match the raw Vina scores bit-for-bit (mode-by-mode parity).
+   Mann-Whitney U tests. ROC AUC, EF and BEDROC per target: TBD (rerun
+   pending); full per-target results will be in `BENCHMARKS.md`.
+3. **No hidden corruption.** The parity benchmark re-runs the logged Vina
+   command and compares every mode, and `ranking.csv` against raw mode 1:
+   TBD (rerun pending).
 4. **Performance & scalability.** Wall-clock time, peak RSS, and throughput
    are measured as a function of ligand-library size and process count
    (`scripts/benchmark_performance.py`, see `BENCHMARKS.md`).

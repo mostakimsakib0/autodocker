@@ -34,7 +34,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-_FALLBACK_VERSION = "1.1.5"
+_FALLBACK_VERSION = "2.0.0"
 
 
 def _read_version(base_dir: Optional[str] = None) -> str:

@@ -86,7 +86,7 @@ with rotatable bonds, docked twice with `-p 1` and once with `-p 2`.
 Pin the pipeline version in your own records:
 
 ```bash
-python3 autodocker/runner.py --version   # e.g. AutoDocker 1.1.5
+python3 autodocker/runner.py --version   # e.g. AutoDocker 2.0.0
 ```
 
 Container images are tagged by git tag and commit SHA
