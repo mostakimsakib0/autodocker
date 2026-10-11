@@ -1,6 +1,12 @@
 # Reproducibility pins (override with --build-arg only on purpose):
-#  - Base images are pinned by multi-arch index digest; the tag is kept for
-#    readability. Digests are those the v1.1.5 image was built from.
+#  - Base images are pinned by multi-arch index digest (each index covers
+#    linux/amd64 and linux/arm64); the tag is kept for readability.
+#
+# Architectures: linux/amd64 and linux/arm64, each built natively (see
+# .github/workflows/publish.yml). Floating-point code is compiled with
+# -ffp-contract=off (AD_FPFLAGS) on both, so the compiler never fuses
+# multiply-adds; GCC does so by default on arm64 but cannot on baseline
+# x86-64, and the fusion changes rounding and hence scores.
 #  - Debian packages (toolchain, Boost, Open Babel, runtime libraries) come
 #    from snapshot.debian.org at a fixed timestamp, so every build resolves the
 #    exact same package versions. Old snapshots are never removed, unlike
@@ -27,6 +33,8 @@ FROM ${DEBIAN_IMAGE} AS builder
 
 ARG DEBIAN_SNAPSHOT
 ENV DEBIAN_FRONTEND=noninteractive
+# Passed explicitly to every native build below (see header).
+ENV AD_FPFLAGS="-ffp-contract=off"
 COPY scripts/apt.sh /scripts/apt.sh
 COPY scripts/shlib.sh /scripts/shlib.sh
 COPY scripts/patch.sh /scripts/patch.sh
@@ -55,7 +63,7 @@ FROM builder AS vina_builder
 WORKDIR /src
 COPY tools/autodock-vina ./autodock-vina
 RUN /scripts/apt.sh dev autodock-vina/deps
-RUN make -j"$(nproc)" -C autodock-vina/repo/build/linux/release
+RUN make -j"$(nproc)" -C autodock-vina/repo/build/linux/release CFLAGS="$AD_FPFLAGS"
 RUN strip autodock-vina/repo/build/linux/release/vina
 
 # ============================================================
@@ -66,7 +74,8 @@ FROM builder AS smina_builder
 WORKDIR /src
 COPY tools/smina ./smina
 RUN /scripts/apt.sh dev smina/deps
-RUN cmake -S smina/repo -B smina/build
+RUN cmake -S smina/repo -B smina/build \
+	-DCMAKE_C_FLAGS="$AD_FPFLAGS" -DCMAKE_CXX_FLAGS="$AD_FPFLAGS"
 RUN make -j"$(nproc)" -C smina/build
 RUN strip smina/build/fromsmina smina/build/tosmina smina/build/smina
 RUN /scripts/shlib.sh boost smina/build/fromsmina smina/build/tosmina smina/build/smina > deps
@@ -78,7 +87,7 @@ FROM builder AS qvina_builder
 WORKDIR /src
 COPY tools/qvina ./qvina
 RUN /scripts/apt.sh dev qvina/deps
-RUN make -j"$(nproc)" -C qvina/repo/build/linux/release
+RUN make -j"$(nproc)" -C qvina/repo/build/linux/release CFLAGS="$AD_FPFLAGS"
 RUN <<EOF
 set -eu
 strip qvina/repo/build/linux/release/vina
@@ -105,8 +114,38 @@ WORKDIR /src
 COPY tools/fpocket ./fpocket
 RUN /scripts/patch.sh fpocket
 RUN /scripts/apt.sh dev fpocket/deps
-RUN make -j"$(nproc)" -C fpocket/repo CXX=g++
-RUN strip fpocket/repo/bin/*
+# fpocket links VMD's prebuilt libmolfile_plugin.a, shipped only for
+# LINUXAMD64. On arm64 a stub (tools/fpocket/molfile_stub.c) stands in: the
+# plugins serve only mmCIF/topology/trajectory input, never the PDB in/out
+# AutoDocker uses, and any plugin use exits with a clear error.
+RUN <<EOF
+set -eu
+case "$(uname -m)" in
+	x86_64)
+		arch=LINUXAMD64
+		;;
+	aarch64)
+		arch=LINUXARM64
+		dir="fpocket/repo/plugins/$arch/molfile"
+		mkdir -p "$dir"
+		cp fpocket/repo/plugins/LINUXAMD64/molfile/libmolfile_plugin.h "$dir/"
+		# shellcheck disable=SC2086
+		gcc -O2 $AD_FPFLAGS -I fpocket/repo/plugins/include \
+			-c fpocket/molfile_stub.c -o "$dir/molfile_stub.o"
+		ar rcs "$dir/libmolfile_plugin.a" "$dir/molfile_stub.o"
+		rm "$dir/molfile_stub.o"
+		;;
+	*)
+		echo "unsupported build architecture: $(uname -m)" >&2
+		exit 1
+		;;
+esac
+make -j"$(nproc)" -C fpocket/repo CXX=g++ ARCH="$arch" \
+	CC="gcc $AD_FPFLAGS" CCQHULL="gcc $AD_FPFLAGS"
+strip fpocket/repo/bin/*
+mkdir -p /out/molfile
+cp -a "fpocket/repo/plugins/$arch/molfile/." /out/molfile/
+EOF
 
 # ============================================================
 # Stage 1 — Build Rootless Mode ACL Manager
@@ -197,7 +236,7 @@ COPY --from=fpocket_builder \
     /src/fpocket/repo/bin/tpocket \
     /usr/local/bin/
 COPY --from=fpocket_builder \
-    /src/fpocket/repo/plugins/LINUXAMD64/molfile/ \
+    /out/molfile/ \
     /usr/local/lib/
 
 COPY --from=ngl_builder \

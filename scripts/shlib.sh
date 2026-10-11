@@ -33,4 +33,6 @@ resolved="$(printf '%s\n' "$libs" | xargs realpath -e)"
 mapfile -t paths <<< "$resolved"
 
 owners="$(dpkg-query -S "${paths[@]}")"
-printf '%s\n' "$owners" | sed -E 's/: .+$//' | sort -u | sed 's/^/run /'
+# "pkg:arch: /path" -> "pkg": drop the path and the architecture qualifier
+# so the list is the same on every (native) build architecture.
+printf '%s\n' "$owners" | sed -E -e 's/: .+$//' -e 's/:[a-z0-9]+$//' | sort -u | sed 's/^/run /'
