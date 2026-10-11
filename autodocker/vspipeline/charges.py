@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """PDBQT charge inspection and Gasteiger charge assignment.
 
-Split out of runner.py. Cross-module references (run_obabel) go through the
-``runner`` namespace at call time so the monkeypatch surface stays unchanged.
-
 Note: the Vina, Vinardo and default SMINA scoring functions do not use
 partial charges, so all-zero charges are reported as a warning by the docking
 step, not treated as a failure.
@@ -12,9 +9,8 @@ import logging
 import os
 from typing import List, Optional, Tuple
 
-# The runner module owns the tool-path globals; attributes are only accessed
-# at call time, so binding the partially-initialized module is fine.
-import runner  # noqa: E402
+from vspipeline import utils
+from vspipeline.hydrogens import run_obabel_deterministic
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +49,7 @@ def _pdbqt_has_nonzero_charges(pdbqt_file: str) -> bool:
         return False
 
 
-# Backwards-compatible name (re-exported by runner.py, monkeypatched by tests).
+# Backwards-compatible name (monkeypatched by tests).
 _ensure_pdbqt_has_charges = _pdbqt_has_nonzero_charges
 
 
@@ -216,9 +212,8 @@ def _fix_pdbqt_charges(pdbqt_file: str, source_file: str,
         # output depends on the random seed in its heavy atoms (Open Babel
         # < 3.2: on every run), so it runs once.
         if gen3d:
-            runner.run_obabel(args, outputs=[target], seed=seed)
+            utils.run_obabel(args, outputs=[target], seed=seed)
         else:
-            from vspipeline.hydrogens import run_obabel_deterministic
             run_obabel_deterministic(args, target, kind="ligand", seed=seed)
         if rebuild_in_place:
             os.replace(target, pdbqt_file)

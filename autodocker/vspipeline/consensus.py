@@ -32,8 +32,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from vspipeline import defaults  # noqa: E402
 from vspipeline import outputs  # noqa: E402
+from vspipeline import tools, utils  # noqa: E402
 from vspipeline.docking import (
-    runner,  # lazily imported runner module (see docking._LazyRunner)
     DEFAULT_MIN_VALID_AFFINITY,
     Status,
     _calculate_metrics,
@@ -183,14 +183,15 @@ def run_smina_docking(
     affinity, read from ``REMARK minimizedAffinity`` of the output PDBQT
     (the stdout table, rounded to one decimal, is only a cross-check).
 
-    ``smina``/``timeout`` default to the runner globals. Returns None when no
-    SMINA binary is available; raises RuntimeError on any failure.
+    ``smina``/``timeout`` default to the current tool settings
+    (``tools.settings()``). Returns None when no SMINA binary is available;
+    raises RuntimeError on any failure.
     """
-    smina = smina or runner.SMINA
+    smina = smina or tools.settings().smina
     if smina is None:
         logger.debug("SMINA not available")
         return None
-    timeout = int(timeout or runner.COMMAND_TIMEOUT)
+    timeout = int(timeout or tools.settings().command_timeout)
 
     cmd = [
         smina,
@@ -334,15 +335,15 @@ def smina_dock_all(receptor: str, ligands: List[str], outdir: str,
     min_valid = float(vina_params.get('min_valid_affinity', DEFAULT_MIN_VALID_AFFINITY))
     cpu = vina_params.get('threads')
     if not cpu and num_processes > 1:
-        cpu = max(1, runner.available_cpus() // num_processes)
+        cpu = max(1, utils.available_cpus() // num_processes)
     dock_dir = os.path.join(outdir, outputs.DOCKED_DIR)
     os.makedirs(dock_dir, exist_ok=True)
-    smina = runner.SMINA
-    timeout = int(runner.COMMAND_TIMEOUT)
+    smina = tools.settings().smina
+    timeout = int(tools.settings().command_timeout)
 
     jobs = []
     for lig in ligands:
-        name = runner.ligand_name(lig)
+        name = utils.ligand_name(lig)
         jobs.append(SminaDockJob(
             name=name, receptor=receptor, ligand=lig,
             out=os.path.join(dock_dir, name + outputs.SMINA_POSE_SUFFIX),
@@ -542,10 +543,10 @@ def rescore_with_smina(receptor: str, results: List[Tuple[str, Optional[float]]]
     No affinity window is applied to the rescored values (they come from a
     different function). Returns ``({name: score or None}, scoring)``.
     """
-    smina = smina or runner.SMINA
+    smina = smina or tools.settings().smina
     if smina is None:
         raise RuntimeError("SMINA binary not available for consensus rescoring")
-    timeout = int(timeout or runner.COMMAND_TIMEOUT)
+    timeout = int(timeout or tools.settings().command_timeout)
     metrics_dict = metrics_dict or {}
     dock_dir = os.path.join(outdir, outputs.DOCKED_DIR)
     os.makedirs(dock_dir, exist_ok=True)

@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-import runner
+from vspipeline import tools
 import vspipeline.utils as u
 
 
@@ -128,11 +128,11 @@ def test_run_obabel_sets_single_thread_env_and_logs(monkeypatch, caplog):
         calls.append((cmd, capture, extra_env))
         return "out", "1 molecule converted", 0
 
-    monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(u, "run", fake_run)
     with caplog.at_level(logging.DEBUG, logger="vspipeline.utils"):
         assert u.run_obabel(["-:C C", "-osmi"]) == "out"
     cmd, capture, env = calls[0]
-    assert cmd[0] == runner.OBABEL and capture is True
+    assert cmd[0] == tools.settings().obabel and capture is True
     # One thread; OB_RANDOM_SEED defaults to defaults.SEED without a run seed.
     assert env == {"OMP_NUM_THREADS": "1", "OB_RANDOM_SEED": "42"}
     assert "OMP_NUM_THREADS=1 OB_RANDOM_SEED=42" in caplog.text and "'-:C C'" in caplog.text
@@ -149,14 +149,14 @@ def test_run_obabel_removes_outputs_on_failure(monkeypatch, tmp_path):
         out.write_text("partial")
         raise subprocess.TimeoutExpired(cmd, 1)
 
-    monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(u, "run", fake_run)
     with pytest.raises(RuntimeError, match="timed out"):
         u.run_obabel(["-O", str(out)], outputs=[str(out)])
     assert not out.exists()
 
 
 def test_run_obabel_real_failure_message(tmp_path):
-    if runner.OBABEL is None:
+    if tools.settings().obabel is None:
         pytest.skip("obabel not installed")
     with pytest.raises(RuntimeError, match="obabel exited with code"):
         u.run_obabel(["-:C", "-onotaformat"])

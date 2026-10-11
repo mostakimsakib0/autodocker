@@ -3,15 +3,14 @@ import os
 
 import pytest
 
-import runner
-
-
+from vspipeline import checkpoint as checkpoint_mod
+from vspipeline import utils
 def test_checkpoint_roundtrip(outdir):
-    cp = runner.DockingCheckpoint(outdir)
+    cp = checkpoint_mod.DockingCheckpoint(outdir)
     cp.save_result("ligA", -7.5, {"status": "OK"})
     cp.save_result("ligB", -6.2, {"status": "OK"})
 
-    cp2 = runner.DockingCheckpoint(outdir)
+    cp2 = checkpoint_mod.DockingCheckpoint(outdir)
     assert cp2.is_completed("ligA")
     assert cp2.is_completed("ligB")
     assert not cp2.is_completed("ligC")
@@ -21,27 +20,27 @@ def test_checkpoint_roundtrip(outdir):
 
 
 def test_checkpoint_corrupt_json(outdir):
-    with open(runner.DockingCheckpoint(outdir).checkpoint_file, "w", encoding="utf-8") as f:
+    with open(checkpoint_mod.DockingCheckpoint(outdir).checkpoint_file, "w", encoding="utf-8") as f:
         f.write("{this is not json")
-    cp = runner.DockingCheckpoint(outdir)
+    cp = checkpoint_mod.DockingCheckpoint(outdir)
     assert cp.completed == {}
     assert cp.is_completed("ligA") is False
 
 
 def test_checkpoint_missing_file(outdir):
-    cp = runner.DockingCheckpoint(outdir)
+    cp = checkpoint_mod.DockingCheckpoint(outdir)
     assert cp.completed == {}
 
 
 def test_checkpoint_get_metrics(outdir):
-    cp = runner.DockingCheckpoint(outdir)
+    cp = checkpoint_mod.DockingCheckpoint(outdir)
     cp.save_result("ligA", -7.5, {"status": "OK", "simscore": 0.8})
     metrics = cp.get_metrics()
     assert metrics["ligA"]["status"] == "OK"
 
 
 def test_no_resume_clears_checkpoint(outdir):
-    cp = runner.DockingCheckpoint(outdir)
+    cp = checkpoint_mod.DockingCheckpoint(outdir)
     cp.save_result("ligA", -7.5, {})
     assert os.path.exists(cp.checkpoint_file)
     cp_file = cp.checkpoint_file
@@ -51,7 +50,7 @@ def test_no_resume_clears_checkpoint(outdir):
 
 def test_resume_skips_completed(outdir, charged_pdbqt):
     lig = charged_pdbqt
-    cp = runner.DockingCheckpoint(outdir)
+    cp = checkpoint_mod.DockingCheckpoint(outdir)
     cp.save_result("charged", -7.5, {})
     ligands_todo = [
         lig for lig in [lig]
@@ -72,37 +71,37 @@ def test_resume_with_only_failing_ligands_is_partial_not_fatal(
     grid.write_text("center_x=1.0\ncenter_y=2.0\ncenter_z=3.0\n"
                     "size_x=20.0\nsize_y=20.0\nsize_z=20.0\n")
     ligands = [zero_charge_pdbqt, charged_pdbqt]
-    good = runner.ligand_name(charged_pdbqt)
+    good = utils.ligand_name(charged_pdbqt)
 
     def first_run(args):
-        name = runner.ligand_name(args.ligand)
+        name = utils.ligand_name(args.ligand)
         if name == good:
             return name, -8.4, {"status": "OK"}
         return name, None, {"status": "FAILED"}
 
     monkeypatch.setattr(docking, "dock_ligand", first_run)
-    runner.dock_all(charged_pdbqt, ligands, str(grid), outdir, num_processes=1,
+    docking.dock_all(charged_pdbqt, ligands, str(grid), outdir, num_processes=1,
                     resume=True, vina_params={"seed": 42, "extra_args": []})
 
     # Second run: the cached ligand is skipped and the other still fails.
     docked = []
 
     def second_run(args):
-        docked.append(runner.ligand_name(args.ligand))
-        return runner.ligand_name(args.ligand), None, {"status": "FAILED"}
+        docked.append(utils.ligand_name(args.ligand))
+        return utils.ligand_name(args.ligand), None, {"status": "FAILED"}
 
     monkeypatch.setattr(docking, "dock_ligand", second_run)
-    result, checkpoint, metrics = runner.dock_all(
+    result, checkpoint, metrics = docking.dock_all(
         charged_pdbqt, ligands, str(grid), outdir, num_processes=1,
         resume=True, vina_params={"seed": 42, "extra_args": []})
-    assert docked == [runner.ligand_name(zero_charge_pdbqt)]
+    assert docked == [utils.ligand_name(zero_charge_pdbqt)]
     scores = [s for _, s in result if s is not None]
     assert scores == [-8.4]  # cached success retained; failure tolerated
     assert checkpoint.completed[good]["score"] == -8.4
 
 
 def _ok_run(args):
-    return runner.ligand_name(args.ligand), -7.0, {"status": "OK"}
+    return utils.ligand_name(args.ligand), -7.0, {"status": "OK"}
 
 
 def test_checkpoint_invalidated_when_parameters_change(
@@ -112,7 +111,7 @@ def test_checkpoint_invalidated_when_parameters_change(
     grid.write_text("center_x=1.0\ncenter_y=2.0\ncenter_z=3.0\n"
                     "size_x=20.0\nsize_y=20.0\nsize_z=20.0\n")
     monkeypatch.setattr(docking, "dock_ligand", _ok_run)
-    runner.dock_all(charged_pdbqt, [charged_pdbqt], str(grid), outdir,
+    docking.dock_all(charged_pdbqt, [charged_pdbqt], str(grid), outdir,
                     vina_params={"seed": 42, "exhaustiveness": 8})
     docked = []
 
@@ -122,10 +121,10 @@ def test_checkpoint_invalidated_when_parameters_change(
 
     monkeypatch.setattr(docking, "dock_ligand", tracking)
     # Same settings: cached. Different exhaustiveness: docked again.
-    runner.dock_all(charged_pdbqt, [charged_pdbqt], str(grid), outdir,
+    docking.dock_all(charged_pdbqt, [charged_pdbqt], str(grid), outdir,
                     vina_params={"seed": 42, "exhaustiveness": 8})
     assert docked == []
-    runner.dock_all(charged_pdbqt, [charged_pdbqt], str(grid), outdir,
+    docking.dock_all(charged_pdbqt, [charged_pdbqt], str(grid), outdir,
                     vina_params={"seed": 42, "exhaustiveness": 32})
     assert docked == [charged_pdbqt]
 
@@ -140,7 +139,7 @@ def test_checkpoint_rechecks_edited_ligand_and_drops_removed_ones(
     other = str(tmp_path / "other.pdbqt")
     shutil.copy(charged_pdbqt, other)
     monkeypatch.setattr(docking, "dock_ligand", _ok_run)
-    runner.dock_all(charged_pdbqt, [charged_pdbqt, other], str(grid), outdir,
+    docking.dock_all(charged_pdbqt, [charged_pdbqt, other], str(grid), outdir,
                     vina_params={"seed": 42})
     with open(other, "a", encoding="utf-8") as f:
         f.write("REMARK edited\n")
@@ -151,7 +150,7 @@ def test_checkpoint_rechecks_edited_ligand_and_drops_removed_ones(
         return _ok_run(args)
 
     monkeypatch.setattr(docking, "dock_ligand", tracking)
-    result, _, _ = runner.dock_all(charged_pdbqt, [other], str(grid), outdir,
+    result, _, _ = docking.dock_all(charged_pdbqt, [other], str(grid), outdir,
                                    vina_params={"seed": 42})
     assert docked == [other]  # content changed, so it is docked again
     assert [n for n, _ in result] == ["other"]  # the removed ligand is not reported
@@ -177,8 +176,8 @@ def test_results_are_checkpointed_as_they_arrive(
 
     monkeypatch.setattr(docking, "dock_ligand", interrupted)
     with pytest.raises(KeyboardInterrupt):
-        runner.dock_all(charged_pdbqt, ligs, str(grid), outdir, vina_params={"seed": 42})
-    assert set(runner.DockingCheckpoint(outdir).completed) == {"a", "b"}
+        docking.dock_all(charged_pdbqt, ligs, str(grid), outdir, vina_params={"seed": 42})
+    assert set(checkpoint_mod.DockingCheckpoint(outdir).completed) == {"a", "b"}
 
 def test_failed_redock_of_edited_ligand_drops_stale_score(
         tmp_path, charged_pdbqt, monkeypatch, outdir):
@@ -192,12 +191,12 @@ def test_failed_redock_of_edited_ligand_drops_stale_score(
     shutil.copy(charged_pdbqt, lig)
     shutil.copy(charged_pdbqt, keep)
     monkeypatch.setattr(docking, "dock_ligand", _ok_run)
-    runner.dock_all(charged_pdbqt, [lig, keep], str(grid), outdir, vina_params={"seed": 42})
+    docking.dock_all(charged_pdbqt, [lig, keep], str(grid), outdir, vina_params={"seed": 42})
     with open(lig, "a", encoding="utf-8") as f:
         f.write("REMARK edited\n")
     monkeypatch.setattr(docking, "dock_ligand",
                         lambda a: ("x", None, {"status": "FAILED"}))
-    result, _, _ = runner.dock_all(charged_pdbqt, [lig, keep], str(grid), outdir,
+    result, _, _ = docking.dock_all(charged_pdbqt, [lig, keep], str(grid), outdir,
                                    vina_params={"seed": 42})
     # y stays cached; x is reported once, as failed, not also with its old score
     assert sorted(result, key=lambda r: r[0]) == [("x", None), ("y", -7.0)]
@@ -216,14 +215,14 @@ def test_out_of_window_score_is_cached(tmp_path, charged_pdbqt, monkeypatch, out
     calls = []
 
     def dock(args):
-        calls.append(runner.ligand_name(args.ligand))
+        calls.append(utils.ligand_name(args.ligand))
         if args.ligand == weak:
             return "weak", None, {"status": "OUT_OF_WINDOW", "raw_score": -0.5}
         return _ok_run(args)
 
     monkeypatch.setattr(docking, "dock_ligand", dock)
     for _ in range(2):
-        result, _, metrics = runner.dock_all(charged_pdbqt, [weak, good], str(grid),
+        result, _, metrics = docking.dock_all(charged_pdbqt, [weak, good], str(grid),
                                              outdir, vina_params={"seed": 42})
         assert sorted(result, key=lambda r: r[0]) == [("good", -7.0), ("weak", None)]
         assert metrics["weak"]["status"] == "OUT_OF_WINDOW"
@@ -237,9 +236,9 @@ def test_all_out_of_window_is_not_fatal(tmp_path, charged_pdbqt, monkeypatch, ou
     grid.write_text("center_x=1.0\ncenter_y=2.0\ncenter_z=3.0\n"
                     "size_x=20.0\nsize_y=20.0\nsize_z=20.0\n")
     monkeypatch.setattr(docking, "dock_ligand", lambda a: (
-        runner.ligand_name(a.ligand), None,
+        utils.ligand_name(a.ligand), None,
         {"status": "OUT_OF_WINDOW", "raw_score": -0.4}))
-    result, _, metrics = runner.dock_all(charged_pdbqt, [charged_pdbqt], str(grid),
+    result, _, metrics = docking.dock_all(charged_pdbqt, [charged_pdbqt], str(grid),
                                          outdir, vina_params={"seed": 42})
     assert result == [("charged", None)]
     assert metrics["charged"]["raw_score"] == -0.4
@@ -292,7 +291,7 @@ def test_fingerprint_covers_engine_binary(tmp_path):
 
 
 def test_checkpoint_flush_is_atomic_and_truncates_journal(outdir, monkeypatch):
-    cp = runner.DockingCheckpoint(outdir)
+    cp = checkpoint_mod.DockingCheckpoint(outdir)
     cp.save_result("a", -7.0, {"status": "OK"})
     cp.save_result("b", -6.0, {"status": "OK"})
     assert os.path.getsize(cp.journal_file) > 0
@@ -314,7 +313,7 @@ def test_checkpoint_flush_is_atomic_and_truncates_journal(outdir, monkeypatch):
     with open(cp.checkpoint_file, encoding="utf-8") as f:
         assert set(json.load(f)) == {"a", "b"}
     assert os.path.getsize(cp.journal_file) > 0  # not truncated after a failed write
-    assert set(runner.DockingCheckpoint(outdir).completed) == {"a", "b", "c"}
+    assert set(checkpoint_mod.DockingCheckpoint(outdir).completed) == {"a", "b", "c"}
 
 
 def test_checkpoint_lock_rejects_second_process(outdir):
@@ -331,14 +330,14 @@ def test_checkpoint_lock_rejects_second_process(outdir):
     try:
         assert holder.stdout.readline().strip() == "locked"
         with pytest.raises(ckpt.OutputDirLockedError, match="in use by another"):
-            runner.DockingCheckpoint(outdir)
+            checkpoint_mod.DockingCheckpoint(outdir)
     finally:
         holder.communicate("")
-    runner.DockingCheckpoint(outdir)  # free again once the other run exits
+    checkpoint_mod.DockingCheckpoint(outdir)  # free again once the other run exits
     ckpt.release_lock(outdir)
 
 
 def test_checkpoint_timestamp_not_in_metrics(outdir):
-    cp = runner.DockingCheckpoint(outdir)
+    cp = checkpoint_mod.DockingCheckpoint(outdir)
     cp.save_result("a", -7.0, {"status": "OK"})
     assert "timestamp" not in cp.get_metrics()["a"]

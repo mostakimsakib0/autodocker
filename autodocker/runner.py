@@ -36,34 +36,23 @@ import sys
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
-from vspipeline import defaults
-from vspipeline import outputs
-
-_FALLBACK_VERSION = "2.0.0"
-
-
-def _read_version(base_dir: Optional[str] = None) -> str:
-    """Version string: autodocker/VERSION if present, else $AUTODOCKER_VERSION,
-    else the version this file was released with."""
-    base_dir = base_dir or os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(base_dir, "VERSION")
-    try:
-        with open(path, encoding="utf-8") as f:
-            version = f.read().strip()
-        if version:
-            return version
-    except OSError:
-        pass
-    return os.environ.get("AUTODOCKER_VERSION", "").strip() or _FALLBACK_VERSION
-
-
-__version__ = _read_version()
-
-# When executed as a script (__name__ == "__main__"), alias this module as
-# "runner" so the vspipeline submodules' ``import runner`` binds THIS running
-# instance instead of importing a second copy of the file. That keeps the
-# tool-path globals below (and main()'s mutations of them) shared everywhere.
-sys.modules.setdefault("runner", sys.modules[__name__])
+from vspipeline import (
+    checkpoint,
+    consensus,
+    defaults,
+    docking,
+    flexible,
+    hydrogens,
+    library,
+    outputs,
+    pocket,
+    protein,
+    report,
+    results,
+    tools,
+    utils,
+)
+from vspipeline.version import __version__
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,7 +76,6 @@ class TerminatedBySignal(KeyboardInterrupt):
     run_manifest.json records status "interrupted"."""
 
 DEFAULT_SEED = defaults.SEED
-DEFAULT_COMMAND_TIMEOUT = defaults.COMMAND_TIMEOUT  # seconds
 # Residues within this distance (Angstrom) of the box center are candidates
 # for --auto-flexible.
 AUTO_FLEX_RADIUS = defaults.AUTO_FLEX_RADIUS
@@ -99,19 +87,6 @@ VERSION_PROBE_TIMEOUT = 30
 
 class ConfigError(ValueError):
     """Invalid option or environment value (reported without a traceback)."""
-
-
-def find_tool(*names: str) -> Optional[str]:
-    """Return the path of the first *name* found on PATH, or None.
-
-    Returns None when nothing is found instead of a placeholder name so
-    callers can reliably distinguish 'found' from 'not found'.
-    """
-    for name in names:
-        path = shutil.which(name)
-        if path:
-            return path
-    return None
 
 
 def default_seed() -> int:
@@ -129,44 +104,8 @@ def default_seed() -> int:
         raise ConfigError(f"VS_SEED must be an integer, got {value!r}") from None
 
 
-# Problems with environment variables read at import time; reported by
-# main() after argument parsing (so --version still works).
-_ENV_ERRORS: List[str] = []
-
-
-def _env_command_timeout() -> int:
-    raw = os.environ.get("VS_COMMAND_TIMEOUT", "").strip()
-    if not raw:
-        return DEFAULT_COMMAND_TIMEOUT
-    try:
-        value = int(raw)
-        if value <= 0:
-            raise ValueError
-        return value
-    except ValueError:
-        _ENV_ERRORS.append(
-            f"VS_COMMAND_TIMEOUT must be a positive integer (seconds), got {raw!r}")
-        return DEFAULT_COMMAND_TIMEOUT
-
-
-# Tool paths (prefer modern Vina for consistency).
-OBABEL = find_tool("obabel", "OpenBabel", "OpenBabel.exe")
-VINA_PRIMARY = find_tool("vina", "vina.exe", "qvina02", "qvina2", "qvina")
-# The fallback engine equals the primary (no fallback) unless --qvina-fallback
-# is given; main() then sets it to QuickVina 2.
-VINA_FALLBACK = VINA_PRIMARY
-QVINA = find_tool("qvina02", "qvina2")
 # Deprecated environment switch for --qvina-fallback (versions <= 1.1.x).
 _QVINA_FALLBACK_ENV = "VS_ENABLE_QVINA_FALLBACK"
-# Optional engines and helpers.
-SMINA = find_tool("smina", "smina.exe")
-FPOCKET = find_tool("fpocket")
-# reduce and AutoDock4/AutoGrid4 are not used by the pipeline (receptor
-# hydrogens come from Open Babel); the paths are kept for the real-tool tests.
-REDUCE = find_tool("reduce")
-AUTODOCK = find_tool("autodock4", "autodock")
-AUTOGRID = find_tool("autogrid4", "autogrid")
-COMMAND_TIMEOUT = _env_command_timeout()
 
 
 def _require_tools(smina_only: bool = False, consensus: bool = False,
@@ -177,13 +116,14 @@ def _require_tools(smina_only: bool = False, consensus: bool = False,
     --vina-bin can supply a docking binary that is not on PATH. ``fpocket``:
     the run detects pockets (see _uses_fpocket).
     """
-    needed = [("obabel", OBABEL)]
+    found = tools.settings()
+    needed = [("obabel", found.obabel)]
     if not smina_only:
-        needed.append(("vina", VINA_PRIMARY))
+        needed.append(("vina", found.vina_primary))
     if smina_only or consensus:
-        needed.append(("smina", SMINA))
+        needed.append(("smina", found.smina))
     if fpocket:
-        needed.append(("fpocket", FPOCKET))
+        needed.append(("fpocket", found.fpocket))
     missing = [name for name, path in needed if path is None]
     if missing:
         hint = "Install them or put them on PATH (Vina can also be given with --vina-bin)."
@@ -202,179 +142,9 @@ def _uses_fpocket(args) -> bool:
 
 
 def _log_tool_availability() -> None:
-    logger.debug(f"SMINA: {SMINA or 'not found (--consensus and --smina-only unavailable)'}")
-    logger.debug(f"fpocket: {FPOCKET or 'not found'}")
-
-# ---------------------------------------------------------------------------
-# Pipeline internals (vspipeline/*).
-# These imports re-export the names the CLI, tests and scripts use through
-# ``runner.<name>`` (listed in __all__); the vspipeline modules resolve shared
-# state (tool paths, ``run``/``run_obabel``) through THIS module at call time,
-# so monkeypatching runner.<name> reaches them. Docking workers receive the
-# engine paths and timeout explicitly (docking.EngineConfig, built from these
-# globals when docking starts).
-# ---------------------------------------------------------------------------
-
-from vspipeline.net import _http_get_bytes  # noqa: E402
-from vspipeline.report import (  # noqa: E402
-    NGL_CDN_URL,
-    _PDBQT_KEEP_PREFIXES,
-    _PDBQT_STRIP_PREFIXES,
-    _build_viewer_section,
-    _fetch_ngljs,
-    _pdbqt_to_pdb_string,
-    calculate_rmsd,
-    cluster_poses,
-    extract_coordinates_from_pdbqt,
-    generate_html_report,
-)
-from vspipeline.pocket import (  # noqa: E402
-    COFACTOR_RESNAMES,
-    METAL_ELEMENTS,
-    VINA_METAL_TYPE_MAP,
-    WATER_RESNAMES,
-    _append_hetatm_to_receptor,
-    _hetatm_to_pdbqt_line,
-    _iter_hetatm_residues,
-    _max_pdbqt_serial,
-    _parse_hetatm,
-    detect_cofactors,
-    detect_metal_ions,
-    detect_water_molecules,
-)
-from vspipeline.flexible import (  # noqa: E402
-    FLEX_BACKBONE_NAMES,
-    _ATOMIC_RADII,
-    _BOND_TOLERANCE,
-    _build_flex_residue_block,
-    _parse_residue_key,
-    _pdbqt_atom_element,
-    _remove_residues_from_pdbqt,
-    _residue_atoms_from_pdbqt,
-    _resnum_matches,
-    build_flexible_residue_pdbqt,
-    detect_flexible_residues,
-    missing_residues,
-    residue_identity,
-)
-from vspipeline.consensus import (  # noqa: E402
-    _run_smina_scoring,
-    rescore_with_smina,
-    run_smina_docking,
-    scorer_agreement_spearman,
-    smina_dock_all,
-    write_consensus_outputs,
-)
-from vspipeline.charges import (  # noqa: E402
-    _ensure_pdbqt_has_charges,
-    _extract_pdbqt_charge,
-    _fix_pdbqt_charges,
-    _pdbqt_has_atoms,
-    _pdbqt_has_nonzero_charges,
-    _sanitize_receptor_pdbqt,
-)
-from vspipeline.admet import (  # noqa: E402
-    ADMETFilter,
-    LipinskiFilter,
-    _is_valid_sdf,
-    _obabel_descriptors,
-)
-from vspipeline.checkpoint import (  # noqa: E402
-    DockingCheckpoint,
-    OutputDirLockedError,
-    acquire_lock,
-    release_lock,
-)
-from vspipeline.library import LibraryManager  # noqa: E402
-from vspipeline.hydrogens import probe_seed  # noqa: E402
-from vspipeline.utils import (  # noqa: E402
-    _parse_chain_selection,
-    available_cpus,
-    ligand_name,
-    _safe_ligand_id,
-    get_chains,
-    parse_pdb_coords,
-    run,
-    run_obabel,
-    OB_RANDOM_SEED_ENV,
-    OBABEL_SEEDABLE_VERSION,
-    OBABEL_VALIDATED_VERSION,
-    obabel_version,
-)
-from vspipeline.protein import ProteinPreparation  # noqa: E402
-from vspipeline import protein as protein_module  # noqa: E402
-from vspipeline.docking import (  # noqa: E402
-    AFFINITY_FLOOR,
-    DockJob,
-    EngineConfig,
-    Status,
-    _VINA_CPU_FLAG_CACHE,
-    _build_vina_command,
-    _calculate_metrics,
-    _calculate_protocol_simscore,
-    _detect_vina_type,
-    _engine_identity,
-    _extract_score,
-    _log_tool_version,
-    _mode_table_lines,
-    _parse_grid_config,
-    _parse_grid_triplet,
-    _parse_vina_modes,
-    _tool_label,
-    _vina_cpu_flag,
-    affinity_in_window,
-    dock_all,
-    dock_ligand,
-    parse_pdbqt_results,
-)
-from vspipeline.results import (  # noqa: E402
-    ResultsAnalyzer,
-    _score_csv,
-    _score_sort_key,
-    _score_text,
-)
-
-# Re-exported names (see above); listed so linters treat them as used.
-__all__ = [
-    # net, report
-    "_http_get_bytes", "NGL_CDN_URL", "_PDBQT_KEEP_PREFIXES", "_PDBQT_STRIP_PREFIXES",
-    "_build_viewer_section", "_fetch_ngljs", "_pdbqt_to_pdb_string", "calculate_rmsd",
-    "cluster_poses", "extract_coordinates_from_pdbqt", "generate_html_report",
-    # pocket
-    "COFACTOR_RESNAMES", "METAL_ELEMENTS", "VINA_METAL_TYPE_MAP", "WATER_RESNAMES",
-    "_append_hetatm_to_receptor", "_hetatm_to_pdbqt_line", "_iter_hetatm_residues",
-    "_max_pdbqt_serial", "_parse_hetatm", "detect_cofactors", "detect_metal_ions",
-    "detect_water_molecules",
-    # flexible
-    "FLEX_BACKBONE_NAMES", "_ATOMIC_RADII", "_BOND_TOLERANCE", "_build_flex_residue_block",
-    "_parse_residue_key", "_pdbqt_atom_element", "_remove_residues_from_pdbqt",
-    "_residue_atoms_from_pdbqt", "_resnum_matches", "build_flexible_residue_pdbqt",
-    "detect_flexible_residues",
-    # consensus
-    "_run_smina_scoring", "rescore_with_smina", "run_smina_docking",
-    "scorer_agreement_spearman", "smina_dock_all", "write_consensus_outputs",
-    # charges
-    "_ensure_pdbqt_has_charges", "_extract_pdbqt_charge", "_fix_pdbqt_charges",
-    "_pdbqt_has_atoms", "_pdbqt_has_nonzero_charges", "_sanitize_receptor_pdbqt",
-    # admet (Lipinski filter; ADMETFilter is the deprecated alias)
-    "ADMETFilter", "LipinskiFilter", "_is_valid_sdf", "_obabel_descriptors",
-    # checkpoint, library, protein
-    "DockingCheckpoint", "LibraryManager", "ProteinPreparation", "OutputDirLockedError",
-    "acquire_lock", "release_lock",
-    # utils
-    "_parse_chain_selection", "available_cpus", "ligand_name", "_safe_ligand_id",
-    "get_chains", "parse_pdb_coords", "run", "run_obabel", "OB_RANDOM_SEED_ENV",
-    "OBABEL_SEEDABLE_VERSION", "OBABEL_VALIDATED_VERSION", "obabel_version",
-    # docking
-    "AFFINITY_FLOOR", "DockJob", "EngineConfig", "Status", "_VINA_CPU_FLAG_CACHE",
-    "_build_vina_command", "_calculate_metrics", "_calculate_protocol_simscore",
-    "_detect_vina_type", "_engine_identity", "_extract_score", "_log_tool_version",
-    "_mode_table_lines", "_parse_grid_config", "_parse_grid_triplet", "_parse_vina_modes",
-    "_tool_label", "_vina_cpu_flag", "affinity_in_window", "dock_all", "dock_ligand",
-    "parse_pdbqt_results",
-    # results
-    "ResultsAnalyzer", "_score_csv", "_score_sort_key", "_score_text",
-]
+    found = tools.settings()
+    logger.debug(f"SMINA: {found.smina or 'not found (--consensus and --smina-only unavailable)'}")
+    logger.debug(f"fpocket: {found.fpocket or 'not found'}")
 
 # =============================
 # COMMAND LINE
@@ -447,7 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
     lib = parser.add_argument_group("ligand library")
     lib.add_argument("--library", choices=["fda", "custom", "local"], default="local",
                      help="local: the files of -l; fda: a fixed list of "
-                     f"{len(LibraryManager.FDA_DRUG_NAMES)} well-known "
+                     f"{len(library.LibraryManager.FDA_DRUG_NAMES)} well-known "
                      "approved drugs downloaded from PubChem (not the full FDA list); "
                      "custom: the same list filtered by --mw-min/--mw-max/--logp-max")
     lib.add_argument("--mw-min", type=float, default=defaults.CUSTOM_MW_MIN,
@@ -459,7 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="--library custom only: maximum logP (Open Babel's "
                      "Wildman-Crippen logP, the model used everywhere); replaces "
                      "Lipinski's logP <= 5")
-    lib.add_argument("--max-compounds", type=int, default=LibraryManager.MAX_COMPOUNDS,
+    lib.add_argument("--max-compounds", type=int, default=library.LibraryManager.MAX_COMPOUNDS,
                      help="--library fda/custom only: number of PubChem compounds to "
                      "prepare (the first ones of the list that pass)")
     lib.add_argument("--no-lipinski", action="store_true",
@@ -496,7 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
     rec.add_argument("--no-fpocket", action="store_true",
                      help="Skip fpocket; dock in a box around the whole receptor (heavy-atom "
                      f"bounding box + padding, each edge at least "
-                     f"{protein_module.MIN_RECEPTOR_BOX_SIZE:g} Angstrom)")
+                     f"{protein.MIN_RECEPTOR_BOX_SIZE:g} Angstrom)")
     rec.add_argument("--grid-center", default=None,
                      help="Explicit box center 'X,Y,Z' (Angstrom), e.g. 12.3,4.5,6.7; "
                      "overrides auto-detection (frame: see --grid-center-frame). With "
@@ -553,8 +323,8 @@ def build_parser() -> argparse.ArgumentParser:
                       "cores, or cores divided by -p when -p > 1)")
     dock.add_argument("--min-valid-affinity", type=float, default=defaults.MIN_VALID_AFFINITY,
                       help="Upper bound of the accepted affinity window (kcal/mol): scores "
-                      f">= this, or < {AFFINITY_FLOOR:g}, are reported as OUT_OF_WINDOW; "
-                      f"must be > {AFFINITY_FLOOR:g}")
+                      f">= this, or < {docking.AFFINITY_FLOOR:g}, are reported as OUT_OF_WINDOW; "
+                      f"must be > {docking.AFFINITY_FLOOR:g}")
     dock.add_argument("--vina-bin",
                       help="Docking binary to use instead of the auto-detected Vina/QuickVina")
     dock.add_argument("--qvina-fallback", action="store_true",
@@ -564,9 +334,9 @@ def build_parser() -> argparse.ArgumentParser:
                       f"Replaces the deprecated ${_QVINA_FALLBACK_ENV}=1")
     dock.add_argument("--vina-extra", action="append", default=[],
                       help="Extra argument string passed to the docking binary; repeat as needed")
-    dock.add_argument("--timeout", type=int, default=COMMAND_TIMEOUT,
+    dock.add_argument("--timeout", type=int, default=tools.settings().command_timeout,
                       help="Per-command timeout in seconds; the default is "
-                      f"$VS_COMMAND_TIMEOUT if set, else {DEFAULT_COMMAND_TIMEOUT}")
+                      f"$VS_COMMAND_TIMEOUT if set, else {tools.DEFAULT_COMMAND_TIMEOUT}")
     dock.add_argument("--no-resume", action="store_true",
                       help="Start fresh (ignore the checkpoint)")
     dock.add_argument("--max-failure-fraction", type=float,
@@ -668,14 +438,14 @@ def _check_receptor_selection(args) -> None:
     receptor preparation (case-sensitive chain IDs, first chain by default)
     and flexible-residue building (chain + residue number and insertion code)."""
     try:
-        available = get_chains(args.receptor)
+        available = utils.get_chains(args.receptor)
     except OSError as e:
         raise ConfigError(f"-r/--receptor: cannot read {args.receptor}: {e}") from None
     except ValueError as e:  # utils.ChainAmbiguityError: blank chain next to chain A
         raise ConfigError(f"-r/--receptor: {e}") from None
     if args.chain is not None:
         try:
-            selected = _parse_chain_selection(args.chain, available)
+            selected = utils._parse_chain_selection(args.chain, available)
         except ValueError as e:
             raise ConfigError(f"--chain {args.chain!r}: {e}") from None
     else:
@@ -684,10 +454,10 @@ def _check_receptor_selection(args) -> None:
     if not args.flexible_residues or (args.flexibility is not None and args.flexibility <= 0):
         return
     try:
-        lines, _ = protein_module.read_pdb_records(args.receptor)
+        lines, _ = protein.read_pdb_records(args.receptor)
     except (OSError, UnicodeDecodeError) as e:
         raise ConfigError(f"-r/--receptor: cannot read {args.receptor}: {e}") from None
-    missing = missing_residues(lines, selected,
+    missing = flexible.missing_residues(lines, selected,
                                _flexible_residue_keys(args.flexible_residues))
     if missing:
         raise ConfigError(
@@ -699,8 +469,8 @@ def _validate_args(args, explicit) -> None:
     """Check option values and combinations; raise ConfigError on the first
     problem. Resolves --seed, --processes and the deprecated --no-admet.
     Reads the receptor's chain list, but writes nothing."""
-    if _ENV_ERRORS:
-        raise ConfigError("; ".join(_ENV_ERRORS))
+    if tools.ENV_ERRORS:
+        raise ConfigError("; ".join(tools.ENV_ERRORS))
     for dest in _FLOAT_DESTS:
         value = getattr(args, dest)
         if not math.isfinite(value):
@@ -760,9 +530,9 @@ def _validate_args(args, explicit) -> None:
     if not PH_RANGE[0] <= args.ph <= PH_RANGE[1]:
         raise ConfigError(f"--ph must be between {PH_RANGE[0]:g} and {PH_RANGE[1]:g}, "
                           f"got {args.ph:g}")
-    if not args.min_valid_affinity > AFFINITY_FLOOR:
+    if not args.min_valid_affinity > docking.AFFINITY_FLOOR:
         raise ConfigError(
-            f"--min-valid-affinity must be > {AFFINITY_FLOOR:g} kcal/mol (the lower end "
+            f"--min-valid-affinity must be > {docking.AFFINITY_FLOOR:g} kcal/mol (the lower end "
             f"of the accepted window), got {args.min_valid_affinity:g}: no score could "
             "be accepted")
     if not 0.0 <= args.max_failure_fraction <= 1.0:
@@ -772,7 +542,7 @@ def _validate_args(args, explicit) -> None:
                           ("--grid-size", args.grid_size)):
         if value is not None:
             try:
-                triplet = _parse_grid_triplet(value, option.lstrip("-"))
+                triplet = docking._parse_grid_triplet(value, option.lstrip("-"))
             except ValueError as e:
                 raise ConfigError(str(e)) from None
             if option == "--grid-size" and min(triplet) <= 0:
@@ -803,7 +573,7 @@ def _validate_args(args, explicit) -> None:
         if not keys:
             raise ConfigError(f"--flexible-residues lists no residue, got "
                               f"{args.flexible_residues!r} (e.g. A45,A78)")
-        invalid = [k for k in keys if _parse_residue_key(k) is None]
+        invalid = [k for k in keys if flexible._parse_residue_key(k) is None]
         if invalid:
             raise ConfigError(
                 f"--flexible-residues: invalid residue key(s) {', '.join(invalid)} "
@@ -822,7 +592,7 @@ def _validate_args(args, explicit) -> None:
             raise ConfigError(f"{fallback} cannot be combined with --vina-bin")
         if args.smina_only:
             raise ConfigError(f"{fallback} cannot be combined with --smina-only")
-        if not QVINA:
+        if not tools.settings().qvina:
             raise ConfigError(f"{fallback} needs QuickVina 2 (qvina02 or qvina2) on PATH")
 
     if args.smina_only:
@@ -844,9 +614,9 @@ def _validate_args(args, explicit) -> None:
     _check_output_dir(args.output)
 
     if args.processes in (0, -1):
-        args.processes = available_cpus()
+        args.processes = utils.available_cpus()
     elif args.processes < -1:
-        args.processes = max(1, available_cpus() // (-args.processes))
+        args.processes = max(1, utils.available_cpus() // (-args.processes))
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -911,16 +681,17 @@ def _probe_tool(kind: str, path: Optional[str]) -> Dict:
 
 def _tools_for_run(args) -> Dict[str, Optional[str]]:
     """External tools the run invokes, by role."""
-    tools = {"obabel": OBABEL}
+    found = tools.settings()
+    used = {"obabel": found.obabel}
     if not args.smina_only:
-        tools["vina"] = VINA_PRIMARY
-        if VINA_FALLBACK != VINA_PRIMARY:
-            tools["vina_fallback"] = VINA_FALLBACK
+        used["vina"] = found.vina_primary
+        if found.vina_fallback != found.vina_primary:
+            used["vina_fallback"] = found.vina_fallback
     if args.smina_only or args.consensus:
-        tools["smina"] = SMINA
+        used["smina"] = found.smina
     if _uses_fpocket(args):
-        tools["fpocket"] = FPOCKET
-    return tools
+        used["fpocket"] = found.fpocket
+    return used
 
 
 def _probe_tools(args) -> Dict[str, Dict]:
@@ -948,32 +719,33 @@ def _check_openbabel(seed: int) -> Dict:
     output deterministic. Results then differ from the image's (MMFF94
     minimization), and the manifest records the version so they stay
     traceable."""
-    version = obabel_version(OBABEL)
-    seeded = version is not None and version >= OBABEL_SEEDABLE_VERSION
-    validated = _version_text(OBABEL_VALIDATED_VERSION)
+    obabel = tools.settings().obabel
+    version = utils.obabel_version(obabel)
+    seeded = version is not None and version >= utils.OBABEL_SEEDABLE_VERSION
+    validated = _version_text(utils.OBABEL_VALIDATED_VERSION)
     if version is None:
-        logger.warning(f"[!] Could not read the Open Babel version from '{OBABEL} -V'; "
+        logger.warning(f"[!] Could not read the Open Babel version from '{obabel} -V'; "
                        f"AutoDocker {__version__} is validated with Open Babel {validated}")
     elif not seeded:
         logger.warning("!" * 70)
         logger.warning(
             f"[!] Open Babel {_version_text(version)} found; AutoDocker {__version__} "
-            f"needs Open Babel >= {_version_text(OBABEL_SEEDABLE_VERSION)} for its "
+            f"needs Open Babel >= {_version_text(utils.OBABEL_SEEDABLE_VERSION)} for its "
             f"published behaviour (the container image ships {validated}).")
         logger.warning(
             "[!] This version ignores OB_RANDOM_SEED, and its MMFF94 minimization and "
             "PDBQT output differ: results are reproducible run to run, but NOT "
             f"comparable with results from Open Babel {validated}. See docs/openbabel.md.")
         logger.warning("!" * 70)
-    elif version != OBABEL_VALIDATED_VERSION:
+    elif version != utils.OBABEL_VALIDATED_VERSION:
         logger.info(f"[*] Open Babel {_version_text(version)} (AutoDocker {__version__} "
                     f"is validated with {validated})")
     return {
         "openbabel_version": _version_text(version),
         "openbabel_random_seed": {
-            "variable": OB_RANDOM_SEED_ENV,
+            "variable": utils.OB_RANDOM_SEED_ENV,
             "value": seed,
-            "hydrogen_probe_values": [probe_seed(seed, 1), probe_seed(seed, 2)],
+            "hydrogen_probe_values": [hydrogens.probe_seed(seed, 1), hydrogens.probe_seed(seed, 2)],
             "honoured": seeded,
             "policy": (
                 "Every Open Babel call runs with OB_RANDOM_SEED set to the run's --seed; "
@@ -1056,7 +828,7 @@ def _remove_stale_outputs(outdir: str) -> List[str]:
     return removed
 
 
-def _build_manifest(args, argv: List[str], tools: Dict, started_at: str,
+def _build_manifest(args, argv: List[str], tool_probes: Dict, started_at: str,
                     status: str, exit_code: int, error: Optional[str],
                     extra: Dict) -> Dict:
     resolved = {k: v for k, v in sorted(vars(args).items())}
@@ -1072,11 +844,11 @@ def _build_manifest(args, argv: List[str], tools: Dict, started_at: str,
                    "implementation": platform.python_implementation(),
                    "executable": sys.executable},
         "platform": platform.platform(),
-        "cpu_count": {"os": os.cpu_count(), "available": available_cpus()},
-        "tools": tools,
+        "cpu_count": {"os": os.cpu_count(), "available": utils.available_cpus()},
+        "tools": tool_probes,
         "python_packages": _python_packages(),
         "environment": _environment_snapshot(),
-        "command_timeout_s": COMMAND_TIMEOUT,
+        "command_timeout_s": tools.settings().command_timeout,
         "started_at": started_at,
         "finished_at": _utc_now(),
         **extra,
@@ -1094,15 +866,15 @@ def _keep_residue_key(residue: Dict):
             residue.get("resname") or residue.get("name"))
 
 
-def _failed_docking(results, metrics_dict) -> List[str]:
+def _failed_docking(scores, metrics_dict) -> List[str]:
     """Ligands whose docking failed: Status FAILED (an OUT_OF_WINDOW result
     is a valid engine score, not a failure)."""
     failed = []
-    for name, score in results:
+    for name, score in scores:
         if score is not None:
             continue
-        status = Status.of((metrics_dict or {}).get(name, {}).get("status"), score)
-        if status is not Status.OUT_OF_WINDOW:
+        status = docking.Status.of((metrics_dict or {}).get(name, {}).get("status"), score)
+        if status is not docking.Status.OUT_OF_WINDOW:
             failed.append(name)
     return failed
 
@@ -1136,7 +908,7 @@ def _threads_per_process(args) -> Optional[int]:
     if args.threads:
         return args.threads
     if args.processes > 1:
-        return max(1, available_cpus() // args.processes)
+        return max(1, utils.available_cpus() // args.processes)
     return None
 
 
@@ -1150,7 +922,7 @@ def _run_pipeline(args, state: Dict) -> int:
     logger.info("[1/5] Ligand library preparation")
     if args.library != "local" and args.ligands:
         logger.info(f"[*] -l {args.ligands} is not used with --library {args.library}")
-    lib_manager = LibraryManager(
+    lib_manager = library.LibraryManager(
         args.output,
         args.ligands if args.library == "local" else None,
         minimize=not args.no_minimize,
@@ -1173,7 +945,7 @@ def _run_pipeline(args, state: Dict) -> int:
 
     # ===== [2/5] Receptor and box =====
     logger.info("[2/5] Receptor preparation and docking box")
-    protein_prep = ProteinPreparation(args.receptor, args.output, seed=args.seed)
+    protein_prep = protein.ProteinPreparation(args.receptor, args.output, seed=args.seed)
     state["protein"] = protein_prep
     protein_prep.validate()
 
@@ -1196,7 +968,7 @@ def _run_pipeline(args, state: Dict) -> int:
         logger.info(f"[*] Grid size: {sx:.2f}, {sy:.2f}, {sz:.2f}")
 
     if args.grid_center:
-        cx, cy, cz = _parse_grid_triplet(args.grid_center, "grid-center")
+        cx, cy, cz = docking._parse_grid_triplet(args.grid_center, "grid-center")
         if args.grid_center_frame == "input":
             # receptor.pdbqt and grid.conf are centered at the origin;
             # move the user's input-PDB coordinates into that frame.
@@ -1206,7 +978,7 @@ def _run_pipeline(args, state: Dict) -> int:
             cx, cy, cz = cx - dx, cy - dy, cz - dz
         logger.info(f"[*] Grid center overridden (docking frame): {cx:.2f}, {cy:.2f}, {cz:.2f}")
     if args.grid_size:
-        sx, sy, sz = _parse_grid_triplet(args.grid_size, "grid-size")
+        sx, sy, sz = docking._parse_grid_triplet(args.grid_size, "grid-size")
         logger.info(f"[*] Grid size overridden: {sx:.2f}, {sy:.2f}, {sz:.2f}")
 
     low, high = TYPICAL_GRID_SIZE_RANGE
@@ -1229,7 +1001,7 @@ def _run_pipeline(args, state: Dict) -> int:
             # (cx, cy, cz) is in the centered receptor frame; waters are
             # read from the original PDB, so compare in that frame.
             dx, dy, dz = protein_prep.frame_offset()
-            waters = detect_water_molecules(source, (cx + dx, cy + dy, cz + dz),
+            waters = pocket.detect_water_molecules(source, (cx + dx, cy + dy, cz + dz),
                                             distance_threshold=args.water_distance)
             if waters:
                 logger.info(f"[*] Found {len(waters)} water residue(s) within "
@@ -1241,7 +1013,7 @@ def _run_pipeline(args, state: Dict) -> int:
 
         if args.detect_metals:
             logger.info("[*] Detecting metal ions...")
-            metals = detect_metal_ions(source)
+            metals = pocket.detect_metal_ions(source)
             if metals:
                 logger.info(f"[*] Found {len(metals)} metal ion(s); keeping them in receptor:")
                 for metal in metals:
@@ -1254,7 +1026,7 @@ def _run_pipeline(args, state: Dict) -> int:
 
         if args.detect_cofactors:
             logger.info("[*] Detecting cofactors...")
-            cofactors = detect_cofactors(source)
+            cofactors = pocket.detect_cofactors(source)
             if cofactors:
                 logger.info(f"[*] Found {len(cofactors)} cofactor(s); keeping them in receptor:")
                 for cof in cofactors:
@@ -1293,7 +1065,7 @@ def _run_pipeline(args, state: Dict) -> int:
             requested = _flexible_residue_keys(args.flexible_residues)
             logger.info(f"[*] Using specified flexible residues: {', '.join(requested)}")
         elif args.auto_flexible:
-            requested = detect_flexible_residues(
+            requested = flexible.detect_flexible_residues(
                 protein_prep.receptor_pdbqt, (cx, cy, cz),
                 radius=AUTO_FLEX_RADIUS, max_residues=args.auto_flexible)
             logger.info(f"[*] Auto-selected {len(requested)} flexible residues "
@@ -1305,14 +1077,14 @@ def _run_pipeline(args, state: Dict) -> int:
         built_residues: List[str] = []
         if requested:
             logger.info(f"[*] Flexible residues: {', '.join(requested)}")
-            flex_file = build_flexible_residue_pdbqt(
+            flex_file = flexible.build_flexible_residue_pdbqt(
                 protein_prep.receptor_pdbqt, requested, args.output,
                 built=built_residues)
         if args.flexible_residues:
             # Residues named by the user must all be built: docking with
             # fewer (or none) would not be the requested experiment.
-            built_keys = {residue_identity(k) for k in built_residues}
-            not_built = [k for k in requested if residue_identity(k) not in built_keys]
+            built_keys = {flexible.residue_identity(k) for k in built_residues}
+            not_built = [k for k in requested if flexible.residue_identity(k) not in built_keys]
             if not_built:
                 raise RuntimeError(
                     f"--flexible-residues: could not build {', '.join(not_built)} as "
@@ -1328,7 +1100,7 @@ def _run_pipeline(args, state: Dict) -> int:
             # Vina requires flexible residues to be excluded from the
             # rigid receptor passed to --receptor.
             flexible_residues.extend(built_residues)
-            rigid_receptor = _remove_residues_from_pdbqt(
+            rigid_receptor = flexible._remove_residues_from_pdbqt(
                 protein_prep.receptor_pdbqt, built_residues,
                 os.path.join(args.output, outputs.RIGID_RECEPTOR_PDBQT), flex_file=flex_file)
 
@@ -1360,50 +1132,50 @@ def _run_pipeline(args, state: Dict) -> int:
         # own poses and failures (not Vina metadata next to SMINA scores).
         # Ligand names are unique: LibraryManager resolves same-name files.
         logger.info("[*] SMINA-only mode: docking with SMINA instead of Vina")
-        results, metrics_dict = smina_dock_all(
+        scores, metrics_dict = consensus.smina_dock_all(
             dock_receptor, ligands, args.output, grid_box, vina_params,
             num_processes=args.processes, flex_file=flex_file)
-        if not any(score is not None or Status.of(metrics_dict[name].get("status"))
-                   is Status.OUT_OF_WINDOW for name, score in results):
+        if not any(score is not None or docking.Status.of(metrics_dict[name].get("status"))
+                   is docking.Status.OUT_OF_WINDOW for name, score in scores):
             # Reported like any other failure fraction (all outputs, then
             # exit 3 unless --max-failure-fraction 1.0).
             logger.error("[!] SMINA produced no score for any ligand; see "
                          f"{outputs.DOCKED_DIR}/*{outputs.SMINA_LOG_SUFFIX}")
-        checkpoint = None
+        ckpt = None
     else:
         # The engine paths and timeout are passed to the workers explicitly
         # (after --vina-bin/--timeout were applied in main()).
-        engine = EngineConfig.from_runner()
+        engine = docking.EngineConfig.from_settings()
         state["engine"] = engine
-        results, checkpoint, metrics_dict = dock_all(
+        scores, ckpt, metrics_dict = docking.dock_all(
             dock_receptor, ligands, protein_prep.grid_conf,
             args.output, num_processes=args.processes, resume=resume,
             vina_params=vina_params, flex_file=flex_file, engine=engine)
-        state["run_fingerprint"] = getattr(checkpoint, "fingerprint", None)
+        state["run_fingerprint"] = getattr(ckpt, "fingerprint", None)
 
     scorer_agreement = None
     if args.consensus:
         logger.info("[3/5] Consensus: SMINA rescoring of the Vina top poses")
-        smina_scores, scoring = rescore_with_smina(
-            dock_receptor, results, args.output, metrics_dict=metrics_dict,
+        smina_scores, scoring = consensus.rescore_with_smina(
+            dock_receptor, scores, args.output, metrics_dict=metrics_dict,
             num_processes=args.processes, flex_file=flex_file)
         scorer_agreement = {
-            **write_consensus_outputs(args.output, results, smina_scores, scoring,
+            **consensus.write_consensus_outputs(args.output, scores, smina_scores, scoring,
                                       metrics_dict=metrics_dict),
             "scoring": scoring}
         state["consensus"] = scorer_agreement
 
     # ===== [4/5] Analysis =====
     logger.info("[4/5] Pose analysis")
-    if resume and checkpoint is not None and checkpoint.completed:
-        logger.info(f"[*] Checkpoint updated: {len(checkpoint.completed)} successful dockings")
+    if resume and ckpt is not None and ckpt.completed:
+        logger.info(f"[*] Checkpoint updated: {len(ckpt.completed)} successful dockings")
     html_report_file = os.path.join(args.output, outputs.HTML_REPORT)
     clusters_file = os.path.join(args.output, outputs.POSE_CLUSTERS_JSON)
     if args.cluster_poses:
         logger.info("[*] Performing pose clustering...")
-        clusters = cluster_poses(
+        clusters = report.cluster_poses(
             os.path.join(args.output, outputs.DOCKED_DIR), rmsd_threshold=args.rmsd_threshold,
-            ligands=[name for name, _ in results])
+            ligands=[name for name, _ in scores])
         clusters_data = {
             ligand: [{'id': c['id'], 'pose_count': len(c['poses'])} for c in ligand_clusters]
             for ligand, ligand_clusters in clusters.items()}
@@ -1416,9 +1188,9 @@ def _run_pipeline(args, state: Dict) -> int:
 
     # ===== [5/5] Outputs =====
     logger.info("[5/5] Saving results")
-    analyzer = ResultsAnalyzer(args.output, top_n=args.top_n)
-    analyzer.save_ranking(results, mode="extended", metrics_dict=metrics_dict)
-    analyzer.save_metrics_report(results, metrics_dict)
+    analyzer = results.ResultsAnalyzer(args.output, top_n=args.top_n)
+    analyzer.save_ranking(scores, mode="extended", metrics_dict=metrics_dict)
+    analyzer.save_metrics_report(scores, metrics_dict)
 
     # The HTML report is generated AFTER ranking.csv exists.
     html_ok = False
@@ -1427,12 +1199,12 @@ def _run_pipeline(args, state: Dict) -> int:
         report_meta = {
             "Protein (receptor)": os.path.basename(args.receptor),
             "Ligand library": args.library,
-            "Ligands screened": len(results),
+            "Ligands screened": len(scores),
             "Top N reported": args.top_n,
             "Exhaustiveness": args.exhaustiveness,
             "Seed": args.seed,
         }
-        html_ok = generate_html_report(
+        html_ok = report.generate_html_report(
             os.path.join(args.output, outputs.RANKING_CSV), os.path.join(args.output, outputs.DOCKED_DIR),
             html_report_file,
             receptor_pdbqt=protein_prep.receptor_pdbqt,
@@ -1442,9 +1214,9 @@ def _run_pipeline(args, state: Dict) -> int:
             rmsd_threshold=args.rmsd_threshold,
             top_n=args.top_n)
 
-    failed = _failed_docking(results, metrics_dict)
-    state["docking_failures"] = {"failed": len(failed), "docked": len(results)}
-    counts = _failure_counts(len(lib_manager.failed), len(failed), len(results),
+    failed = _failed_docking(scores, metrics_dict)
+    state["docking_failures"] = {"failed": len(failed), "docked": len(scores)}
+    counts = _failure_counts(len(lib_manager.failed), len(failed), len(scores),
                              args.max_failure_fraction)
     state["failures"] = counts
     exit_code = _failure_exit_code(counts["failed"], counts["ligands"],
@@ -1483,7 +1255,7 @@ def _run_pipeline(args, state: Dict) -> int:
     if args.flexibility and args.flexibility > 0:
         logger.info(f"  - Flexible residues: "
                     f"{', '.join(flexible_residues) if flexible_residues else 'none (rigid docking)'}")
-    logger.info(f"Total compounds docked: {len(results)} ({len(failed)} failed)")
+    logger.info(f"Total compounds docked: {len(scores)} ({len(failed)} failed)")
     if lib_manager.failed:
         logger.info(f"Ligands that could not be prepared: {len(lib_manager.failed)}")
     logger.info("=" * 70)
@@ -1491,8 +1263,6 @@ def _run_pipeline(args, state: Dict) -> int:
 
 
 def main(argv: Optional[List[str]] = None) -> None:
-    global VINA_PRIMARY, VINA_FALLBACK, COMMAND_TIMEOUT
-
     argv = sys.argv[1:] if argv is None else list(argv)
     started_at = _utc_now()
     parser = build_parser()
@@ -1509,11 +1279,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         parser.error(str(e))  # exits with EXIT_USAGE
 
     if args.vina_bin:
-        VINA_PRIMARY = args.vina_bin
-        VINA_FALLBACK = args.vina_bin
+        tools.configure(vina_primary=args.vina_bin, vina_fallback=args.vina_bin)
     elif args.qvina_fallback:
-        VINA_FALLBACK = QVINA
-    COMMAND_TIMEOUT = args.timeout
+        tools.configure(vina_fallback=tools.settings().qvina)
+    tools.configure(command_timeout=args.timeout)
     try:
         _require_tools(smina_only=args.smina_only, consensus=args.consensus,
                        fpocket=_uses_fpocket(args))
@@ -1530,8 +1299,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     # every mode, and hold it until the run ends. A run that finds the
     # directory in use writes nothing, not even a manifest.
     try:
-        acquire_lock(args.output)
-    except OutputDirLockedError as e:
+        checkpoint.acquire_lock(args.output)
+    except checkpoint.OutputDirLockedError as e:
         logger.error(f"[!] {e}")
         sys.exit(EXIT_USAGE)
     except OSError as e:
@@ -1540,7 +1309,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     try:
         exit_code = _main_locked(args, argv, started_at)
     finally:
-        release_lock(args.output)
+        checkpoint.release_lock(args.output)
     if exit_code != EXIT_OK:
         sys.exit(exit_code)
 
@@ -1565,11 +1334,11 @@ def _main_locked(args, argv: List[str], started_at: str) -> int:
     code; always writes run_manifest.json."""
     previous_sigterm = _install_sigterm_handler()
     state: Dict = {"docking_started": False}
-    tools: Dict = {}
+    tool_probes: Dict = {}
     status, exit_code, error = "failed", EXIT_FAILURE, None
     try:
         try:
-            tools = _probe_tools(args)
+            tool_probes = _probe_tools(args)
             state["openbabel"] = _check_openbabel(args.seed)
             _remove_stale_outputs(args.output)
             exit_code = _run_pipeline(args, state)
@@ -1601,7 +1370,7 @@ def _main_locked(args, argv: List[str], started_at: str) -> int:
                 signal.signal(signal.SIGTERM, signal.SIG_IGN)
             except ValueError:
                 pass
-            _write_final_manifest(args, argv, tools, started_at, status, exit_code,
+            _write_final_manifest(args, argv, tool_probes, started_at, status, exit_code,
                                   error, state)
     finally:
         if previous_sigterm is not None:
@@ -1609,7 +1378,7 @@ def _main_locked(args, argv: List[str], started_at: str) -> int:
     return exit_code
 
 
-def _write_final_manifest(args, argv, tools, started_at, status, exit_code, error,
+def _write_final_manifest(args, argv, tool_probes, started_at, status, exit_code, error,
                           state) -> None:
     extra = {}
     library = state.get("library")
@@ -1630,7 +1399,7 @@ def _write_final_manifest(args, argv, tools, started_at, status, exit_code, erro
         extra["run_fingerprint"] = state["run_fingerprint"]
     if state.get("engine") is not None:
         extra["docking_engines"] = [
-            _engine_identity(path) for path, _ in state["engine"].docking_engines()]
+            docking._engine_identity(path) for path, _ in state["engine"].docking_engines()]
     if "consensus" in state:
         extra["consensus"] = state["consensus"]
     if "flexible_residues" in state:
@@ -1641,7 +1410,7 @@ def _write_final_manifest(args, argv, tools, started_at, status, exit_code, erro
     manifest_file = os.path.join(args.output, outputs.RUN_MANIFEST_JSON)
     try:
         write_run_manifest(manifest_file, _build_manifest(
-            args, argv, tools, started_at, status, exit_code, error, extra))
+            args, argv, tool_probes, started_at, status, exit_code, error, extra))
     except OSError as e:
         logger.warning(f"Could not write {manifest_file}: {e}")
 

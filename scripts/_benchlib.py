@@ -547,14 +547,7 @@ def _pipeline_module(name):
 
 def pipeline_modified_residues():
     """Residue names the pipeline treats as modified amino acids (part of the
-    protein chain, kept as ATOM records): ``vspipeline.protein.MODIFIED_RESIDUES``.
-
-    protein.py imports runner.py, which imports vspipeline modules that
-    import protein.py again; the pipeline always loads protein.py through
-    runner.py, so runner is imported first here as well."""
-    _pipeline_module("defaults")  # puts autodocker/ on sys.path
-    import importlib
-    importlib.import_module("runner")
+    protein chain, kept as ATOM records): ``vspipeline.protein.MODIFIED_RESIDUES``."""
     return frozenset(_pipeline_module("protein").MODIFIED_RESIDUES)
 
 

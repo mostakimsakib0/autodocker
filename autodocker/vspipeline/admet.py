@@ -22,16 +22,13 @@ The donor/acceptor counts are typed SMARTS counts, not Lipinski's original
 are what every earlier AutoDocker release used, so a filter decision never
 changes between releases. When Open Babel cannot compute them, PubChem-style
 SDF data items (e.g. ``PUBCHEM_XLOGP3``) are used and the source is recorded.
-
-Cross-module references go through the ``runner`` namespace at call time so
-monkeypatching ``runner.<name>`` keeps working.
 """
 import logging
 import os
 import re
 from typing import Dict, List, Optional, Tuple
 
-import runner  # noqa: E402  (tool paths and run_obabel, resolved at call time)
+from vspipeline import utils
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +250,7 @@ def _obabel_descriptors(sdf_file: str, seed: Optional[int] = None) -> Optional[D
     """Descriptors of the first molecule computed by Open Babel, or None."""
     name = os.path.basename(sdf_file)
     try:
-        stdout = runner.run_obabel(
+        stdout = utils.run_obabel(
             [sdf_file, "-osmi", "--append", " ".join(_OBABEL_DESCRIPTORS)], seed=seed)
     except (RuntimeError, OSError) as e:
         logger.debug(f"Open Babel descriptor calculation failed for {name}: {e}")

@@ -7,8 +7,8 @@ import re
 
 import pytest
 
-import runner
 import vspipeline.protein as prot
+from vspipeline import tools, utils
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
 # Residues 1-12 of the DUD-E AKT1 receptor (input hydrogens, blank chain and
@@ -16,7 +16,7 @@ DATA = os.path.join(os.path.dirname(__file__), "data")
 # a water. Before the fix Open Babel placed ~10 of its hydrogens at random.
 AKT1_FRAGMENT = os.path.join(DATA, "akt1_fragment_protonated.pdb")
 
-needs_obabel = pytest.mark.skipif(runner.OBABEL is None, reason="obabel not available")
+needs_obabel = pytest.mark.skipif(tools.settings().obabel is None, reason="obabel not available")
 
 
 def _pdb_atom(serial, name, resname, chain, resnum, x, y, z, element="",
@@ -308,7 +308,7 @@ def test_centroid_grid_raises_when_receptor_unreadable(tmp_path):
 
 
 def _fake_fpocket(pockets, info=True):
-    """runner.run replacement writing an fpocket-like output directory."""
+    """utils.run replacement writing an fpocket-like output directory."""
     def fake_run(cmd, capture=False, **kwargs):
         target = cmd[-1]
         root = os.path.splitext(target)[0] + "_out"
@@ -338,10 +338,10 @@ def _prep_with_receptor(tmp_path):
 
 def test_detect_pocket_tie_break_and_symmetric_box(tmp_path, monkeypatch):
     pp = _prep_with_receptor(tmp_path)
-    monkeypatch.setattr(runner, "find_tool", lambda *names: "/usr/bin/fpocket")
+    monkeypatch.setattr(tools, "find_tool", lambda *names: "/usr/bin/fpocket")
     monkeypatch.setattr(prot, "_fpocket_version", lambda path: "4.0")
     box3 = [(0.0, 0.0, 0.0), (10.0, 2.0, 4.0), (1.0, 1.0, 1.0)]
-    monkeypatch.setattr(runner, "run", _fake_fpocket([
+    monkeypatch.setattr(utils, "run", _fake_fpocket([
         (3, 0.4, 0.1, box3), (2, 0.4, 0.1, box3), (1, 0.1, 0.9, box3)]))
     cx, cy, cz, sx, sy, sz = pp.detect_pocket(padding=2.0)
     dx, dy, dz = pp._receptor_centroid()
@@ -353,11 +353,11 @@ def test_detect_pocket_tie_break_and_symmetric_box(tmp_path, monkeypatch):
 
 def test_detect_pocket_selects_lowest_number_on_full_tie(tmp_path, monkeypatch):
     pp = _prep_with_receptor(tmp_path)
-    monkeypatch.setattr(runner, "find_tool", lambda *names: "/usr/bin/fpocket")
+    monkeypatch.setattr(tools, "find_tool", lambda *names: "/usr/bin/fpocket")
     monkeypatch.setattr(prot, "_fpocket_version", lambda path: "4.0")
     far = [(50.0, 50.0, 50.0), (52.0, 52.0, 52.0)]
     near = [(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)]
-    monkeypatch.setattr(runner, "run", _fake_fpocket([
+    monkeypatch.setattr(utils, "run", _fake_fpocket([
         (12, 0.3, 0.3, far), (2, 0.3, 0.3, near), (10, 0.3, 0.3, far)]))
     cx, cy, cz, _, _, _ = pp.detect_pocket(padding=1.0)
     dx, dy, dz = pp._receptor_centroid()
@@ -366,25 +366,25 @@ def test_detect_pocket_selects_lowest_number_on_full_tie(tmp_path, monkeypatch):
 
 def test_detect_pocket_fails_without_fpocket(tmp_path, monkeypatch):
     pp = _prep_with_receptor(tmp_path)
-    monkeypatch.setattr(runner, "find_tool", lambda *names: None)
+    monkeypatch.setattr(tools, "find_tool", lambda *names: None)
     with pytest.raises(RuntimeError, match="--no-fpocket"):
         pp.detect_pocket()
 
 
 def test_detect_pocket_fails_when_no_pockets(tmp_path, monkeypatch):
     pp = _prep_with_receptor(tmp_path)
-    monkeypatch.setattr(runner, "find_tool", lambda *names: "/usr/bin/fpocket")
+    monkeypatch.setattr(tools, "find_tool", lambda *names: "/usr/bin/fpocket")
     monkeypatch.setattr(prot, "_fpocket_version", lambda path: None)
-    monkeypatch.setattr(runner, "run", _fake_fpocket([]))
+    monkeypatch.setattr(utils, "run", _fake_fpocket([]))
     with pytest.raises(RuntimeError, match="no pockets"):
         pp.detect_pocket()
 
 
 def test_detect_pocket_fails_without_info_file(tmp_path, monkeypatch):
     pp = _prep_with_receptor(tmp_path)
-    monkeypatch.setattr(runner, "find_tool", lambda *names: "/usr/bin/fpocket")
+    monkeypatch.setattr(tools, "find_tool", lambda *names: "/usr/bin/fpocket")
     monkeypatch.setattr(prot, "_fpocket_version", lambda path: None)
-    monkeypatch.setattr(runner, "run", _fake_fpocket(
+    monkeypatch.setattr(utils, "run", _fake_fpocket(
         [(1, 0.3, 0.3, [(0.0, 0.0, 0.0)])], info=False))
     with pytest.raises(RuntimeError, match="pocket scores"):
         pp.detect_pocket()

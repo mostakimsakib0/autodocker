@@ -8,8 +8,7 @@ import sys
 import pytest
 
 import runner
-
-
+from vspipeline import checkpoint, consensus, tools, utils, version
 @pytest.fixture
 def cli(tmp_path, protein_pdb):
     """Valid base arguments: an existing receptor and ligand directory."""
@@ -21,19 +20,16 @@ def cli(tmp_path, protein_pdb):
 
 
 @pytest.fixture
-def fake_tools(monkeypatch):
+def fake_tools():
     """Use the Python interpreter as a stand-in for every external tool."""
-    for name in ("OBABEL", "VINA_PRIMARY", "VINA_FALLBACK"):
-        monkeypatch.setattr(runner, name, sys.executable)
-    monkeypatch.setattr(runner, "FPOCKET", sys.executable)
-    for name in ("SMINA", "REDUCE"):
-        monkeypatch.setattr(runner, name, None)
+    tools.configure(obabel=sys.executable, vina_primary=sys.executable,
+                    vina_fallback=sys.executable, fpocket=sys.executable,
+                    smina=None, reduce=None)
 
 
 @pytest.fixture(autouse=True)
 def _restore_state(monkeypatch):
-    monkeypatch.setattr(runner, "_ENV_ERRORS", [])
-    monkeypatch.setattr(runner, "COMMAND_TIMEOUT", runner.COMMAND_TIMEOUT)
+    monkeypatch.setattr(tools, "ENV_ERRORS", [])
     yield
     runner._configure_logging(False)
 
@@ -45,15 +41,15 @@ def _exit_code(argv):
 
 
 def test_find_tool_present():
-    assert runner.find_tool("python3") is not None
+    assert tools.find_tool("python3") is not None
 
 
 def test_find_tool_missing():
-    assert runner.find_tool("definitely-not-a-real-binary-xyz") is None
+    assert tools.find_tool("definitely-not-a-real-binary-xyz") is None
 
 
 def test_find_tool_prefers_first():
-    path = runner.find_tool("python3", "sh")
+    path = tools.find_tool("python3", "sh")
     assert path is not None and path.endswith("python3")
 
 
@@ -79,16 +75,16 @@ def test_default_seed_rejects_non_integer(monkeypatch):
 
 def test_version_sources(tmp_path, monkeypatch):
     monkeypatch.delenv("AUTODOCKER_VERSION", raising=False)
-    assert runner._read_version(str(tmp_path)) == runner._FALLBACK_VERSION
+    assert version.read_version(str(tmp_path)) == version.FALLBACK_VERSION
     monkeypatch.setenv("AUTODOCKER_VERSION", "9.8.7")
-    assert runner._read_version(str(tmp_path)) == "9.8.7"
+    assert version.read_version(str(tmp_path)) == "9.8.7"
     (tmp_path / "VERSION").write_text("1.2.3\n")
-    assert runner._read_version(str(tmp_path)) == "1.2.3"
+    assert version.read_version(str(tmp_path)) == "1.2.3"
 
 
 def test_version_flag_survives_bad_environment(monkeypatch, capsys):
     monkeypatch.setenv("VS_SEED", "abc")
-    monkeypatch.setattr(runner, "_ENV_ERRORS", ["VS_COMMAND_TIMEOUT must be ..."])
+    monkeypatch.setattr(tools, "ENV_ERRORS", ["VS_COMMAND_TIMEOUT must be ..."])
     assert _exit_code(["--version"]) == 0
     assert "AutoDocker" in capsys.readouterr().out
 
@@ -108,8 +104,8 @@ def test_bad_vs_seed_is_a_clean_usage_error(monkeypatch, capsys, cli, fake_tools
 
 def test_bad_command_timeout_env_is_a_clean_usage_error(monkeypatch, capsys, cli, fake_tools):
     monkeypatch.setenv("VS_COMMAND_TIMEOUT", "ten")
-    assert runner._env_command_timeout() == runner.DEFAULT_COMMAND_TIMEOUT
-    assert "VS_COMMAND_TIMEOUT" in runner._ENV_ERRORS[0]
+    assert tools.env_command_timeout() == tools.DEFAULT_COMMAND_TIMEOUT
+    assert "VS_COMMAND_TIMEOUT" in tools.ENV_ERRORS[0]
     argv, _ = cli
     assert _exit_code(argv) == runner.EXIT_USAGE
     assert "VS_COMMAND_TIMEOUT must be a positive integer" in capsys.readouterr().err
@@ -161,7 +157,7 @@ def test_missing_receptor_exit_2(tmp_path, fake_tools, capsys):
 
 
 def test_missing_tool_exit_2(cli, fake_tools, monkeypatch, caplog):
-    monkeypatch.setattr(runner, "OBABEL", None)
+    tools.configure(obabel=None)
     argv, out = cli
     with caplog.at_level(logging.ERROR):
         assert _exit_code(argv) == runner.EXIT_USAGE
@@ -184,7 +180,7 @@ def test_processes_resolution(cli, fake_tools, monkeypatch):
         return runner.EXIT_OK
 
     monkeypatch.setattr(runner, "_run_pipeline", pipeline)
-    monkeypatch.setattr(runner, "available_cpus", lambda: 8)
+    monkeypatch.setattr(utils, "available_cpus", lambda: 8)
     argv, _ = cli
     for value, expected in (("3", 3), ("0", 8), ("-1", 8), ("-4", 2)):
         runner.main(argv + ["-p", value])
@@ -249,7 +245,7 @@ def test_run_manifest_on_success(cli, fake_tools, monkeypatch):
     assert m["autodocker_version"] == runner.__version__
     assert m["argv"][1:] == argv + ["-p", "0"]
     assert m["seed"] == 7 and m["args"]["seed"] == 7
-    assert m["args"]["processes"] == runner.available_cpus()  # resolved value
+    assert m["args"]["processes"] == utils.available_cpus()  # resolved value
     assert m["environment"]["VS_SEED"] == "7"
     assert m["environment"]["OMP_NUM_THREADS"] == "1"
     assert m["python"]["version"] == ".".join(map(str, sys.version_info[:3]))
@@ -318,7 +314,7 @@ def test_failure_fraction_rules():
 
 def test_consensus_csv_has_only_data_rows(tmp_path):
     path = tmp_path / "consensus_ranking.csv"
-    agreement = runner.write_consensus_outputs(
+    agreement = consensus.write_consensus_outputs(
         str(tmp_path), [("a", -8.0), ("b", -6.0), ("c", -7.0), ("d", None)],
         {"a": -7.5, "b": -6.5, "c": -7.2, "d": -5.0}, "vinardo")
     rows = list(csv.reader(open(path, encoding="utf-8")))
@@ -382,7 +378,7 @@ def test_cli_defaults_come_from_the_defaults_module():
 
 
 def test_qvina_fallback_needs_quickvina(cli, fake_tools, monkeypatch, capsys):
-    monkeypatch.setattr(runner, "QVINA", None)
+    tools.configure(qvina=None)
     argv, out = cli
     assert _exit_code(argv + ["--qvina-fallback"]) == runner.EXIT_USAGE
     assert "needs QuickVina 2" in capsys.readouterr().err
@@ -391,11 +387,11 @@ def test_qvina_fallback_needs_quickvina(cli, fake_tools, monkeypatch, capsys):
 def test_qvina_fallback_is_off_without_the_option():
     """No hidden switch: the fallback equals the primary engine unless
     --qvina-fallback (or the deprecated variable) asks for QuickVina."""
-    assert runner.VINA_FALLBACK == runner.VINA_PRIMARY
+    assert tools.settings().vina_fallback == tools.settings().vina_primary
 
 
 def test_deprecated_qvina_env_enables_the_option(cli, fake_tools, monkeypatch, caplog):
-    monkeypatch.setattr(runner, "QVINA", None)
+    tools.configure(qvina=None)
     monkeypatch.setenv("VS_ENABLE_QVINA_FALLBACK", "1")
     argv, out = cli
     # With QuickVina missing, the (deprecated) request is validated like the option.
@@ -633,7 +629,7 @@ def test_tool_probe_failure_is_a_clean_pipeline_error(cli, fake_tools, monkeypat
 # ---------------------------------------------------------------------------
 
 def test_missing_fpocket_exit_2_before_any_work(cli, fake_tools, monkeypatch, caplog):
-    monkeypatch.setattr(runner, "FPOCKET", None)
+    tools.configure(fpocket=None)
     argv, out = cli
     with caplog.at_level(logging.ERROR):
         assert _exit_code(argv) == runner.EXIT_USAGE
@@ -645,7 +641,7 @@ def test_missing_fpocket_exit_2_before_any_work(cli, fake_tools, monkeypatch, ca
 @pytest.mark.parametrize("extra", [
     ["--no-fpocket"], ["--grid-center", "1,2,3", "--grid-size", "20,20,20"]])
 def test_fpocket_not_needed_without_pocket_detection(cli, fake_tools, monkeypatch, extra):
-    monkeypatch.setattr(runner, "FPOCKET", None)
+    tools.configure(fpocket=None)
     monkeypatch.setattr(runner, "_run_pipeline", lambda args, state: runner.EXIT_OK)
     argv, out = cli
     runner.main(argv + extra)
@@ -654,7 +650,7 @@ def test_fpocket_not_needed_without_pocket_detection(cli, fake_tools, monkeypatc
 
 
 def test_fpocket_still_needed_with_only_one_explicit_triplet(cli, fake_tools, monkeypatch):
-    monkeypatch.setattr(runner, "FPOCKET", None)
+    tools.configure(fpocket=None)
     argv, _ = cli
     assert _exit_code(argv + ["--grid-center", "1,2,3"]) == runner.EXIT_USAGE
 
@@ -738,7 +734,7 @@ def test_derived_outputs_are_defined_once():
 # ---------------------------------------------------------------------------
 
 def test_ctrl_c_during_smina_only_docking(cli, fake_tools, monkeypatch, caplog):
-    monkeypatch.setattr(runner, "SMINA", sys.executable)
+    tools.configure(smina=sys.executable)
 
     def interrupted(args, state):
         state["docking_started"] = True
@@ -755,7 +751,7 @@ def test_ctrl_c_during_smina_only_docking(cli, fake_tools, monkeypatch, caplog):
 @pytest.mark.parametrize("extra", [["--vina-bin", sys.executable], ["--smina-only"]])
 def test_qvina_env_conflict_names_the_variable(cli, fake_tools, monkeypatch, capsys, extra):
     monkeypatch.setenv("VS_ENABLE_QVINA_FALLBACK", "1")
-    monkeypatch.setattr(runner, "QVINA", sys.executable)
+    tools.configure(qvina=sys.executable)
     argv, _ = cli
     assert _exit_code(argv + extra) == runner.EXIT_USAGE
     err = capsys.readouterr().err
@@ -799,7 +795,7 @@ def test_locked_output_dir_is_left_untouched(cli, fake_tools, monkeypatch, caplo
     receptor.pdbqt, grid.conf and run_manifest.json before it hit the lock
     (and --smina-only never locked). It now stops with exit 2 before writing
     anything, in every mode."""
-    monkeypatch.setattr(runner, "SMINA", sys.executable)
+    tools.configure(smina=sys.executable)
 
     def must_not_run(args, state):
         raise AssertionError("the pipeline must not start")
@@ -829,7 +825,7 @@ def test_lock_is_held_for_the_whole_run_and_released(cli, fake_tools, monkeypatc
     def pipeline(args, state):
         seen["held"] = ckpt.holds_lock(args.output)
         # The checkpoint re-uses the run's lock and must not release it.
-        cp = runner.DockingCheckpoint(args.output)
+        cp = checkpoint.DockingCheckpoint(args.output)
         cp.close()
         seen["after_close"] = ckpt.holds_lock(args.output)
         return runner.EXIT_OK
@@ -894,7 +890,7 @@ def test_run_manifest_write_is_atomic(tmp_path, monkeypatch):
 
 
 def test_threads_per_process_recorded(cli, fake_tools, monkeypatch):
-    monkeypatch.setattr(runner, "available_cpus", lambda: 8)
+    monkeypatch.setattr(utils, "available_cpus", lambda: 8)
     seen = {}
 
     def fake_args(processes, threads):

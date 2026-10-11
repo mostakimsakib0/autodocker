@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Shared helpers: subprocess execution, Open Babel calls, chain parsing.
 
-Cross-module references go through the ``runner`` namespace at call time so
-monkeypatching ``runner.<name>`` (e.g. ``runner.run`` in tests) keeps working.
+The tool paths and the command timeout come from ``tools.settings()``, read
+at call time. Every external command of the pipeline goes through ``run``
+(the Open Babel calls through ``run_obabel``), so a test can replace
+``utils.run`` to fake them.
 """
 import logging
 import os
@@ -13,12 +15,7 @@ from functools import lru_cache
 from multiprocessing import cpu_count as mp_cpu_count
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
-# The runner module owns the tool-path globals (OBABEL, VINA*, SMINA,
-# COMMAND_TIMEOUT); during the initial import of runner this binds the
-# partially-initialized module, which is fine because attributes are only
-# accessed at call time.
-import runner  # noqa: E402
-from vspipeline import defaults
+from vspipeline import defaults, tools
 
 logger = logging.getLogger(__name__)
 
@@ -60,24 +57,26 @@ _CONVERTED = re.compile(r"(\d+) molecules? converted")
 
 def run(cmd_list: List[str], capture: bool = False,
         extra_env: Optional[Dict[str, str]] = None) -> Optional[Tuple[str, str, int]]:
-    """Run a command (no shell) with the global ``runner.COMMAND_TIMEOUT``.
+    """Run a command (no shell) with the run's command timeout
+    (``tools.settings().command_timeout``).
 
     ``extra_env`` adds or overrides environment variables for this command only.
     """
     env = {**os.environ, **extra_env} if extra_env else None
+    timeout = tools.settings().command_timeout
     try:
         if capture:
             result = subprocess.run(
-                cmd_list, capture_output=True, text=True, timeout=runner.COMMAND_TIMEOUT,
+                cmd_list, capture_output=True, text=True, timeout=timeout,
                 env=env)
             if result.returncode != 0:
                 raise subprocess.CalledProcessError(
                     result.returncode, cmd_list, output=result.stdout, stderr=result.stderr
                 )
             return result.stdout, result.stderr, result.returncode
-        subprocess.run(cmd_list, check=True, timeout=runner.COMMAND_TIMEOUT, env=env)
+        subprocess.run(cmd_list, check=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
-        logger.error(f"Command timed out after {runner.COMMAND_TIMEOUT}s: {shlex.join(cmd_list)}")
+        logger.error(f"Command timed out after {timeout}s: {shlex.join(cmd_list)}")
         raise
     except subprocess.CalledProcessError as e:
         logger.error(
@@ -121,9 +120,10 @@ def _obabel_version_of(path: str) -> Optional[Tuple[int, int, int]]:
 
 
 def obabel_version(path: Optional[str] = None) -> Optional[Tuple[int, int, int]]:
-    """Version of the Open Babel executable ``path`` (default
-    ``runner.OBABEL``), None when it cannot be run or read."""
-    path = path or runner.OBABEL
+    """Version of the Open Babel executable ``path`` (default: the obabel
+    found on PATH, ``tools.settings().obabel``), None when it cannot be run
+    or read."""
+    path = path or tools.settings().obabel
     return _obabel_version_of(path) if path else None
 
 
@@ -152,14 +152,15 @@ def run_obabel(args: List[str], outputs: Iterable[str] = (),
     ``outputs`` missing or empty is a failure too (ObabelNoOutput, a
     RuntimeError).
     """
-    if not runner.OBABEL:
+    obabel = tools.settings().obabel
+    if not obabel:
         raise RuntimeError("Open Babel (obabel) not found in PATH")
-    cmd = [runner.OBABEL, *args]
+    cmd = [obabel, *args]
     env = obabel_env(seed)
     logger.debug("Running: " + " ".join(f"{k}={v}" for k, v in env.items())
                  + f" {shlex.join(cmd)}")
     try:
-        result = runner.run(cmd, capture=True, extra_env=env)
+        result = run(cmd, capture=True, extra_env=env)
     except BaseException as e:
         for path in outputs:
             try:
@@ -168,7 +169,7 @@ def run_obabel(args: List[str], outputs: Iterable[str] = (),
                 pass
         if isinstance(e, subprocess.TimeoutExpired):
             raise RuntimeError(
-                f"obabel timed out after {runner.COMMAND_TIMEOUT}s") from e
+                f"obabel timed out after {tools.settings().command_timeout}s") from e
         if isinstance(e, subprocess.CalledProcessError):
             raise RuntimeError(
                 f"obabel exited with code {e.returncode}: {_tail(e.stderr)}") from e

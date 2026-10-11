@@ -6,6 +6,7 @@ import os
 import pytest
 
 import runner
+from vspipeline import tools
 import vspipeline.flexible as fl
 import vspipeline.hydrogens as hyd
 import vspipeline.pocket as pocket
@@ -16,7 +17,7 @@ DATA = os.path.join(os.path.dirname(__file__), "data", "prep")
 SEMET = os.path.join(DATA, "1hsg_semet_fragment.pdb")
 ZN = os.path.join(DATA, "1hsg_zn_fragment.pdb")
 
-needs_obabel = pytest.mark.skipif(runner.OBABEL is None, reason="obabel not available")
+needs_obabel = pytest.mark.skipif(tools.settings().obabel is None, reason="obabel not available")
 
 
 def _atoms(path):
@@ -51,7 +52,7 @@ def _fake_run(stderr, write=None):
 
 def test_run_obabel_fails_when_zero_molecules_converted(tmp_path, monkeypatch):
     out = tmp_path / "x.pdbqt"
-    monkeypatch.setattr(runner, "run", _fake_run(
+    monkeypatch.setattr(utils, "run", _fake_run(
         "*** Open Babel Warning\n0 molecules converted\n", write=""))
     with pytest.raises(RuntimeError, match="converted 0 molecules") as exc:
         utils.run_obabel(["-ipdb", "a.pdb", "-opdbqt", "-O", str(out)], outputs=[str(out)])
@@ -61,14 +62,14 @@ def test_run_obabel_fails_when_zero_molecules_converted(tmp_path, monkeypatch):
 
 def test_run_obabel_fails_on_missing_or_empty_output(tmp_path, monkeypatch):
     out = tmp_path / "x.pdbqt"
-    monkeypatch.setattr(runner, "run", _fake_run("1 molecule converted\n"))
+    monkeypatch.setattr(utils, "run", _fake_run("1 molecule converted\n"))
     with pytest.raises(RuntimeError, match="wrote no output file x.pdbqt"):
         utils.run_obabel(["-O", str(out)], outputs=[str(out)])
-    monkeypatch.setattr(runner, "run", _fake_run("1 molecule converted\n", write=""))
+    monkeypatch.setattr(utils, "run", _fake_run("1 molecule converted\n", write=""))
     with pytest.raises(RuntimeError, match="empty x.pdbqt"):
         utils.run_obabel(["-O", str(out)], outputs=[str(out)])
     assert not out.exists()
-    monkeypatch.setattr(runner, "run", _fake_run("1 molecule converted\n", write="ATOM\n"))
+    monkeypatch.setattr(utils, "run", _fake_run("1 molecule converted\n", write="ATOM\n"))
     utils.run_obabel(["-O", str(out)], outputs=[str(out)])
     assert out.read_text() == "ATOM\n"
 

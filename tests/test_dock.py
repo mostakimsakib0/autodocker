@@ -3,8 +3,7 @@ import os
 
 import pytest
 
-import runner
-from vspipeline import docking
+from vspipeline import docking, tools, utils
 
 
 def test_duplicate_names_rejected(tmp_path, charged_pdbqt):
@@ -12,7 +11,7 @@ def test_duplicate_names_rejected(tmp_path, charged_pdbqt):
     outdir = str(tmp_path / "out")
     os.makedirs(outdir, exist_ok=True)
     with pytest.raises(ValueError, match="Duplicate ligand names"):
-        runner.dock_all(
+        docking.dock_all(
             receptor=lig, ligands=[lig, lig], grid_file=lig,
             outdir=outdir, num_processes=1, resume=False)
 
@@ -20,7 +19,7 @@ def test_duplicate_names_rejected(tmp_path, charged_pdbqt):
 def test_dock_all_empty_ligands(tmp_path, charged_pdbqt):
     outdir = str(tmp_path / "out")
     os.makedirs(outdir, exist_ok=True)
-    results, checkpoint, metrics = runner.dock_all(
+    results, checkpoint, metrics = docking.dock_all(
         receptor=charged_pdbqt, ligands=[], grid_file=charged_pdbqt,
         outdir=outdir, num_processes=1, resume=False)
     assert results == []
@@ -37,7 +36,7 @@ def test_all_fail_reports_failed_rows_with_pointer(tmp_path, empty_pdbqt, caplog
     with open(receptor, "w", encoding="utf-8") as f:
         f.write("END\n")
     with caplog.at_level("ERROR"):
-        results, _checkpoint, metrics = runner.dock_all(
+        results, _checkpoint, metrics = docking.dock_all(
             receptor=receptor, ligands=[empty_pdbqt], grid_file=receptor,
             outdir=outdir, num_processes=1, resume=False,
             vina_params={"seed": 42})
@@ -47,7 +46,7 @@ def test_all_fail_reports_failed_rows_with_pointer(tmp_path, empty_pdbqt, caplog
 
 
 def test_dock_ligand_missing_ligand_file(tmp_path, charged_pdbqt):
-    name, score, metrics = runner.dock_ligand((
+    name, score, metrics = docking.dock_ligand((
         charged_pdbqt, str(tmp_path / "missing.pdbqt"),
         charged_pdbqt, str(tmp_path), {}, None))
     assert score is None
@@ -56,7 +55,7 @@ def test_dock_ligand_missing_ligand_file(tmp_path, charged_pdbqt):
 
 
 def test_dock_ligand_missing_receptor(tmp_path, charged_pdbqt):
-    name, score, metrics = runner.dock_ligand((
+    name, score, metrics = docking.dock_ligand((
         str(tmp_path / "missing_rec.pdbqt"), charged_pdbqt,
         charged_pdbqt, str(tmp_path), {}, None))
     assert score is None
@@ -75,7 +74,7 @@ def test_zero_charge_receptor_and_ligand_only_warn(tmp_path, zero_charge_pdbqt, 
 
 
 def test_build_vina_command_standard():
-    cmd = runner._build_vina_command(
+    cmd = docking._build_vina_command(
         "/usr/bin/vina", "rec.pdbqt", "lig.pdbqt", "out.pdbqt",
         {"center_x": 1, "center_y": 2, "center_z": 3,
          "size_x": 24, "size_y": 24, "size_z": 24},
@@ -89,7 +88,7 @@ def test_build_vina_command_standard():
 
 
 def test_build_vina_command_quickvina_uses_config():
-    cmd = runner._build_vina_command(
+    cmd = docking._build_vina_command(
         "qvina2", "rec.pdbqt", "lig.pdbqt", "out.pdbqt",
         {"center_x": 1}, {"exhaustiveness": 8, "binding_modes": 9,
                           "energy_range": 3.0, "seed": 42},
@@ -102,8 +101,8 @@ def test_build_vina_command_quickvina_uses_config():
 
 
 def test_build_vina_command_threads(monkeypatch):
-    monkeypatch.setattr(runner, "_vina_cpu_flag", lambda p: "--cpu")
-    cmd = runner._build_vina_command(
+    monkeypatch.setattr(docking, "_vina_cpu_flag", lambda p: "--cpu")
+    cmd = docking._build_vina_command(
         "/usr/bin/vina", "rec.pdbqt", "lig.pdbqt", "out.pdbqt",
         {"center_x": 1, "size_x": 24},
         {"exhaustiveness": 8, "binding_modes": 9, "energy_range": 3.0,
@@ -113,8 +112,8 @@ def test_build_vina_command_threads(monkeypatch):
 
 
 def test_build_vina_command_threads_unsupported(monkeypatch):
-    monkeypatch.setattr(runner, "_vina_cpu_flag", lambda p: None)
-    cmd = runner._build_vina_command(
+    monkeypatch.setattr(docking, "_vina_cpu_flag", lambda p: None)
+    cmd = docking._build_vina_command(
         "/usr/bin/vina", "rec.pdbqt", "lig.pdbqt", "out.pdbqt",
         {"center_x": 1, "size_x": 24},
         {"exhaustiveness": 8, "binding_modes": 9, "energy_range": 3.0,
@@ -138,7 +137,7 @@ def test_vina_cpu_flag_detection(monkeypatch, help_text, expected):
 
 
 def test_build_vina_command_no_threads_by_default():
-    cmd = runner._build_vina_command(
+    cmd = docking._build_vina_command(
         "/usr/bin/vina", "rec.pdbqt", "lig.pdbqt", "out.pdbqt",
         {"center_x": 1, "size_x": 24},
         {"exhaustiveness": 8, "binding_modes": 9, "energy_range": 3.0,
@@ -334,7 +333,7 @@ def test_fallback_engine_is_recorded_and_warned(tmp_path, monkeypatch, caplog):
 def test_timeout_comes_from_job_config(tmp_path, monkeypatch):
     eng = _fake_engine(tmp_path)
     monkeypatch.setenv("FAKE_MODE_vina", "sleep")
-    monkeypatch.setattr(runner, "COMMAND_TIMEOUT", 999)
+    tools.configure(command_timeout=999)
     t0 = __import__("time").time()
     _, score, metrics = docking.dock_ligand(_job(tmp_path, eng, timeout=1))
     assert __import__("time").time() - t0 < 20
@@ -388,7 +387,7 @@ def test_explicit_params_beat_environment(tmp_path, monkeypatch):
 
     def fake(job):
         seen.update(job.vina_params)
-        return runner.ligand_name(job.ligand), -7.0, {"status": "OK"}
+        return utils.ligand_name(job.ligand), -7.0, {"status": "OK"}
 
     monkeypatch.setattr(docking, "dock_ligand", fake)
     lig = _ligand(tmp_path)
@@ -406,7 +405,7 @@ def test_engine_config_reaches_worker_explicitly(tmp_path, monkeypatch):
 
     def fake(job):
         seen.append(job.engine)
-        return runner.ligand_name(job.ligand), -7.0, {"status": "OK"}
+        return utils.ligand_name(job.ligand), -7.0, {"status": "OK"}
 
     monkeypatch.setattr(docking, "dock_ligand", fake)
     lig = _ligand(tmp_path)
@@ -422,7 +421,7 @@ SPAWN_SCRIPT = r"""
 import json, multiprocessing, sys
 sys.path.insert(0, sys.argv[1])
 multiprocessing.set_start_method("spawn", force=True)
-from vspipeline import docking          # imported before runner on purpose
+from vspipeline import docking          # imported on its own on purpose
 if __name__ == "__main__":
     engine, rec, lig1, lig2, grid, out = sys.argv[2:8]
     cfg = docking.EngineConfig(engine, engine, None, 60)
@@ -435,8 +434,9 @@ if __name__ == "__main__":
 
 
 def test_dock_all_under_spawn_uses_explicit_engine(tmp_path):
-    """Workers started with 'spawn' re-import runner (whose globals would
-    point at the system vina); the EngineConfig passed in each job must win."""
+    """Workers started with 'spawn' re-import the modules (whose tool
+    settings would point at the system vina); the EngineConfig passed in each
+    job must win."""
     import json
     import subprocess
     import sys

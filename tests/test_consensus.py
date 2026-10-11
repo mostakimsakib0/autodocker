@@ -3,9 +3,8 @@ from dataclasses import dataclass
 
 import pytest
 
-import runner
 import vspipeline.consensus as cons
-from vspipeline import docking
+from vspipeline import docking, tools
 
 
 def test_rankdata_no_ties():
@@ -104,7 +103,7 @@ SMINA_TABLE = (
 
 @pytest.fixture
 def fake_smina(monkeypatch):
-    monkeypatch.setattr(runner, "SMINA", "smina")
+    tools.configure(smina="smina")
     calls = {}
 
     class FakeResult:
@@ -145,7 +144,7 @@ def test_run_smina_docking(fake_smina, tmp_path):
 
 
 def test_run_smina_docking_no_binary(monkeypatch):
-    monkeypatch.setattr(runner, "SMINA", None)
+    tools.configure(smina=None)
     assert cons.run_smina_docking("r", "l", "o", 1, 2, 3, 4, 5, 6) is None
 
 

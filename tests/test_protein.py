@@ -2,8 +2,8 @@ import os
 
 import pytest
 
-import runner
 import vspipeline.protein as prot
+from vspipeline import charges, tools, utils
 from tests.test_flexible import _atom  # reuse PDB ATOM line builder
 from tests.test_pocket import _het  # reuse HETATM line builder
 
@@ -57,7 +57,7 @@ def test_select_chain_multiple(tmp_path):
     assert pp.select_chain() == "A"
 
 
-@pytest.mark.skipif(runner.OBABEL is None, reason="obabel not available")
+@pytest.mark.skipif(tools.settings().obabel is None, reason="obabel not available")
 def test_prepare_receptor_real(tmp_path):
     p = tmp_path / "prot.pdb"
     _pdb(p, _protein_pdb(120))
@@ -65,7 +65,7 @@ def test_prepare_receptor_real(tmp_path):
     chains = pp.prepare_receptor(chain="A")
     assert chains == ["A"]
     assert os.path.exists(pp.receptor_pdbqt)
-    assert runner._ensure_pdbqt_has_charges(pp.receptor_pdbqt)
+    assert charges._ensure_pdbqt_has_charges(pp.receptor_pdbqt)
 
 
 def test_protein_centroid_grid(tmp_path):
@@ -94,9 +94,9 @@ def test_detect_pocket_fails_loudly_when_fpocket_fails(tmp_path, monkeypatch):
     def fake_run(cmd, *a, **k):
         raise subprocess.CalledProcessError(1, cmd, output="", stderr="segfault")
 
-    monkeypatch.setattr(runner, "find_tool", lambda *names: "/usr/bin/fpocket")
+    monkeypatch.setattr(tools, "find_tool", lambda *names: "/usr/bin/fpocket")
     monkeypatch.setattr(prot, "_fpocket_version", lambda path: None)
-    monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(utils, "run", fake_run)
     pp = prot.ProteinPreparation(str(p), str(tmp_path))
     with pytest.raises(RuntimeError, match="fpocket failed"):
         pp.detect_pocket(padding=6.0)

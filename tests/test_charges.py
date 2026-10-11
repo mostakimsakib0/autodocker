@@ -2,8 +2,8 @@ import os
 
 import pytest
 
-import runner
 import vspipeline.charges as ch
+from vspipeline import tools, utils
 
 
 def _write(path, lines):
@@ -83,8 +83,8 @@ def test_fix_pdbqt_charges_success(tmp_path, monkeypatch):
             "ATOM      1  C   ALA A   1      0.0 0.0 0.0  0.0 0.0    -0.250 C\n")
         return ("", "", 0)
 
-    monkeypatch.setattr(runner, "run", fake_run)
-    monkeypatch.setattr(runner, "OBABEL", "obabel")
+    monkeypatch.setattr(utils, "run", fake_run)
+    tools.configure(obabel="obabel")
     ch._fix_pdbqt_charges(str(out), str(src))
     assert ch._ensure_pdbqt_has_charges(str(out)) is True
 
@@ -97,15 +97,15 @@ def test_fix_pdbqt_charges_failure_raises(tmp_path, monkeypatch):
     def fake_run(cmd, capture=False, **kwargs):
         raise RuntimeError("obabel missing")
 
-    monkeypatch.setattr(runner, "run", fake_run)
-    monkeypatch.setattr(runner, "OBABEL", "obabel")
+    monkeypatch.setattr(utils, "run", fake_run)
+    tools.configure(obabel="obabel")
     with pytest.raises(RuntimeError):
         ch._fix_pdbqt_charges(str(out), str(src))
 
 
 def test_new_name_and_backwards_compatible_alias():
     assert ch._ensure_pdbqt_has_charges is ch._pdbqt_has_nonzero_charges
-    assert runner._ensure_pdbqt_has_charges is ch._pdbqt_has_nonzero_charges
+    assert ch._ensure_pdbqt_has_charges is ch._pdbqt_has_nonzero_charges
 
 
 ATOM_3D = "ATOM      1  C   LIG A   1       1.000   2.000   3.000  0.00  0.00    +0.000 C \n"
@@ -122,8 +122,8 @@ def _capture_run(monkeypatch, write=None):
             f.write(write or "ATOM      1  C   LIG A   1       1.000   2.000   3.000  0.00  0.00    -0.250 C \n")
         return ("", "", 0)
 
-    monkeypatch.setattr(runner, "run", fake_run)
-    monkeypatch.setattr(runner, "OBABEL", "obabel")
+    monkeypatch.setattr(utils, "run", fake_run)
+    tools.configure(obabel="obabel")
     return calls
 
 
@@ -174,7 +174,7 @@ def test_fix_charges_accepts_all_zero_hydrocarbon(tmp_path, monkeypatch, caplog)
     assert "All Gasteiger charges are zero" in caplog.text
 
 
-@pytest.mark.skipif(runner.OBABEL is None, reason="obabel not available")
+@pytest.mark.skipif(tools.settings().obabel is None, reason="obabel not available")
 def test_fix_charges_real_benzene_keeps_coordinates(tmp_path):
     from rdkit import Chem
     from rdkit.Chem import AllChem
@@ -185,7 +185,7 @@ def test_fix_charges_real_benzene_keeps_coordinates(tmp_path):
     src = str(tmp_path / "benzene.mol")
     Chem.MolToMolFile(m, src)
     out = str(tmp_path / "benzene.pdbqt")
-    runner.run([runner.OBABEL, src, "-opdbqt", "-O", out])
+    utils.run([tools.settings().obabel, src, "-opdbqt", "-O", out])
     before = ch._read_coordinates(out)
     ch._fix_pdbqt_charges(out, src)               # must not raise for a hydrocarbon
     after = ch._read_coordinates(out)

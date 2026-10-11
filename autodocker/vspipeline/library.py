@@ -8,8 +8,8 @@ ligand is recorded in ``ligand_metadata.json`` (source file, descriptors,
 minimization, and for PubChem compounds the CID, download URL and retrieval
 time).
 
-Cross-module references go through the ``runner`` namespace at call time so
-monkeypatching ``runner.<name>`` (e.g. ``runner.run`` in tests) keeps working.
+Helpers that tests replace (``utils.run``, ``net._http_get_bytes``,
+``charges._ensure_pdbqt_has_charges`` ...) are called through their module.
 """
 import json
 import logging
@@ -23,8 +23,7 @@ from urllib.parse import quote
 
 from vspipeline import defaults  # noqa: E402
 from vspipeline import outputs  # noqa: E402
-import runner  # noqa: E402  (tool paths and shared helpers, resolved at call time)
-from vspipeline import conformers, net  # noqa: E402
+from vspipeline import admet, charges, conformers, net, utils  # noqa: E402
 from vspipeline.admet import (  # noqa: E402
     LIPINSKI_HBA_MAX,
     LIPINSKI_HBD_MAX,
@@ -419,7 +418,7 @@ class LibraryManager:
                 continue
             try:
                 pdbqt = self._prepare_pubchem_compound(
-                    cids[0], runner._safe_ligand_id(name), limits, query=name)
+                    cids[0], utils._safe_ligand_id(name), limits, query=name)
             except PubChemUnreachable:
                 raise
             except FilterRejected as e:
@@ -454,7 +453,7 @@ class LibraryManager:
         re-raised for the caller without changing the count.
         """
         try:
-            content = runner._http_get_bytes(url)
+            content = net._http_get_bytes(url)
         except Exception as e:
             if net.is_network_failure(e):
                 self._network_failures += 1
@@ -526,8 +525,8 @@ class LibraryManager:
         source, removed = self._largest_fragment("sdf", sdf_file, ligand_id)
         props = None
         if limits:
-            props = runner.ADMETFilter.parse_sdf_properties(source, seed=self.seed)
-            passes, violations = runner.ADMETFilter.check_lipinski(props, **limits)
+            props = admet.ADMETFilter.parse_sdf_properties(source, seed=self.seed)
+            passes, violations = admet.ADMETFilter.check_lipinski(props, **limits)
             if not passes:
                 for path in {sdf_file, source}:
                     try:
@@ -599,9 +598,9 @@ class LibraryManager:
                 os.remove(out)
             raise RuntimeError("Open Babel produced an empty PDBQT"
                                + _unsupported_elements_hint(fmt, src, self.seed))
-        if not runner._ensure_pdbqt_has_charges(out):
+        if not charges._ensure_pdbqt_has_charges(out):
             try:
-                runner._fix_pdbqt_charges(out, src, gen3d=False, seed=self.seed)
+                charges._fix_pdbqt_charges(out, src, gen3d=False, seed=self.seed)
             except RuntimeError as e:
                 raise RuntimeError(f"{e}{_unsupported_elements_hint(fmt, src, self.seed)}") from e
         elif _zero_charge_polar_hydrogens(out) and fmt in ("sdf", "mol2"):
@@ -626,9 +625,9 @@ class LibraryManager:
         with tempfile.TemporaryDirectory(prefix="autodocker_") as tmp:
             protonated = os.path.join(tmp, f"protonated.{fmt}")
             charged = os.path.join(tmp, "charged.pdbqt")
-            runner.run_obabel([f"-i{fmt}", src, f"-o{fmt}", "-O", protonated, "-h"],
+            utils.run_obabel([f"-i{fmt}", src, f"-o{fmt}", "-O", protonated, "-h"],
                               outputs=[protonated], seed=self.seed)
-            runner.run_obabel([f"-i{fmt}", protonated, "-opdbqt", "-O", charged,
+            utils.run_obabel([f"-i{fmt}", protonated, "-opdbqt", "-O", charged,
                                "--partialcharge", "gasteiger"], outputs=[charged],
                               seed=self.seed)
             with open(charged, encoding="utf-8") as f:
@@ -663,7 +662,7 @@ class LibraryManager:
             os.remove(gen3d_file)
         try:
             method = conformers.generate_3d(
-                sdf_file, gen3d_file, seed=self.seed, run_obabel=runner.run_obabel)
+                sdf_file, gen3d_file, seed=self.seed, run_obabel=utils.run_obabel)
         except (ValueError, RuntimeError) as e:
             raise LigandRejected(f"3D coordinate generation failed: {e}") from e
         problem = _generated_3d_problem(gen3d_file)
@@ -704,7 +703,7 @@ class LibraryManager:
         ``fragments_removed``.
         """
         if props is None:
-            props = runner.ADMETFilter.parse_sdf_properties(sdf_file, seed=self.seed) or {}
+            props = admet.ADMETFilter.parse_sdf_properties(sdf_file, seed=self.seed) or {}
         input_is_2d = not _sdf_has_3d_coords(sdf_file)
         source = sdf_file
         coordinates = "input"
@@ -726,7 +725,7 @@ class LibraryManager:
                 # Open Babel exits 0 even when MMFF94 cannot be set up (e.g.
                 # boron compounds) and then writes nothing, so check the file.
                 try:
-                    runner.run_obabel(cmd, outputs=[minimized_file], seed=self.seed)
+                    utils.run_obabel(cmd, outputs=[minimized_file], seed=self.seed)
                 except ObabelNoOutput:
                     raise RuntimeError("Open Babel wrote no minimized molecule "
                                        "(MMFF94 setup failed?)") from None
@@ -805,7 +804,7 @@ class LibraryManager:
         when RDKit cannot read the result the ligand is rejected."""
         flat_sdf = os.path.join(self.minimized_dir, f"{ligand_id}_2d.sdf")
         title_args = ["--title", title] if title is not None else []
-        runner.run_obabel([f"-i{fmt}", src, "-osdf", "-O", flat_sdf, *title_args],
+        utils.run_obabel([f"-i{fmt}", src, "-osdf", "-O", flat_sdf, *title_args],
                           outputs=[flat_sdf], seed=self.seed)
         try:
             gen3d_file, method = self._generate_3d(flat_sdf, ligand_id)
@@ -829,12 +828,12 @@ class LibraryManager:
         as there is no way to tell which one is the ligand. Fragments are
         found by Open Babel (bonds as written, or perceived for PDB).
         """
-        stdout = runner.run_obabel([f"-i{fmt}", path, "-ocan"], seed=self.seed)
+        stdout = utils.run_obabel([f"-i{fmt}", path, "-ocan"], seed=self.seed)
         first = (stdout.splitlines() or [""])[0]
         smiles, _, title = first.partition("\t")
         if "." not in smiles.strip():
             return path, []
-        stdout = runner.run_obabel([f"-i{fmt}", path, "--separate", "-d", "-ocan",
+        stdout = utils.run_obabel([f"-i{fmt}", path, "--separate", "-d", "-ocan",
                                     "--append", "atoms"], seed=self.seed)
         fragments = []
         for line in stdout.splitlines():
@@ -861,7 +860,7 @@ class LibraryManager:
         target = os.path.join(self.minimized_dir, f"{ligand_id}_fragment.{fmt}")
         with tempfile.TemporaryDirectory(prefix="autodocker_") as tmp:
             base = os.path.join(tmp, f"frag.{fmt}")
-            runner.run_obabel([f"-i{fmt}", path, f"-o{fmt}", "-O", base, "--separate",
+            utils.run_obabel([f"-i{fmt}", path, f"-o{fmt}", "-O", base, "--separate",
                                "-m", "--title", title.strip()], seed=self.seed)
             written = os.path.join(tmp, f"frag{keep + 1}.{fmt}")
             if not os.path.exists(written) or os.path.getsize(written) == 0:
@@ -973,10 +972,10 @@ class LibraryManager:
         if fmt == "sdf":
             props = None
             if apply_lipinski:
-                props = runner.ADMETFilter.parse_sdf_properties(source, seed=self.seed)
+                props = admet.ADMETFilter.parse_sdf_properties(source, seed=self.seed)
                 if props is None:
                     raise LigandRejected("Invalid SDF or incomplete descriptors")
-                ok, violations = runner.ADMETFilter.check_lipinski(props)
+                ok, violations = admet.ADMETFilter.check_lipinski(props)
                 if not ok:
                     raise LigandRejected("Lipinski: " + ", ".join(violations))
             return self._prepare_sdf_to_pdbqt(source, out, name, props=props,

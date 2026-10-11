@@ -2,8 +2,8 @@ import os
 
 import pytest
 
-import runner
 import vspipeline.admet as admet
+from vspipeline import tools, utils
 
 DATA = os.path.join(os.path.dirname(__file__), "data", "runner")
 
@@ -128,7 +128,7 @@ def test_check_lipinski_missing():
 
 def test_admet_filter_is_a_deprecated_alias():
     assert admet.ADMETFilter is admet.LipinskiFilter
-    assert runner.ADMETFilter is runner.LipinskiFilter
+    assert admet.ADMETFilter is admet.LipinskiFilter
 
 
 def test_parse_sdf_properties(monkeypatch, tmp_path):
@@ -148,7 +148,7 @@ def test_obabel_descriptors_real(tmp_path):
     p = tmp_path / "a.sdf"
     p.write_text(VALID_SDF)
     result = admet._obabel_descriptors(str(p))
-    if runner.OBABEL is None:
+    if tools.settings().obabel is None:
         assert result is None
     else:
         assert result["mw"] == pytest.approx(46.07, abs=0.05)
@@ -162,7 +162,7 @@ def test_obabel_descriptors_single_threaded(monkeypatch, tmp_path):
         calls.append((cmd, extra_env))
         return "CCO\tethanol\t46.07\t-0.0014\t20.23\t0\t1\t1\n", "", 0
 
-    monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(utils, "run", fake_run)
     p = tmp_path / "a.sdf"
     p.write_text(VALID_SDF)
     props = admet._obabel_descriptors(str(p))

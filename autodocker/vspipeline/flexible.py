@@ -11,13 +11,12 @@ import re
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from vspipeline import defaults  # noqa: E402
 from vspipeline import outputs  # noqa: E402
+from vspipeline import utils  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# Chain ID a blank PDB chain column is read as (protein.BLANK_CHAIN_ID,
-# utils.DEFAULT_CHAIN); repeated here so this module imports nothing that
-# imports runner.
-BLANK_CHAIN = "A"
+# Chain ID a blank PDB chain column is read as (protein.BLANK_CHAIN_ID).
+BLANK_CHAIN = utils.DEFAULT_CHAIN
 
 # PDBQT hydrogen atom types; hydrogens do not count towards residue distances.
 _PDBQT_HYDROGEN_TYPES = ("H", "HD", "HS")

@@ -9,7 +9,8 @@ import subprocess
 import pytest
 
 import runner
-
+from vspipeline import report as report_mod
+from vspipeline import protein, tools, utils
 pytestmark = pytest.mark.skipif(
     not (shutil.which("vina") and shutil.which("obabel")),
     reason="vina/obabel not available on PATH")
@@ -39,12 +40,12 @@ def test_main_end_to_end_writes_manifest(tmp_path, protein_pdb, caplog):
     assert len(manifest["tools"]["vina"]["sha256"]) == 64
     assert manifest["ligand_preparation"] == {"failed": 0, "superseded": 0}
     # Open Babel version and OB_RANDOM_SEED policy (docs/openbabel.md).
-    version = runner.obabel_version()
+    version = utils.obabel_version()
     assert manifest["openbabel_version"] == ".".join(map(str, version))
     ob_seed = manifest["openbabel_random_seed"]
     assert ob_seed["variable"] == "OB_RANDOM_SEED" and ob_seed["value"] == 3
     assert ob_seed["hydrogen_probe_values"] == [4, 5]
-    assert ob_seed["honoured"] is (version >= runner.OBABEL_SEEDABLE_VERSION)
+    assert ob_seed["honoured"] is (version >= utils.OBABEL_SEEDABLE_VERSION)
     assert (out / "ranking.csv").exists()
     meta = json.loads((out / "ligand_metadata.json").read_text())
     assert meta["ethanol"]["minimized"] is True
@@ -95,7 +96,7 @@ def test_runs_are_byte_identical_including_the_html_report(tmp_path, protein_pdb
                                                           monkeypatch):
     """Two runs with -p 1 and one with -p 2 write the same bytes in every
     output, results_report.html included (it has no timestamp)."""
-    monkeypatch.setattr(runner, "_fetch_ngljs", lambda: b"/* fake ngl */")
+    monkeypatch.setattr(report_mod, "_fetch_ngljs", lambda: b"/* fake ngl */")
     ligs = _ethanol_dir(tmp_path)
     subprocess.run([shutil.which("obabel"), "-:CC(=O)NCCO acetamide", "--gen3d", "-osdf",
                     "-O", str(ligs / "acetamide.sdf")], check=True, capture_output=True,
@@ -139,8 +140,8 @@ def test_explicit_box_needs_no_fpocket_and_stale_outputs_go(tmp_path, protein_pd
     def no_fpocket(*args, **kwargs):
         raise AssertionError("fpocket must not run with an explicit box")
 
-    monkeypatch.setattr(runner, "FPOCKET", None)
-    monkeypatch.setattr(runner.ProteinPreparation, "detect_pocket", no_fpocket)
+    tools.configure(fpocket=None)
+    monkeypatch.setattr(protein.ProteinPreparation, "detect_pocket", no_fpocket)
     argv = _base_argv(tmp_path, protein_pdb)
     out = tmp_path / "out"
     out.mkdir()
@@ -223,7 +224,7 @@ def test_all_ligands_failed_writes_outputs_and_exits_3(tmp_path, protein_pdb, ca
 
 
 def test_smina_only_all_failed_exits_3(tmp_path, protein_pdb, monkeypatch):
-    monkeypatch.setattr(runner, "SMINA", _failing_binary(tmp_path, "smina"))
+    tools.configure(smina=_failing_binary(tmp_path, "smina"))
     argv = _base_argv(tmp_path, protein_pdb, modes=False) + ["--no-fpocket", "--smina-only"]
     assert _main(argv) == runner.EXIT_TOO_MANY_FAILURES
     out = tmp_path / "out"

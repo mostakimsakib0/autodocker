@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """Docking: per-ligand Vina runs, run fingerprint, SimScore and metrics.
 
-Split out of runner.py. ``runner`` is imported lazily (see _LazyRunner) so
-this module can be imported first, e.g. by a spawned worker. The engine
-paths and the per-command timeout reach the worker processes explicitly,
-through the :class:`EngineConfig` stored in each :class:`DockJob`, so they
-survive the ``spawn`` start method (a spawned worker re-imports ``runner``
-and would otherwise see its import-time defaults). Helpers that are only
-called, not configured (``ligand_name``, ``_pdbqt_has_atoms``,
-``_vina_cpu_flag`` ...), are resolved through the ``runner`` namespace at
-call time so the tests' monkeypatches keep working.
+The engine paths and the per-command timeout reach the worker processes
+explicitly, through the :class:`EngineConfig` stored in each
+:class:`DockJob`, so they survive the ``spawn`` start method (a spawned
+worker re-imports the modules and would otherwise see the import-time tool
+settings, ``tools.settings()``). Helpers of other modules that tests replace
+(``utils.run``, ``utils.available_cpus`` ...) are called through their
+module.
 """
 from __future__ import annotations
 
@@ -35,27 +33,9 @@ from enum import Enum
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 from vspipeline import defaults  # noqa: E402
 from vspipeline import outputs  # noqa: E402
-
-
-
-class _LazyRunner:
-    """Attribute access to the ``runner`` module, imported on first use.
-
-    runner.py owns the tool-path globals and the public names, and imports
-    this module while it initializes. Importing runner lazily keeps this
-    module importable on its own: a ``spawn``-started worker unpickles
-    ``dock_ligand`` by importing vspipeline.docking first, and an eager
-    ``import runner`` there would re-enter runner's ``from vspipeline.docking
-    import ...`` on a half-initialized module. Every access reads the live
-    module, so ``monkeypatch.setattr(runner, ...)`` in tests is honored.
-    """
-
-    def __getattr__(self, name):
-        import runner as _runner
-        return getattr(_runner, name)
-
-
-runner = _LazyRunner()
+from vspipeline import tools, utils  # noqa: E402
+from vspipeline.charges import _pdbqt_has_atoms, _pdbqt_has_nonzero_charges  # noqa: E402
+from vspipeline.checkpoint import DockingCheckpoint  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -159,12 +139,14 @@ class EngineConfig:
     timeout: int = 900
 
     @classmethod
-    def from_runner(cls) -> "EngineConfig":
-        """Snapshot of the current runner globals (set by runner.main)."""
-        return cls(vina_primary=runner.VINA_PRIMARY,
-                   vina_fallback=runner.VINA_FALLBACK,
-                   smina=runner.SMINA,
-                   timeout=int(runner.COMMAND_TIMEOUT))
+    def from_settings(cls, settings: Optional[tools.ToolSettings] = None) -> "EngineConfig":
+        """Snapshot of ``settings`` (default: the current tool settings,
+        ``tools.settings()``, as configured by runner.main)."""
+        settings = settings or tools.settings()
+        return cls(vina_primary=settings.vina_primary,
+                   vina_fallback=settings.vina_fallback,
+                   smina=settings.smina,
+                   timeout=int(settings.command_timeout))
 
     def docking_engines(self) -> List[Tuple[str, str]]:
         """[(path, label)] in the order they are tried. The fallback is only
@@ -189,7 +171,7 @@ class DockJob:
     dock_dir: str
     vina_params: Dict
     flex_file: Optional[str] = None
-    engine: EngineConfig = field(default_factory=EngineConfig.from_runner)
+    engine: EngineConfig = field(default_factory=EngineConfig.from_settings)
 
 
 def _as_job(job: Union[DockJob, Sequence]) -> DockJob:
@@ -199,7 +181,7 @@ def _as_job(job: Union[DockJob, Sequence]) -> DockJob:
         return job
     receptor, lig, grid_file, dock_dir, vina_params, flex_file = job
     return DockJob(receptor, lig, grid_file, dock_dir, vina_params or {},
-                   flex_file, EngineConfig.from_runner())
+                   flex_file, EngineConfig.from_settings())
 
 
 # ---------------------------------------------------------------------------
@@ -508,10 +490,9 @@ def _file_key(path: str) -> Tuple[str, int, int]:
 def _cached_receptor_check(receptor: str) -> Tuple[bool, bool]:
     """Return (has_atoms, has_nonzero_charges) for the receptor, cached by
     (path, mtime_ns, size)."""
-    from vspipeline.charges import _pdbqt_has_nonzero_charges
     key = _file_key(receptor)
     if key not in _RECEPTOR_CACHE:
-        _RECEPTOR_CACHE[key] = (runner._pdbqt_has_atoms(receptor),
+        _RECEPTOR_CACHE[key] = (_pdbqt_has_atoms(receptor),
                                 _pdbqt_has_nonzero_charges(receptor))
     return _RECEPTOR_CACHE[key]
 
@@ -577,7 +558,7 @@ def _engine_supports_flex(vina_path: str) -> bool:
     detected engine type decides. Cached per binary."""
     if vina_path in _FLEX_SUPPORT_CACHE:
         return _FLEX_SUPPORT_CACHE[vina_path]
-    supported = runner._detect_vina_type(vina_path) in (ENGINE_VINA, ENGINE_QUICKVINA)
+    supported = _detect_vina_type(vina_path) in (ENGINE_VINA, ENGINE_QUICKVINA)
     help_text = _help_text(vina_path)
     if supported and help_text and "--" in help_text:
         supported = re.search(r"--flex\b", help_text) is not None
@@ -630,7 +611,7 @@ def _build_vina_command(vina_path: str, receptor: str, ligand: str, out: str,
     ``--center_*``/``--size_*``. ``--flex`` is passed whenever ``flex_file``
     is set, for every engine (dock_ligand refuses engines that cannot take it).
     """
-    vina_type = runner._detect_vina_type(vina_path)
+    vina_type = _detect_vina_type(vina_path)
 
     cmd = [
         vina_path,
@@ -644,8 +625,7 @@ def _build_vina_command(vina_path: str, receptor: str, ligand: str, out: str,
     ]
 
     if vina_params.get('threads'):
-        # Resolve via runner so test monkeypatches are honored.
-        cpu_flag = runner._vina_cpu_flag(vina_path)
+        cpu_flag = _vina_cpu_flag(vina_path)
         if cpu_flag:
             cmd.extend([cpu_flag, str(vina_params['threads'])])
         else:
@@ -670,7 +650,7 @@ def _build_vina_command(vina_path: str, receptor: str, ligand: str, out: str,
 def _log_tool_version(tool_path: str, label: str) -> None:
     """Best-effort tool version logging for reproducibility."""
     try:
-        stdout, stderr, _ = runner.run([tool_path, "--version"], capture=True)
+        stdout, stderr, _ = utils.run([tool_path, "--version"], capture=True)
         version_text = (stdout or stderr or "").strip().splitlines()
         if version_text:
             logger.info(f"[*] {label} version: {version_text[0]}")
@@ -704,7 +684,7 @@ def _failed(name: str, out: str, log: str, error: str, **extra) -> Tuple[str, No
 
 def _job_paths(job: DockJob) -> Tuple[str, str, str]:
     """(ligand name, pose file, log file) of one job."""
-    name = runner.ligand_name(job.ligand)
+    name = utils.ligand_name(job.ligand)
     return (name, os.path.join(job.dock_dir, name + outputs.POSE_SUFFIX),
             os.path.join(job.dock_dir, name + outputs.VINA_LOG_SUFFIX))
 
@@ -723,7 +703,7 @@ def _preflight(job: DockJob) -> Dict[str, float]:
         raise _DockingError(f"Ligand file missing: {job.ligand}")
     if job.flex_file and not os.path.exists(job.flex_file):
         raise _DockingError(f"Flexible receptor file missing: {job.flex_file}")
-    if not runner._pdbqt_has_atoms(job.ligand):
+    if not _pdbqt_has_atoms(job.ligand):
         raise _DockingError(f"Ligand has no ATOM/HETATM records: {job.ligand}")
     rec_has_atoms, _ = _cached_receptor_check(job.receptor)
     if not rec_has_atoms:
@@ -731,10 +711,9 @@ def _preflight(job: DockJob) -> Dict[str, float]:
     ligand_size = os.path.getsize(job.ligand)
     if ligand_size < MIN_LIGAND_PDBQT_BYTES:
         raise _DockingError(f"Ligand file too small ({ligand_size} bytes): {job.ligand}")
-    from vspipeline.charges import _pdbqt_has_nonzero_charges
     if not _pdbqt_has_nonzero_charges(job.ligand):
         logger.warning(
-            f"[!] {runner.ligand_name(job.ligand)}: all ligand partial charges are zero "
+            f"[!] {utils.ligand_name(job.ligand)}: all ligand partial charges are zero "
             "(not used by the Vina scoring function; docking continues)")
     if not job.engine.docking_engines():
         raise _DockingError("No docking engine configured")
@@ -831,10 +810,10 @@ def dock_ligand(job: Union[DockJob, Sequence]) -> Tuple[str, Optional[float], Di
 
     ``job`` is a :class:`DockJob` (the legacy 6-tuple ``(receptor, ligand,
     grid_file, dock_dir, vina_params, flex_file)`` is still accepted and uses
-    the current runner globals).
+    the current tool settings).
 
     The primary engine (Vina by default) is tried first. The fallback engine
-    (QuickVina, only when runner was started with --qvina-fallback)
+    (QuickVina, only when runner.py was started with --qvina-fallback)
     is tried only if the primary crashes, times out or writes unusable
     output; that is logged at WARNING and recorded in ``metrics["engine"]``
     so a ranking that mixes engines is visible. A valid result is never
@@ -957,7 +936,7 @@ def _run_fingerprint(receptor: str, grid_file: str, flex_file: Optional[str],
     configured. A result the fallback produced is tagged with the fallback's
     SHA-256 (metrics ``fallback_sha256``) and re-docked on its own when the
     fallback changes or is turned off (see dock_all)."""
-    engine = engine or EngineConfig.from_runner()
+    engine = engine or EngineConfig.from_settings()
     params = {k: v for k, v in vina_params.items() if k != "threads"}
     payload = json.dumps({
         "receptor": _file_sha256(receptor),
@@ -1171,7 +1150,7 @@ def _job_label(job) -> str:
     if name:
         return name
     ligand = getattr(job, "ligand", None)
-    return runner.ligand_name(ligand) if ligand else repr(job)
+    return utils.ligand_name(ligand) if ligand else repr(job)
 
 
 # ---------------------------------------------------------------------------
@@ -1197,13 +1176,13 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
              vina_params: Optional[Dict] = None,
              flex_file: Optional[str] = None,
              engine: Optional[EngineConfig] = None
-             ) -> Tuple[List[Tuple[str, Optional[float]]], "runner.DockingCheckpoint", Dict]:
+             ) -> Tuple[List[Tuple[str, Optional[float]]], DockingCheckpoint, Dict]:
     """Dock all ligands with resume and metrics.
 
     ``vina_params`` keys given by the caller always win; only missing keys
     are filled from ``$VS_*`` / built-in defaults. ``flex_file`` optionally
     points to a Vina flexible-receptor PDBQT. ``engine`` defaults to a
-    snapshot of the runner globals.
+    snapshot of the current tool settings (EngineConfig.from_settings).
 
     Returns ``(results, checkpoint, metrics)``. ``results`` holds
     ``(name, score)`` with score None for FAILED and OUT_OF_WINDOW ligands
@@ -1212,12 +1191,12 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
     is returned as FAILED (the caller writes the outputs and decides the exit
     code).
     """
-    engine = engine or EngineConfig.from_runner()
+    engine = engine or EngineConfig.from_settings()
     dock_dir = os.path.join(outdir, outputs.DOCKED_DIR)
     os.makedirs(dock_dir, exist_ok=True)
 
     # Guard against output collisions when ligand basenames are duplicated.
-    ligand_names = [runner.ligand_name(lig) for lig in ligands]
+    ligand_names = [utils.ligand_name(lig) for lig in ligands]
     duplicate_names = sorted(
         n for n, k in Counter(ligand_names).items() if k > 1)
     if duplicate_names:
@@ -1232,10 +1211,10 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
     # oversubscribe the CPU N-fold. Split the cores between workers unless
     # the user chose a limit. Seeded Vina output does not depend on --cpu.
     if not vina_params.get('threads') and num_processes > 1:
-        vina_params['threads'] = max(1, runner.available_cpus() // num_processes)
+        vina_params['threads'] = max(1, utils.available_cpus() // num_processes)
 
-    ligand_hashes = {runner.ligand_name(lig): _file_sha256(lig) for lig in ligands}
-    checkpoint = runner.DockingCheckpoint(
+    ligand_hashes = {utils.ligand_name(lig): _file_sha256(lig) for lig in ligands}
+    checkpoint = DockingCheckpoint(
         outdir, fingerprint=_run_fingerprint(receptor, grid_file, flex_file,
                                              vina_params, engine),
         resume=resume)
@@ -1255,15 +1234,15 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
     if resume:
         ligands_todo = [
             lig for lig in ligands
-            if runner.ligand_name(lig) in stale_fallback
-            or not checkpoint.is_completed(runner.ligand_name(lig),
-                                           ligand_hashes[runner.ligand_name(lig)])
+            if utils.ligand_name(lig) in stale_fallback
+            or not checkpoint.is_completed(utils.ligand_name(lig),
+                                           ligand_hashes[utils.ligand_name(lig)])
         ]
     else:
         ligands_todo = ligands
     # A ligand docked again (its file changed) must not keep its old result.
     for lig in ligands_todo:
-        checkpoint.completed.pop(runner.ligand_name(lig), None)
+        checkpoint.completed.pop(utils.ligand_name(lig), None)
 
     min_valid_affinity = float(vina_params['min_valid_affinity'])
     logger.info(

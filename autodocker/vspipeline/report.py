@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """HTML report and pose clustering.
 
-All cross-module references go through the ``runner`` namespace at call
-time so the public entry point and its monkeypatch surface stay unchanged.
 The report's CSS, JavaScript and viewer markup live in ``templates/``.
 Per-model scores of docking outputs come from the pipeline's shared parser
 (``docking.parse_pdbqt_results``), the same one that produces ranking.csv.
@@ -20,14 +18,11 @@ import logging
 from collections import defaultdict
 from typing import List, Tuple, Optional, Dict
 
-# The runner module owns the tool-path globals (OBABEL, VINA*, SMINA,
-# COMMAND_TIMEOUT) and every public name; import it lazily-safe: during the
-# initial import of runner this binds the partially-initialized module
-# object, which is fine because attributes are only accessed at call time.
 from vspipeline import defaults  # noqa: E402
+from vspipeline import net  # noqa: E402
 from vspipeline import outputs  # noqa: E402
-from vspipeline.docking import Status  # noqa: E402
-import runner  # noqa: E402
+from vspipeline.docking import Status, _parse_grid_config, parse_pdbqt_results  # noqa: E402
+from vspipeline.version import __version__  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +156,7 @@ def _models_from_vina_output(path: str) -> List[Dict]:
                 elif line.startswith('ENDMDL') and current:
                     poses.append({'file': f"{os.path.basename(path)}#{model}",
                                   'coords': current, 'affinity': None})
-        scores = runner.parse_pdbqt_results(path)
+        scores = parse_pdbqt_results(path)
     except (OSError, ValueError) as e:
         logger.debug(f"Could not read poses from {path}: {e}")
         return poses
@@ -293,7 +288,7 @@ def _fetch_ngljs() -> Optional[bytes]:
 
     for attempt in (1, 2):
         try:
-            data = runner._http_get_bytes(NGL_CDN_URL, timeout=NGL_DOWNLOAD_TIMEOUT)
+            data = net._http_get_bytes(NGL_CDN_URL, timeout=NGL_DOWNLOAD_TIMEOUT)
         except Exception as e:
             logger.debug(f"NGL download attempt {attempt} failed: {e}")
             time.sleep(1)
@@ -540,8 +535,7 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
     if not top:
         return ""
 
-    # Resolve via runner so test monkeypatches are honored.
-    ngl_js = runner._fetch_ngljs()
+    ngl_js = _fetch_ngljs()
     if ngl_js is None:
         return _viewer_notice(
             "3D viewer unavailable: no verified copy of the NGL viewer library "
@@ -643,7 +637,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
     grid_box = None
     if grid_file and os.path.exists(grid_file):
         try:
-            gc = runner._parse_grid_config(grid_file)
+            gc = _parse_grid_config(grid_file)
             if gc:
                 grid_box = {"center": [gc['center_x'], gc['center_y'], gc['center_z']],
                             "size": [gc['size_x'], gc['size_y'], gc['size_z']]}
@@ -668,7 +662,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
     css = _REPORT_CSS(bool(ranked_ligands))
     # No wall-clock time: identical runs write identical reports (the run's
     # start and end times are in run_manifest.json).
-    version = getattr(runner, "__version__", None) or "unknown"
+    version = __version__
 
     meta_items = ""
     if meta:

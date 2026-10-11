@@ -7,9 +7,9 @@ import shutil
 
 import pytest
 
-import runner
 import vspipeline.conformers as conf
 import vspipeline.hydrogens as hyd
+from vspipeline import tools, utils
 
 DATA = os.path.join(os.path.dirname(__file__), "data", "hydrogens")
 # CASF-2016 1nc3 ligand: Open Babel (-h, MOL2 input) puts the two hydrogens
@@ -18,7 +18,7 @@ DATA = os.path.join(os.path.dirname(__file__), "data", "hydrogens")
 LIGAND_1NC3 = os.path.join(DATA, "1nc3_ligand.mol2")
 LIGAND_2D = os.path.join(DATA, "ligand_2d.sdf")
 
-needs_obabel = pytest.mark.skipif(runner.OBABEL is None, reason="obabel not available")
+needs_obabel = pytest.mark.skipif(tools.settings().obabel is None, reason="obabel not available")
 needs_rdkit = pytest.mark.skipif(not conf.rdkit_available(), reason="RDKit not available")
 
 
@@ -54,7 +54,7 @@ def test_1nc3_ligand_does_not_depend_on_the_seed(tmp_path):
 @needs_obabel
 def test_1nc3_torsion_tree_and_typing_unchanged(tmp_path):
     raw = str(tmp_path / "raw.pdbqt")
-    runner.run([runner.OBABEL, "-imol2", LIGAND_1NC3, "-opdbqt", "-O", raw, "-h",
+    utils.run([tools.settings().obabel, "-imol2", LIGAND_1NC3, "-opdbqt", "-O", raw, "-h",
                 "--partialcharge", "gasteiger"], capture=True)
     det = _prepare_1nc3(str(tmp_path / "det.pdbqt")).decode().splitlines(True)
     raw_lines = open(raw, encoding="utf-8").read().splitlines(True)

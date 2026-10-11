@@ -3,8 +3,9 @@ import os
 
 
 import runner
-
-
+from vspipeline import net
+from vspipeline import report as report_mod
+from vspipeline import results as results_mod
 def _write(path, content):
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -43,7 +44,7 @@ def _ranking_csv(outdir, rows):
 
 class TestRankingCsv:
     def test_columns(self, outdir):
-        analyzer = runner.ResultsAnalyzer(outdir)
+        analyzer = results_mod.ResultsAnalyzer(outdir)
         results = [("ligA", -7.5), ("ligB", None)]
         analyzer.save_ranking(results, mode="extended",
                               metrics_dict={"ligA": {"status": "OK"},
@@ -69,7 +70,7 @@ class TestHtmlReport:
              "SimScore": "0.9", "Binding_Modes": "9", "Status": "OK"},
         ])
         html_path = os.path.join(outdir, "results_report.html")
-        runner.generate_html_report(csv_path, os.path.join(outdir, "docked"),
+        report_mod.generate_html_report(csv_path, os.path.join(outdir, "docked"),
                                     html_path)
         assert os.path.exists(html_path)
         with open(html_path, encoding="utf-8") as f:
@@ -86,7 +87,7 @@ class TestHtmlReport:
                 for i in range(5)]
         csv_path = _ranking_csv(outdir, rows)
         html_path = os.path.join(outdir, "results_report.html")
-        runner.generate_html_report(csv_path, os.path.join(outdir, "docked"),
+        report_mod.generate_html_report(csv_path, os.path.join(outdir, "docked"),
                                     html_path, top_n=3)
         with open(html_path, encoding="utf-8") as f:
             content = f.read()
@@ -95,7 +96,7 @@ class TestHtmlReport:
         assert "lig2" in top_table and "lig3" not in top_table
 
     def test_html_missing_csv_warns(self, outdir, caplog):
-        runner.generate_html_report(
+        report_mod.generate_html_report(
             os.path.join(outdir, "no.csv"), os.path.join(outdir, "docked"),
             os.path.join(outdir, "results_report.html"))
         assert not os.path.exists(os.path.join(outdir, "results_report.html"))
@@ -110,7 +111,7 @@ class TestHtmlReport:
              "SimScore": "0.9", "Binding_Modes": "9", "Status": "OK"},
         ])
         html_path = os.path.join(outdir, "results_report.html")
-        runner.generate_html_report(csv_path, os.path.join(outdir, "docked"),
+        report_mod.generate_html_report(csv_path, os.path.join(outdir, "docked"),
                                     html_path)
         with open(html_path, encoding="utf-8") as f:
             content = f.read()
@@ -128,7 +129,7 @@ class TestNglViewer:
 
     @staticmethod
     def _prepare(tmp_path, monkeypatch, ngl_bundle=b"/* fake ngl */"):
-        monkeypatch.setattr(runner, "_fetch_ngljs", lambda: ngl_bundle)
+        monkeypatch.setattr(report_mod, "_fetch_ngljs", lambda: ngl_bundle)
         outdir = str(tmp_path / "out")
         docked = os.path.join(outdir, "docked")
         os.makedirs(docked, exist_ok=True)
@@ -144,7 +145,7 @@ class TestNglViewer:
              "SimScore": "0.8", "Binding_Modes": "7", "Status": "OK"},
         ])
         html = os.path.join(outdir, "results_report.html")
-        runner.generate_html_report(
+        report_mod.generate_html_report(
             csv_path, docked, html,
             receptor_pdbqt=os.path.join(outdir, "receptor_b.pdbqt"))
         with open(html, encoding="utf-8") as f:
@@ -159,7 +160,7 @@ class TestNglViewer:
         assert "ligB" in content
         # Data is inlined, never referenced as external files:
         assert "viewer/ligA_pose.pdb" not in content
-        assert runner.NGL_CDN_URL not in content
+        assert report_mod.NGL_CDN_URL not in content
         # Inlined PDB text carries the receptor/pose atoms:
         assert "LIG L" in content
         assert "ALA A" in content
@@ -173,7 +174,7 @@ class TestNglViewer:
 
     def test_viewer_no_docked_notice(self, tmp_path, monkeypatch):
         """With no docked poses the viewer is replaced by a clear notice."""
-        monkeypatch.setattr(runner, "_fetch_ngljs", lambda: b"/* fake ngl */")
+        monkeypatch.setattr(report_mod, "_fetch_ngljs", lambda: b"/* fake ngl */")
         outdir = str(tmp_path / "out")
         os.makedirs(outdir, exist_ok=True)
         csv_path = _ranking_csv(outdir, [
@@ -181,7 +182,7 @@ class TestNglViewer:
              "SimScore": "0.9", "Binding_Modes": "9", "Status": "OK"},
         ])
         html = os.path.join(outdir, "results_report.html")
-        runner.generate_html_report(
+        report_mod.generate_html_report(
             csv_path, os.path.join(outdir, "docked"), html, receptor_pdbqt=None)
         with open(html, encoding="utf-8") as f:
             content = f.read()
@@ -191,12 +192,12 @@ class TestNglViewer:
     def test_ngl_inlined_not_cdn(self, tmp_path, monkeypatch):
         outdir, content = self._prepare(tmp_path, monkeypatch)
         assert 'src="viewer/ngl.min.js"' not in content
-        assert runner.NGL_CDN_URL not in content
+        assert report_mod.NGL_CDN_URL not in content
         assert "/* fake ngl */" in content
 
     def test_ngl_unavailable_notice(self, tmp_path, monkeypatch):
         """If the NGL library cannot be bundled, show a notice (no CDN)."""
-        monkeypatch.setattr(runner, "_fetch_ngljs", lambda: None)
+        monkeypatch.setattr(report_mod, "_fetch_ngljs", lambda: None)
         outdir = str(tmp_path / "out")
         docked = os.path.join(outdir, "docked")
         os.makedirs(docked, exist_ok=True)
@@ -206,12 +207,12 @@ class TestNglViewer:
              "SimScore": "0.9", "Binding_Modes": "9", "Status": "OK"},
         ])
         html = os.path.join(outdir, "results_report.html")
-        runner.generate_html_report(
+        report_mod.generate_html_report(
             csv_path, docked, html, receptor_pdbqt=None)
         with open(html, encoding="utf-8") as f:
             content = f.read()
         assert "3D viewer unavailable" in content
-        assert runner.NGL_CDN_URL not in content
+        assert report_mod.NGL_CDN_URL not in content
         assert "viewer-container" not in content
 
 def test_cluster_poses_reads_vina_output_and_skips_other_ligands(tmp_path):
@@ -258,7 +259,7 @@ def test_cluster_rmsd_uses_heavy_atoms_only(tmp_path):
 class TestReportContent:
     @staticmethod
     def _render(tmp_path, monkeypatch, rows, ngl=b"/* fake ngl */", poses=None):
-        monkeypatch.setattr(runner, "_fetch_ngljs", lambda: ngl)
+        monkeypatch.setattr(report_mod, "_fetch_ngljs", lambda: ngl)
         outdir = str(tmp_path / "out")
         docked = os.path.join(outdir, "docked")
         os.makedirs(docked, exist_ok=True)
@@ -266,7 +267,7 @@ class TestReportContent:
             _write(os.path.join(docked, name), text)
         csv_path = _ranking_csv(outdir, rows)
         html_path = os.path.join(outdir, "results_report.html")
-        assert runner.generate_html_report(csv_path, docked, html_path)
+        assert report_mod.generate_html_report(csv_path, docked, html_path)
         with open(html_path, encoding="utf-8") as f:
             return f.read()
 
@@ -332,7 +333,7 @@ class TestNglIntegrity:
     def test_download_hash_mismatch_fails_closed(self, monkeypatch, caplog):
         from vspipeline import report
         monkeypatch.setattr(report, "_ngl_local_candidates", lambda: [])
-        monkeypatch.setattr(runner, "_http_get_bytes", lambda url, timeout=60: b"evil()")
+        monkeypatch.setattr(net, "_http_get_bytes", lambda url, timeout=60: b"evil()")
         assert report._fetch_ngljs() is None
 
     def test_download_with_pinned_hash_accepted(self, monkeypatch):
@@ -341,7 +342,7 @@ class TestNglIntegrity:
         payload = b"/* pinned */"
         monkeypatch.setattr(report, "_ngl_local_candidates", lambda: [])
         monkeypatch.setattr(report, "NGL_SHA256", hashlib.sha256(payload).hexdigest())
-        monkeypatch.setattr(runner, "_http_get_bytes", lambda url, timeout=60: payload)
+        monkeypatch.setattr(net, "_http_get_bytes", lambda url, timeout=60: payload)
         assert report._fetch_ngljs() == payload
 
     def test_pinned_url_is_exact_version(self):
@@ -365,11 +366,11 @@ def _failed_rows():
 
 
 def test_report_without_scores_shows_na_and_no_viewer_link(tmp_path, monkeypatch):
-    monkeypatch.setattr(runner, "_fetch_ngljs", lambda: b"/* fake ngl */")
+    monkeypatch.setattr(report_mod, "_fetch_ngljs", lambda: b"/* fake ngl */")
     outdir = str(tmp_path)
     csv_path = _ranking_csv(outdir, _failed_rows())
     report = os.path.join(outdir, "report.html")
-    assert runner.generate_html_report(csv_path, os.path.join(outdir, "docked"), report)
+    assert report_mod.generate_html_report(csv_path, os.path.join(outdir, "docked"), report)
     content = open(report, encoding="utf-8").read()
     assert '<div class="stat-value">n/a</div>' in content
     assert "0.00" not in content  # no invented best/average affinity
@@ -377,7 +378,7 @@ def test_report_without_scores_shows_na_and_no_viewer_link(tmp_path, monkeypatch
 
 
 def test_report_with_scores_links_the_viewer(tmp_path, monkeypatch):
-    monkeypatch.setattr(runner, "_fetch_ngljs", lambda: b"/* fake ngl */")
+    monkeypatch.setattr(report_mod, "_fetch_ngljs", lambda: b"/* fake ngl */")
     outdir = str(tmp_path)
     os.makedirs(os.path.join(outdir, "docked"))
     _write(os.path.join(outdir, "docked", "ligA_out.pdbqt"), _pose_pdbqt("ligA"))
@@ -385,7 +386,7 @@ def test_report_with_scores_links_the_viewer(tmp_path, monkeypatch):
         {"Ligand": "ligA", "Binding_Affinity": "-7.25", "Status": "OK",
          "Docked_File": "docked/ligA_out.pdbqt"}])
     report = os.path.join(outdir, "report.html")
-    assert runner.generate_html_report(csv_path, os.path.join(outdir, "docked"), report)
+    assert report_mod.generate_html_report(csv_path, os.path.join(outdir, "docked"), report)
     content = open(report, encoding="utf-8").read()
     assert 'href="#viewer"' in content and 'id="viewer"' in content
     assert '<div class="stat-value">-7.25</div>' in content
@@ -395,11 +396,11 @@ def test_report_early_return_removes_stale_report(tmp_path):
     outdir = str(tmp_path)
     report = _write(os.path.join(outdir, "report.html"), "stale report")
     csv_path = _ranking_csv(outdir, [])  # header only: nothing to report
-    assert runner.generate_html_report(csv_path, os.path.join(outdir, "docked"),
+    assert report_mod.generate_html_report(csv_path, os.path.join(outdir, "docked"),
                                        report) is False
     assert not os.path.exists(report)
     _write(report, "stale report")
-    assert runner.generate_html_report(os.path.join(outdir, "missing.csv"),
+    assert report_mod.generate_html_report(os.path.join(outdir, "missing.csv"),
                                        os.path.join(outdir, "docked"), report) is False
     assert not os.path.exists(report)
 
@@ -472,7 +473,7 @@ def test_viewer_click_on_ligand_outside_top_hits_does_not_reload_current(tmp_pat
 def test_reports_of_identical_inputs_are_byte_identical(tmp_path, monkeypatch):
     """No wall-clock timestamp and no output path in the report: identical
     runs (here in two output directories) write identical bytes."""
-    monkeypatch.setattr(runner, "_fetch_ngljs", lambda: b"/* fake ngl */")
+    monkeypatch.setattr(report_mod, "_fetch_ngljs", lambda: b"/* fake ngl */")
     reports = []
     for run in ("a", "b"):
         outdir = str(tmp_path / run)
@@ -483,7 +484,7 @@ def test_reports_of_identical_inputs_are_byte_identical(tmp_path, monkeypatch):
              "Docked_File": "docked/ligA_out.pdbqt"},
             {"Ligand": "ligB", "Binding_Affinity": "FAILED", "Status": "FAILED"}])
         report = os.path.join(outdir, "results_report.html")
-        assert runner.generate_html_report(
+        assert report_mod.generate_html_report(
             csv_path, os.path.join(outdir, "docked"), report,
             meta={"Seed": 42, "Exhaustiveness": 8})
         with open(report, "rb") as f:

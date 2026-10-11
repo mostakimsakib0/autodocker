@@ -1,8 +1,6 @@
 import pytest
 
-import runner
-
-
+from vspipeline import docking
 VINA_STDOUT = """mode |   affinity | dist from best mode
      | (kcal/mol) | rmsd l.b.| rmsd u.b.
 -----+------------+----------+----------
@@ -13,26 +11,26 @@ VINA_STDOUT = """mode |   affinity | dist from best mode
 
 
 def test_extract_score_mode_table():
-    assert runner._extract_score(VINA_STDOUT) == pytest.approx(-7.5)
+    assert docking._extract_score(VINA_STDOUT) == pytest.approx(-7.5)
 
 
 def test_extract_score_vina_result_line():
     out = "REMARK VINA RESULT:    -9.2   0.000   0.000\n"
-    assert runner._extract_score(out) == pytest.approx(-9.2)
+    assert docking._extract_score(out) == pytest.approx(-9.2)
 
 
 def test_extract_score_empty():
     with pytest.raises(ValueError):
-        runner._extract_score("")
+        docking._extract_score("")
 
 
 def test_extract_score_no_valid():
     with pytest.raises(ValueError, match="No valid affinity"):
-        runner._extract_score("garbage output without scores\n")
+        docking._extract_score("garbage output without scores\n")
 
 
 def test_parse_vina_modes():
-    modes = runner._parse_vina_modes(VINA_STDOUT)
+    modes = docking._parse_vina_modes(VINA_STDOUT)
     assert len(modes) == 3
     assert modes[0]["mode"] == 1
     assert modes[0]["affinity"] == pytest.approx(-7.5)
@@ -40,7 +38,7 @@ def test_parse_vina_modes():
 
 
 def test_parse_vina_modes_ignores_garbage():
-    assert runner._parse_vina_modes("not a mode row\n") == []
+    assert docking._parse_vina_modes("not a mode row\n") == []
 
 
 def test_score_bounds_accepted():
@@ -70,7 +68,7 @@ ENDMDL
 def test_metrics_modes_and_simscore(tmp_path):
     out = tmp_path / "out.pdbqt"
     out.write_text(VINA_PDBQT)
-    metrics = runner._calculate_metrics(str(out), expected_modes=9)
+    metrics = docking._calculate_metrics(str(out), expected_modes=9)
     assert metrics["binding_modes"] == 3
     # mode 2 passes both cut-offs, mode 3 neither -> (1/2 + 1/2) / 2
     assert metrics["simscore"] == pytest.approx(0.5)
@@ -80,14 +78,14 @@ def test_metrics_modes_and_simscore(tmp_path):
 def test_simscore_single_mode_is_undefined(tmp_path):
     out = tmp_path / "out.pdbqt"
     out.write_text(VINA_PDBQT.split("MODEL 2")[0])
-    assert runner._calculate_metrics(str(out))["simscore"] is None
+    assert docking._calculate_metrics(str(out))["simscore"] is None
 
 
 def test_simscore_smina_output_is_undefined(tmp_path):
     out = tmp_path / "out.pdbqt"
     out.write_text("MODEL 1\nREMARK minimizedAffinity -7.1\nENDMDL\n"
                    "MODEL 2\nREMARK minimizedAffinity -6.1\nENDMDL\n")
-    assert runner._calculate_metrics(str(out))["simscore"] is None
+    assert docking._calculate_metrics(str(out))["simscore"] is None
 
 
 def test_simscore_thresholds_are_strict():

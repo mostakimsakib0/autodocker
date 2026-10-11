@@ -5,8 +5,8 @@ import importlib.util
 import sys
 
 import pytest
-import runner
-
+from vspipeline import charges as charges_mod
+from vspipeline import tools
 REDUCE = shutil.which("reduce")
 MKP = shutil.which("mk_prepare_ligand.py")
 QVINA = shutil.which("qvina2") or shutil.which("qvina02") or shutil.which("qvina")
@@ -155,7 +155,7 @@ def test_qvina_docking_real(tmp_path):
                    check=True, stderr=subprocess.DEVNULL)
     subprocess.run([OBABEL, "-:CO", "-opdbqt", "-O", str(lig)],
                    check=True, stderr=subprocess.DEVNULL)
-    runner._sanitize_receptor_pdbqt(str(rec))  # strip ligand-only ROOT/TORSDOF tags
+    charges_mod._sanitize_receptor_pdbqt(str(rec))  # strip ligand-only ROOT/TORSDOF tags
     r = subprocess.run([QVINA, "--receptor", str(rec), "--ligand", str(lig),
                        "--out", str(out), "--center_x", "0", "--center_y", "0",
                        "--center_z", "0", "--size_x", "30", "--size_y", "30",
@@ -188,12 +188,12 @@ def _find_param_file():
     return None
 
 
-@pytest.mark.skipif(runner.AUTOGRID is None, reason="autogrid4 binary not installed")
+@pytest.mark.skipif(tools.settings().autogrid is None, reason="autogrid4 binary not installed")
 def test_autogrid_real_grid(tmp_path):
     rec = tmp_path / "rec.pdbqt"
     if not _make_pdbqt("O=C(O)c1ccccc1", rec, charged=True):
         pytest.skip("could not build a charged receptor PDBQT (rdkit missing)")
-    runner._sanitize_receptor_pdbqt(str(rec))  # strip ligand-only ROOT/TORSDOF tags
+    charges_mod._sanitize_receptor_pdbqt(str(rec))  # strip ligand-only ROOT/TORSDOF tags
     pf = _find_param_file()
     if pf is None:
         pytest.skip("AutoDock parameter file (AD4.1_bound.dat) not available")
@@ -213,7 +213,7 @@ def test_autogrid_real_grid(tmp_path):
         "elecmap rec.e.map\n"
         "dsolvmap rec.d.map\n"
         "dielectric -1\n")
-    ag = subprocess.run([runner.AUTOGRID, "-p", "rec.gpf",
+    ag = subprocess.run([tools.settings().autogrid, "-p", "rec.gpf",
                          "-l", "rec.glg"], cwd=str(tmp_path),
                         capture_output=True, text=True)
     assert ag.returncode == 0, (ag.stderr or ag.stdout)[-500:]
@@ -230,14 +230,14 @@ def test_autogrid_real_grid(tmp_path):
 # genuine docking cannot complete here. The grid maps produced by autogrid4
 # above are valid; only the docking binary is broken in this env.
 # ---------------------------------------------------------------------------
-@pytest.mark.skipif(runner.AUTODOCK is None, reason="autodock4 binary not installed")
+@pytest.mark.skipif(tools.settings().autodock is None, reason="autodock4 binary not installed")
 def test_autodock_real_docking(tmp_path):
     rec = tmp_path / "rec.pdbqt"
     lig = tmp_path / "lig.pdbqt"
     if not _make_pdbqt("O=C(O)c1ccccc1", rec, charged=True) or \
        not _make_pdbqt("CO", lig, charged=True):
         pytest.skip("could not build a charged receptor/ligand PDBQT (rdkit missing)")
-    runner._sanitize_receptor_pdbqt(str(rec))
+    charges_mod._sanitize_receptor_pdbqt(str(rec))
     pf = _find_param_file()
     if pf is None:
         pytest.skip("AutoDock parameter file (AD4.1_bound.dat) not available")
@@ -257,7 +257,7 @@ def test_autodock_real_docking(tmp_path):
         "elecmap rec.e.map\n"
         "dsolvmap rec.d.map\n"
         "dielectric -1\n")
-    ag = subprocess.run([runner.AUTOGRID, "-p", "rec.gpf",
+    ag = subprocess.run([tools.settings().autogrid, "-p", "rec.gpf",
                          "-l", "rec.glg"], cwd=str(tmp_path),
                         capture_output=True, text=True)
     if ag.returncode != 0:
@@ -272,7 +272,7 @@ def test_autodock_real_docking(tmp_path):
         "dsolvmap rec.d.map\n"
         "move lig.pdbqt\n"
         "ga_run 10\noutlev 1\n")
-    r = subprocess.run([runner.AUTODOCK, "-p", "rec.dpf",
+    r = subprocess.run([tools.settings().autodock, "-p", "rec.dpf",
                         "-l", "rec.dlg"], cwd=str(tmp_path),
                        capture_output=True, text=True)
     if r.returncode != 0:

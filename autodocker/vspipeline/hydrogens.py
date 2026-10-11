@@ -38,8 +38,7 @@ import os
 from collections import defaultdict
 from typing import Callable, List, Optional, Sequence, Tuple
 
-import runner  # noqa: E402  (tool paths and run helpers, resolved at call time)
-from vspipeline import defaults
+from vspipeline import defaults, utils
 
 logger = logging.getLogger(__name__)
 
@@ -542,8 +541,6 @@ def stabilize_hydrogens(path: str, probe_path: Optional[str] = None,
 # Open Babel wrapper
 # ---------------------------------------------------------------------------
 
-OBABEL_ENV = {"OMP_NUM_THREADS": "1"}
-
 # Seeds are positive 32-bit integers (see runner.SEED_RANGE); the probe seeds
 # wrap around inside that range.
 _SEED_MAX = 2 ** 31 - 1
@@ -571,14 +568,8 @@ def _probe_path(output: str) -> str:
 
 def _default_obabel(args: Sequence[str], outputs: Sequence[str] = (),
                     seed: Optional[int] = None) -> None:
-    if getattr(runner, "run_obabel", None) is not None:
-        runner.run_obabel(list(args), outputs=list(outputs), seed=seed)
-        return
-    if not runner.OBABEL:
-        raise RuntimeError("Open Babel (obabel) not found in PATH")
-    value = defaults.SEED if seed is None else int(seed)
-    runner.run([runner.OBABEL, *args], capture=True,
-               extra_env={**OBABEL_ENV, "OB_RANDOM_SEED": str(value)})
+    """One Open Babel conversion through ``utils.run_obabel``."""
+    utils.run_obabel(list(args), outputs=list(outputs), seed=seed)
 
 
 def run_obabel_deterministic(args: Sequence[str], output: str, kind: str = "ligand",
@@ -590,8 +581,8 @@ def run_obabel_deterministic(args: Sequence[str], output: str, kind: str = "liga
     ``args`` are Open Babel arguments (without the executable) that write
     ``output``; the path must appear in ``args`` exactly once (after -O).
     ``run_obabel(args, outputs=[...], seed=...)`` performs one conversion
-    with ``OB_RANDOM_SEED`` = ``seed`` (default: ``runner.run_obabel`` when
-    it exists, else obabel with OMP_NUM_THREADS=1). ``output`` is written
+    with ``OB_RANDOM_SEED`` = ``seed`` (default: ``utils.run_obabel``, which
+    runs obabel with OMP_NUM_THREADS=1). ``output`` is written
     with ``seed`` (default ``defaults.SEED``); the second (and third)
     conversion writes a temporary sibling file (the probe) with the seed
     ``probe_seed(seed, 1)`` (and ``probe_seed(seed, 2)``).

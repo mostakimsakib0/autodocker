@@ -42,7 +42,8 @@ def _write_grid(path):
 
 
 def _run_pipeline(outdir, processes):
-    import runner  # imported lazily so the skip marker works
+    # imported lazily so the skip marker works
+    from vspipeline import docking, results as results_mod
     logging.disable(logging.CRITICAL)
     try:
         os.makedirs(outdir)
@@ -50,10 +51,10 @@ def _run_pipeline(outdir, processes):
         grid = _write_grid(os.path.join(outdir, "grid.conf"))
         vina_params = {"exhaustiveness": 1, "binding_modes": 3, "energy_range": 3.0,
                        "seed": 42, "min_valid_affinity": -1.0}
-        results, _checkpoint, metrics = runner.dock_all(
+        results, _checkpoint, metrics = docking.dock_all(
             receptor, LIGANDS, grid, outdir, num_processes=processes,
             resume=False, vina_params=vina_params)
-        analyzer = runner.ResultsAnalyzer(outdir)
+        analyzer = results_mod.ResultsAnalyzer(outdir)
         analyzer.save_ranking(results, mode="extended", metrics_dict=metrics)
         analyzer.save_metrics_report(results, metrics)
     finally:

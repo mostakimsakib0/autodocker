@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Receptor preparation: PDB cleaning, protonation, pocket ranking, grid box.
 
-Cross-module references go through the ``runner`` namespace at call time so
-the public entry point and its monkeypatch surface stay unchanged.
+External commands run through ``utils.run``/``utils.run_obabel`` and
+fpocket is found with ``tools.find_tool``, all called through their module so
+tests can replace them.
 
 The module is organised as small helpers grouped by concern, used by the
 ``ProteinPreparation`` class:
@@ -25,13 +26,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-# The runner module owns the tool-path globals (OBABEL, COMMAND_TIMEOUT) and
-# every public name; during the initial import of runner this binds the
-# partially-initialized module object, which is fine because attributes are
-# only accessed at call time.
-from vspipeline import defaults  # noqa: E402
-from vspipeline import outputs  # noqa: E402
-import runner  # noqa: E402
+from vspipeline import charges, defaults, outputs, tools, utils  # noqa: E402
 from vspipeline.hydrogens import (  # noqa: E402,F401  (some re-exported)
     H_PARENT_MAX_DISTANCE,
     OB_BOND_TOLERANCE,
@@ -433,11 +428,11 @@ def _log_tool_stderr(tool: str, stderr: str) -> None:
 
 
 def _run_tool(cmd: List[str], tool: str, log_stderr: bool = True) -> str:
-    """Run an external tool through ``runner.run``; its stderr goes to the
+    """Run an external tool through ``utils.run``; its stderr goes to the
     log (unless ``log_stderr`` is False). Returns stdout. Raises RuntimeError
     with the tool's stderr on failure."""
     try:
-        result = runner.run(cmd, capture=True)
+        result = utils.run(cmd, capture=True)
     except subprocess.CalledProcessError as e:
         stderr = (e.stderr or "").strip()
         raise RuntimeError(
@@ -451,11 +446,11 @@ def _run_tool(cmd: List[str], tool: str, log_stderr: bool = True) -> str:
 
 def _run_obabel(args: List[str], outputs: Sequence[str] = (), log_stderr: bool = True,
                 seed: Optional[int] = None) -> str:
-    """Open Babel through ``runner.run_obabel`` (single-threaded,
+    """Open Babel through ``utils.run_obabel`` (single-threaded,
     OB_RANDOM_SEED = ``seed``, partial outputs removed on failure); its
     stderr goes to the log unless ``log_stderr`` is False. Returns stdout."""
-    stdout, stderr = runner.run_obabel(list(args), outputs=outputs, return_stderr=True,
-                                       seed=seed)
+    stdout, stderr = utils.run_obabel(list(args), outputs=outputs, return_stderr=True,
+                                      seed=seed)
     if log_stderr:
         _log_tool_stderr("obabel", stderr)
     return stdout
@@ -465,7 +460,7 @@ def _fpocket_version(fpocket: str) -> Optional[str]:
     """fpocket's version from its usage text (it has no --version flag)."""
     try:
         proc = subprocess.run([fpocket, "-h"], capture_output=True, text=True,
-                              timeout=runner.COMMAND_TIMEOUT)
+                              timeout=tools.settings().command_timeout)
     except (OSError, subprocess.SubprocessError):
         return None
     match = re.search(r"fpocket\s+(\d[\w.]*)", re.sub(r"\x1b\[[0-9;]*m", "",
@@ -548,7 +543,7 @@ class ProteinPreparation:
         Non-interactive: with several protein chains the first one (in
         sorted order) is used and a warning lists the alternatives.
         """
-        chains = runner.get_chains(self.pdb_file)
+        chains = utils.get_chains(self.pdb_file)
 
         if len(chains) == 1:
             note = ""
@@ -701,8 +696,8 @@ class ProteinPreparation:
     def prepare_receptor(self, chain: str = BLANK_CHAIN_ID, keep_hetero: bool = False,
                          ph: float = defaults.PH) -> List[str]:
         """Clean protein and convert to PDBQT."""
-        available_chains = runner.get_chains(self.pdb_file)
-        selected_chains = runner._parse_chain_selection(chain, available_chains)
+        available_chains = utils.get_chains(self.pdb_file)
+        selected_chains = utils._parse_chain_selection(chain, available_chains)
         logger.info(
             f"[*] Preparing receptor (chain(s): {', '.join(selected_chains)})...")
 
@@ -734,7 +729,8 @@ class ProteinPreparation:
             # to frame_offset.txt).
             _translate_pdbqt(self.receptor_pdbqt, self._receptor_centroid())
             if ions:
-                appended = runner._append_hetatm_to_receptor(
+                from vspipeline import pocket
+                appended = pocket._append_hetatm_to_receptor(
                     self.receptor_pdbqt, self.pdb_clean, ions, selected_chains,
                     offset=self.frame_offset())
                 logger.info(
@@ -743,9 +739,9 @@ class ProteinPreparation:
                     + ", ".join(f"{n} {c}{r}" for c, r, n in ions))
 
             # Receptor PDBQT must not contain ligand torsion tags (ROOT/BRANCH/TORSDOF).
-            runner._sanitize_receptor_pdbqt(self.receptor_pdbqt)
+            charges._sanitize_receptor_pdbqt(self.receptor_pdbqt)
 
-            if not runner._ensure_pdbqt_has_charges(self.receptor_pdbqt):
+            if not charges._ensure_pdbqt_has_charges(self.receptor_pdbqt):
                 raise RuntimeError(
                     f"Open Babel assigned no partial charges to {self.receptor_pdbqt}")
             n_hd, n_polar = _count_polar_atoms(self.receptor_pdbqt)
@@ -776,7 +772,8 @@ class ProteinPreparation:
                 f"Receptor PDBQT not found: {self.receptor_pdbqt}")
 
         selected_chains = getattr(self, "selected_chains", None) or [BLANK_CHAIN_ID]
-        appended = runner._append_hetatm_to_receptor(
+        from vspipeline import pocket
+        appended = pocket._append_hetatm_to_receptor(
             self.receptor_pdbqt, self.pdb_file, keep_residues, selected_chains,
             offset=self.frame_offset())
 
@@ -786,7 +783,7 @@ class ProteinPreparation:
                 "all already present)")
             return self.receptor_pdbqt
 
-        runner._sanitize_receptor_pdbqt(self.receptor_pdbqt)
+        charges._sanitize_receptor_pdbqt(self.receptor_pdbqt)
         logger.info(
             f"[*] Receptor updated keeping {appended} HETATM atoms: {self.receptor_pdbqt}")
         return self.receptor_pdbqt
@@ -820,7 +817,7 @@ class ProteinPreparation:
     def _run_fpocket(self, target: str) -> str:
         """Run fpocket on ``target``; returns its output directory. Raises
         when fpocket is missing or fails."""
-        fpocket = runner.find_tool("fpocket")
+        fpocket = tools.find_tool("fpocket")
         if fpocket is None:
             raise RuntimeError(
                 "fpocket not found on PATH; install fpocket, or pass --no-fpocket "
@@ -851,7 +848,7 @@ class ProteinPreparation:
             if number not in pocket_info:
                 raise RuntimeError(f"Pocket {number} has no entry in {info_file}")
             p = os.path.join(pocket_dir, f)
-            xs, ys, zs = runner.parse_pdb_coords(p)
+            xs, ys, zs = utils.parse_pdb_coords(p)
             data = dict(pocket_info[number])
             data.update({
                 "number": number,
@@ -1026,7 +1023,7 @@ class ProteinPreparation:
         midpoint of the pocket atoms' bounding box, ``padding`` on each side."""
         xs, ys, zs = [], [], []
         for pocket_file in pocket_files:
-            px, py, pz = runner.parse_pdb_coords(pocket_file)
+            px, py, pz = utils.parse_pdb_coords(pocket_file)
             xs.extend(px)
             ys.extend(py)
             zs.extend(pz)

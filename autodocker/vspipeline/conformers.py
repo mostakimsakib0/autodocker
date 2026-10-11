@@ -103,8 +103,8 @@ def generate_3d(src_sdf: str, dst_sdf: str, seed: int = EMBED_SEED,
     or ``METHOD_OBABEL``) so the caller can record it.
 
     ``run_obabel(args, outputs=[...], seed=...)`` runs the Open Babel
-    fallback (default: ``runner.run_obabel`` when available, else obabel
-    with OMP_NUM_THREADS=1), with ``OB_RANDOM_SEED`` = ``seed``.
+    fallback (default: ``utils.run_obabel``, which runs obabel with
+    OMP_NUM_THREADS=1), with ``OB_RANDOM_SEED`` = ``seed``.
     """
     if rdkit_available():
         embed_3d_rdkit(src_sdf, dst_sdf, seed=seed)

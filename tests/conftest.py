@@ -5,7 +5,14 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "autodocker"))
 
-import runner  # noqa: F401  (imported first, so vspipeline binds this module)
+from vspipeline import tools  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _restore_tool_settings(monkeypatch):
+    """Every test starts from the tools found on PATH: tests and
+    runner.main() change them with vspipeline.tools.configure()."""
+    monkeypatch.setattr(tools, "_settings", tools.settings())
 
 
 def _write(path, content):

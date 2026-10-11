@@ -7,12 +7,12 @@ import subprocess
 
 import pytest
 
-import runner
 import vspipeline.library as library
+from vspipeline import admet, net, tools, utils
 
 DATA = os.path.join(os.path.dirname(__file__), "data", "prep")
 
-needs_obabel = pytest.mark.skipif(runner.OBABEL is None, reason="obabel not available")
+needs_obabel = pytest.mark.skipif(tools.settings().obabel is None, reason="obabel not available")
 ENV = {**os.environ, "OMP_NUM_THREADS": "1"}
 
 
@@ -92,13 +92,13 @@ def test_2d_mol2_and_pdb_get_seeded_3d_coordinates_real(tmp_path, monkeypatch, n
     """L2: 2D MOL2/PDB inputs were docked flat, and a flat hydrocarbon went
     through a non-reproducible --gen3d charge rebuild."""
     calls = []
-    real_run = runner.run
+    real_run = utils.run
 
     def spy(cmd, *a, **kw):
         calls.append(list(cmd))
         return real_run(cmd, *a, **kw)
 
-    monkeypatch.setattr(runner, "run", spy)
+    monkeypatch.setattr(utils, "run", spy)
     outputs = []
     for i in range(3):
         lm, out = _prepare(tmp_path, [name], name=f"r{i}")
@@ -208,7 +208,7 @@ def test_tiny_and_small_planar_molecules_are_prepared_real(tmp_path):
     assert sorted(os.path.basename(p) for p in out) == [
         "z2d_co2.pdbqt", "z2d_methane.pdbqt", "z2d_water.pdbqt"], lm.failed
     assert os.path.getsize(os.path.join(DATA, "z2d_methane.sdf")) < 150
-    props = runner.ADMETFilter.parse_sdf_properties(os.path.join(DATA, "z2d_methane.sdf"))
+    props = admet.ADMETFilter.parse_sdf_properties(os.path.join(DATA, "z2d_methane.sdf"))
     assert props is not None and props["mw"] == pytest.approx(16.04, abs=0.01)
 
 
@@ -237,8 +237,8 @@ def test_pubchem_source_sdf_is_relative(tmp_path, monkeypatch):
     molblock = ("m\n\n\n  2  1  0  0  0  0  0  0  0  0999 V2000\n"
                 "    0.0000    0.0000    0.5000 C   0  0\n"
                 "    1.2000    0.0000    0.0000 O   0  0\n  1  2  1  0\nM  END\n$$$$\n")
-    monkeypatch.setattr(runner, "run", fake_run)
-    monkeypatch.setattr(runner, "_http_get_bytes", lambda url: molblock.encode())
+    monkeypatch.setattr(utils, "run", fake_run)
+    monkeypatch.setattr(net, "_http_get_bytes", lambda url: molblock.encode())
     lm = library.LibraryManager(str(tmp_path / "out"), None, minimize=False)
     lm._prepare_pubchem_compound("702", "ethanol", {})
     meta = lm.metadata["ethanol_702"]
@@ -257,7 +257,7 @@ def test_converted_ligand_pdbqt_is_validated(tmp_path, monkeypatch):
                 f.write(tree + tree)
         return ("", "", 0) if capture else None
 
-    monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(utils, "run", fake_run)
     src = tmp_path / "x.mol2"
     src.write_text("@<TRIPOS>MOLECULE\nx\n")
     lm = library.LibraryManager(str(tmp_path / "out"), str(tmp_path))

@@ -3,8 +3,7 @@ import shutil
 
 import pytest
 
-import runner
-
+from vspipeline import charges, library, protein, tools, utils
 obabel = shutil.which("obabel")
 pytestmark = pytest.mark.skipif(
     obabel is None, reason="Open Babel not available on PATH")
@@ -50,35 +49,35 @@ def _make_ethanol_sdf(tmp_path):
 def test_sdf_to_pdbqt_with_charges(tmp_path):
     sdf = _make_ethanol_sdf(tmp_path)
     out = str(tmp_path / "ligand.pdbqt")
-    runner.run([runner.OBABEL, "-isdf", sdf, "-opdbqt", "-O", out,
+    utils.run([tools.settings().obabel, "-isdf", sdf, "-opdbqt", "-O", out,
                 "--partialcharge", "gasteiger"])
     assert os.path.getsize(out) > 0
-    assert runner._pdbqt_has_atoms(out)
-    assert runner._ensure_pdbqt_has_charges(out)
+    assert charges._pdbqt_has_atoms(out)
+    assert charges._ensure_pdbqt_has_charges(out)
 
 
 def test_mol2_to_pdbqt_with_charges(tmp_path):
     mol2 = str(tmp_path / "ethanol.mol2")
-    runner.run([runner.OBABEL, "-isdf", _make_ethanol_sdf(tmp_path), "-omol2", "-O", mol2])
+    utils.run([tools.settings().obabel, "-isdf", _make_ethanol_sdf(tmp_path), "-omol2", "-O", mol2])
     out = str(tmp_path / "ligand.pdbqt")
-    runner.run([runner.OBABEL, "-imol2", mol2, "-opdbqt", "-O", out,
+    utils.run([tools.settings().obabel, "-imol2", mol2, "-opdbqt", "-O", out,
                 "--partialcharge", "gasteiger"])
     assert os.path.getsize(out) > 0
-    assert runner._pdbqt_has_atoms(out)
-    assert runner._ensure_pdbqt_has_charges(out)
+    assert charges._pdbqt_has_atoms(out)
+    assert charges._ensure_pdbqt_has_charges(out)
 
 
 def test_pdb_to_pdbqt_with_charges(protein_pdb, tmp_path):
     out = str(tmp_path / "ligand.pdbqt")
-    runner.run([runner.OBABEL, "-ipdb", protein_pdb, "-opdbqt", "-O", out])
+    utils.run([tools.settings().obabel, "-ipdb", protein_pdb, "-opdbqt", "-O", out])
     assert os.path.getsize(out) > 0
-    assert runner._pdbqt_has_atoms(out)
+    assert charges._pdbqt_has_atoms(out)
 
 
 def test_fix_pdbqt_charges_assigns_charges(zero_charge_pdbqt, tmp_path):
     sdf = _make_ethanol_sdf(tmp_path)
-    runner._fix_pdbqt_charges(zero_charge_pdbqt, sdf)
-    assert runner._ensure_pdbqt_has_charges(zero_charge_pdbqt) is True
+    charges._fix_pdbqt_charges(zero_charge_pdbqt, sdf)
+    assert charges._ensure_pdbqt_has_charges(zero_charge_pdbqt) is True
 
 
 def test_fix_pdbqt_charges_raises_on_bad_source(tmp_path):
@@ -86,7 +85,7 @@ def test_fix_pdbqt_charges_raises_on_bad_source(tmp_path):
     with open(bad, "w", encoding="utf-8") as f:
         f.write("ATOM  junk\n")
     with pytest.raises(Exception) as exc:
-        runner._fix_pdbqt_charges(bad, str(tmp_path / "missing.sdf"))
+        charges._fix_pdbqt_charges(bad, str(tmp_path / "missing.sdf"))
     assert "Cannot assign valid charges" in str(exc.value)
 
 
@@ -95,11 +94,11 @@ def test_library_prepare_local_sdf_end_to_end(tmp_path):
     d.mkdir()
     sdf = _make_ethanol_sdf(tmp_path)
     shutil.copy(sdf, str(d / "ethanol.sdf"))
-    lm = runner.LibraryManager(str(tmp_path / "out"), str(d))
+    lm = library.LibraryManager(str(tmp_path / "out"), str(d))
     out = lm.prepare_local(apply_admet=False)
     assert len(out) == 1
-    assert runner._pdbqt_has_atoms(out[0])
-    assert runner._ensure_pdbqt_has_charges(out[0])
+    assert charges._pdbqt_has_atoms(out[0])
+    assert charges._ensure_pdbqt_has_charges(out[0])
 
 
 def test_library_prepare_local_sdf_batch_recursion(tmp_path):
@@ -107,10 +106,10 @@ def test_library_prepare_local_sdf_batch_recursion(tmp_path):
     d.mkdir(parents=True)
     sdf = _make_ethanol_sdf(tmp_path)
     shutil.copy(sdf, str(d / "nested.sdf"))
-    lm = runner.LibraryManager(str(tmp_path / "out"), str(tmp_path / "ligands"))
+    lm = library.LibraryManager(str(tmp_path / "out"), str(tmp_path / "ligands"))
     out = lm.prepare_local(apply_admet=False)
     assert len(out) == 1
-    assert runner._pdbqt_has_atoms(out[0])
+    assert charges._pdbqt_has_atoms(out[0])
 
 
 def test_blank_chain_pdb_kept_for_default_chain(protein_pdb, tmp_path):
@@ -125,7 +124,7 @@ def test_blank_chain_pdb_kept_for_default_chain(protein_pdb, tmp_path):
                 lines.append(line.rstrip("\n"))
     pdbfile = tmp_path / "blankchain.pdb"
     pdbfile.write_text("\n".join(lines) + "\n")
-    prep = runner.ProteinPreparation(str(pdbfile), str(tmp_path))
+    prep = protein.ProteinPreparation(str(pdbfile), str(tmp_path))
     prep.prepare_receptor("A")
     n = sum(1 for l in open(prep.receptor_pdbqt, encoding="utf-8")
             if l.startswith(("ATOM", "HETATM")))
@@ -148,7 +147,7 @@ def test_receptor_centroid_offsets_frame_shift(protein_pdb, tmp_path):
                 lines.append(line.rstrip("\n"))
     pdbfile = tmp_path / "offset.pdb"
     pdbfile.write_text("\n".join(lines) + "\n")
-    prep = runner.ProteinPreparation(str(pdbfile), str(tmp_path))
+    prep = protein.ProteinPreparation(str(pdbfile), str(tmp_path))
     prep.prepare_receptor("A")
 
     def centroid(path):

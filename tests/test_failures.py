@@ -6,8 +6,7 @@ import sys
 import pytest
 
 import runner
-
-
+from vspipeline import charges, docking, protein, utils
 # ---------------------------------------------------------------------------
 # Versioning
 # ---------------------------------------------------------------------------
@@ -27,21 +26,21 @@ def test_version_attribute_and_flag(capsys, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_tiny_receptor_rejected(tiny_protein_pdb, outdir):
-    prep = runner.ProteinPreparation(tiny_protein_pdb, outdir)
+    prep = protein.ProteinPreparation(tiny_protein_pdb, outdir)
     with pytest.raises(ValueError, match="need >= 100"):
         prep.validate()
 
 
 def test_empty_pdbqt_has_no_atoms(empty_pdbqt):
-    assert runner._pdbqt_has_atoms(empty_pdbqt) is False
+    assert charges._pdbqt_has_atoms(empty_pdbqt) is False
 
 
 def test_zero_charge_pdbqt_detected(charged_pdbqt, empty_pdbqt):
-    assert runner._ensure_pdbqt_has_charges(charged_pdbqt) is True
+    assert charges._ensure_pdbqt_has_charges(charged_pdbqt) is True
 
 
 def test_charge_check_empty_file(empty_pdbqt):
-    assert runner._ensure_pdbqt_has_charges(empty_pdbqt) is False
+    assert charges._ensure_pdbqt_has_charges(empty_pdbqt) is False
 
 
 def _grid_config(tmp_path):
@@ -54,7 +53,7 @@ def _grid_config(tmp_path):
 def test_missing_receptor_fails_dock(tmp_path, charged_pdbqt, monkeypatch, outdir):
     """dock_ligand must return a FAILED record when inputs are missing."""
     grid = _grid_config(tmp_path)
-    result = runner.dock_ligand((
+    result = docking.dock_ligand((
         str(tmp_path / "does_not_exist_receptor.pdbqt"),
         charged_pdbqt,
         str(grid), outdir,
@@ -70,9 +69,9 @@ def test_all_tools_failed_is_fatal(tmp_path, charged_pdbqt, monkeypatch, outdir)
     def _boom(*a, **k):
         raise RuntimeError("simulated docking binary crash")
 
-    monkeypatch.setattr(runner, "run", _boom)
+    monkeypatch.setattr(utils, "run", _boom)
     grid = _grid_config(tmp_path)
-    result = runner.dock_ligand((
+    result = docking.dock_ligand((
         charged_pdbqt, charged_pdbqt,
         str(grid), outdir,
         {"seed": 42, "extra_args": []}, None))
@@ -88,7 +87,7 @@ def test_duplicate_ligand_names_rejected(tmp_path, outdir, charged_pdbqt):
     (lig_dir / "dup.pdbqt").touch()
     ligs = [str(lig_dir / "dup.pdbqt")] * 3
     with pytest.raises(ValueError, match="Duplicate ligand names"):
-        runner.dock_all(charged_pdbqt, ligs, tmp_path / "g.txt", outdir,
+        docking.dock_all(charged_pdbqt, ligs, tmp_path / "g.txt", outdir,
                         resume=False, vina_params={})
 
 
@@ -100,7 +99,7 @@ def test_grid_missing_axis(tmp_path):
     cfg = tmp_path / "bad_grid.txt"
     cfg.write_text("cx 1.0\n")
     with pytest.raises(Exception):
-        runner._parse_grid_config(str(cfg))
+        docking._parse_grid_config(str(cfg))
 
 
 # ---------------------------------------------------------------------------

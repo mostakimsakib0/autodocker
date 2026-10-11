@@ -7,11 +7,12 @@ import subprocess
 import pytest
 
 import runner
+from vspipeline import tools
 import vspipeline.protein as prot
 import vspipeline.utils as u
 
-needs_obabel = pytest.mark.skipif(runner.OBABEL is None, reason="obabel not available")
-OBABEL_VERSION = u.obabel_version() if runner.OBABEL else None
+needs_obabel = pytest.mark.skipif(tools.settings().obabel is None, reason="obabel not available")
+OBABEL_VERSION = u.obabel_version() if tools.settings().obabel else None
 SEEDABLE = OBABEL_VERSION is not None and OBABEL_VERSION >= u.OBABEL_SEEDABLE_VERSION
 needs_seedable_obabel = pytest.mark.skipif(
     not SEEDABLE, reason=f"Open Babel >= 3.2.0 needed (found {OBABEL_VERSION})")
@@ -53,7 +54,7 @@ def _protonate_raw(tmp_path, name, seed):
     env.pop("OB_RANDOM_SEED", None)
     if seed is not None:
         env["OB_RANDOM_SEED"] = str(seed)
-    subprocess.run([runner.OBABEL, "-ipdb", str(src), "-opdbqt", "-O", str(out), "-xr",
+    subprocess.run([tools.settings().obabel, "-ipdb", str(src), "-opdbqt", "-O", str(out), "-xr",
                     "-p", "7.4", "--partialcharge", "gasteiger"],
                    check=True, capture_output=True, env=env)
     return out.read_bytes()
@@ -142,7 +143,7 @@ def test_run_obabel_pdbqt_has_only_vina_records(tmp_path):
 
 
 def test_check_openbabel_policy(monkeypatch, caplog):
-    monkeypatch.setattr(runner, "obabel_version", lambda path=None: (3, 1, 1))
+    monkeypatch.setattr(u, "obabel_version", lambda path=None: (3, 1, 1))
     with caplog.at_level(logging.WARNING, logger="runner"):
         info = runner._check_openbabel(42)
     assert "Open Babel 3.1.1 found" in caplog.text and "NOT comparable" in caplog.text
@@ -152,7 +153,7 @@ def test_check_openbabel_policy(monkeypatch, caplog):
     assert info["openbabel_random_seed"]["hydrogen_probe_values"] == [43, 44]
 
     caplog.clear()
-    monkeypatch.setattr(runner, "obabel_version", lambda path=None: (3, 2, 1))
+    monkeypatch.setattr(u, "obabel_version", lambda path=None: (3, 2, 1))
     with caplog.at_level(logging.WARNING, logger="runner"):
         info = runner._check_openbabel(7)
     assert not caplog.text
