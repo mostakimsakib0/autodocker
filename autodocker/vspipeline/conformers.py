@@ -40,13 +40,37 @@ def _rdkit_version() -> str:
     return rdkit.__version__
 
 
+def embed_and_relax(mol, seed: int = EMBED_SEED,
+                    max_iters: int = FORCE_FIELD_MAX_ITERS):
+    """The deterministic conformer recipe, shared by the pipeline and the
+    re-docking benchmark (scripts/_benchlib.py): ETKDGv3 with a fixed seed on
+    one thread (retried from random coordinates if the default embedding
+    fails), then MMFF94, or UFF when MMFF lacks parameters, for a fixed number
+    of iterations. ``mol`` must already carry the hydrogens wanted; it gets
+    one conformer in place. Returns (force_field, converged); raises
+    ValueError if embedding fails."""
+    from rdkit.Chem import AllChem
+
+    params = AllChem.ETKDGv3()
+    params.randomSeed = int(seed)
+    params.numThreads = 1
+    if AllChem.EmbedMolecule(mol, params) != 0:
+        params.useRandomCoords = True
+        if AllChem.EmbedMolecule(mol, params) != 0:
+            raise ValueError("RDKit ETKDGv3 could not embed the molecule")
+    if AllChem.MMFFHasAllMoleculeParams(mol):
+        status = AllChem.MMFFOptimizeMolecule(mol, maxIters=max_iters)
+        return "MMFF94", status == 0
+    status = AllChem.UFFOptimizeMolecule(mol, maxIters=max_iters)
+    return "UFF", status == 0
+
+
 def embed_3d_rdkit(src_sdf: str, dst_sdf: str, seed: int = EMBED_SEED,
                    max_iters: int = FORCE_FIELD_MAX_ITERS) -> int:
     """Write 3D coordinates for every molecule of ``src_sdf`` to ``dst_sdf``
     (all hydrogens explicit). Raises ValueError if a molecule cannot be read
     or embedded. Returns the number of molecules written."""
     from rdkit import Chem
-    from rdkit.Chem import AllChem
 
     supplier = Chem.SDMolSupplier(src_sdf, removeHs=False)
     molecules = []
@@ -54,18 +78,11 @@ def embed_3d_rdkit(src_sdf: str, dst_sdf: str, seed: int = EMBED_SEED,
         if mol is None:
             raise ValueError(f"RDKit cannot read molecule {index + 1} of {src_sdf}")
         mol = Chem.AddHs(mol)
-        params = AllChem.ETKDGv3()
-        params.randomSeed = seed
-        params.numThreads = 1
-        if AllChem.EmbedMolecule(mol, params) != 0:
-            params.useRandomCoords = True
-            if AllChem.EmbedMolecule(mol, params) != 0:
-                raise ValueError(
-                    f"RDKit ETKDG could not embed molecule {index + 1} of {src_sdf}")
-        if AllChem.MMFFHasAllMoleculeParams(mol):
-            AllChem.MMFFOptimizeMolecule(mol, maxIters=max_iters)
-        else:
-            AllChem.UFFOptimizeMolecule(mol, maxIters=max_iters)
+        try:
+            embed_and_relax(mol, seed=seed, max_iters=max_iters)
+        except ValueError:
+            raise ValueError(
+                f"RDKit ETKDG could not embed molecule {index + 1} of {src_sdf}") from None
         molecules.append(mol)
     if not molecules:
         raise ValueError(f"No molecules in {src_sdf}")

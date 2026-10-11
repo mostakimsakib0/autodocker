@@ -48,3 +48,37 @@ def test_report_ngl_version_matches_the_image_build():
     with open(os.path.join(ROOT, "tools", "ngl", "package.json"), encoding="utf-8") as fh:
         pinned = json.load(fh)["dependencies"]["ngl"]
     assert pinned == report.NGL_VERSION
+
+
+def test_readme_option_defaults_match_the_cli():
+    """Each numeric default in README's option table equals the CLI default."""
+    import re
+    import runner
+    from vspipeline import defaults as builtin
+    defaults = {}
+    for action in runner.build_parser()._actions:
+        for opt in action.option_strings:
+            defaults[opt] = action.default
+    # --timeout follows $VS_COMMAND_TIMEOUT when set; the README states the
+    # built-in value.
+    defaults["--timeout"] = builtin.COMMAND_TIMEOUT
+    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
+        rows = [ln for ln in fh if ln.startswith("| `-")]
+    checked = 0
+    for row in rows:
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        stated = [float(n) for n in re.findall(r"-?\d+(?:\.\d+)?", cells[-1])]
+        for opt in re.findall(r"`(--?[\w-]+)", cells[0]):
+            value = defaults.get(opt)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                assert float(value) in stated, f"README default of {opt}: {cells[-1]} != {value}"
+                checked += 1
+    assert checked >= 10  # the table was parsed
+
+
+def test_benchmark_conformers_use_the_pipeline_recipe():
+    """The re-docking start conformers come from vspipeline.conformers."""
+    with open(os.path.join(ROOT, "scripts", "_benchlib.py"), encoding="utf-8") as fh:
+        src = fh.read()
+    assert "conformers.embed_and_relax(" in src
+    assert "AllChem.ETKDGv3()" not in src

@@ -707,3 +707,5 @@ def test_script_output_names_match_the_pipeline():
     assert bl.FRAME_OFFSET_TXT == outputs.FRAME_OFFSET_TXT
     for name in ("COL_LIGAND", "COL_AFFINITY", "COL_STATUS", "COL_DOCKED_FILE", "COL_ENGINE"):
         assert getattr(bl, name) == getattr(outputs, name), name
+    from vspipeline.docking import Status
+    assert Status.FAILED.value in bl.FAILED_STATUS_PREFIXES

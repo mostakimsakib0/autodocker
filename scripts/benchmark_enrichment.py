@@ -735,9 +735,9 @@ def main(argv=None):
     ap.add_argument("--box-source", choices=["crystal", "fpocket"], default="crystal",
                     help="Docking box: DUD-E crystal ligand (default) or the "
                          "runner's fpocket pocket (1.1.x protocol)")
-    ap.add_argument("--padding", type=float, default=_benchlib.DEFAULT_PADDING,
+    ap.add_argument("--padding", type=float, default=_benchlib.BENCH_BOX_PADDING,
                     help="Crystal box padding per side, A (default 6.0)")
-    ap.add_argument("--min-box", type=float, default=_benchlib.MIN_BOX_EDGE,
+    ap.add_argument("--min-box", type=float, default=_benchlib.BENCH_MIN_BOX_EDGE,
                     help="Minimum crystal box edge, A (default 22.5)")
     ap.add_argument("--chain", default="all",
                     help="Receptor chain(s) passed to the runner (default all)")

@@ -22,6 +22,7 @@ import random
 import re
 import shutil
 import subprocess
+import sys
 
 # Names of AutoDocker's output files read by the benchmarks. They mirror
 # autodocker/vspipeline/outputs.py (the scripts also run outside the package,
@@ -153,11 +154,15 @@ def shift_mol2(mol2_path, shift, out_path):
 # Docking box
 # ---------------------------------------------------------------------------
 
-DEFAULT_PADDING = 6.0
-MIN_BOX_EDGE = 22.5
+# Benchmark protocol for boxes around a reference (crystal) ligand: edge =
+# max(BENCH_MIN_BOX_EDGE, ligand extent + 2 x BENCH_BOX_PADDING) per axis,
+# i.e. max(22.5, extent + 12) Angstrom. This is the benchmarks' own rule; it
+# is unrelated to the pipeline's --padding around fpocket pockets (also 6 A).
+BENCH_BOX_PADDING = 6.0
+BENCH_MIN_BOX_EDGE = 22.5
 
 
-def ligand_box(coords, padding=DEFAULT_PADDING, min_size=MIN_BOX_EDGE):
+def ligand_box(coords, padding=BENCH_BOX_PADDING, min_size=BENCH_MIN_BOX_EDGE):
     """Cubic docking box around a reference ligand.
 
     Center = heavy-atom centroid; edge = max(min_size, largest extent along
@@ -297,6 +302,9 @@ def write_model(model, path):
 
 AFFINITY_COLUMNS = (COL_AFFINITY, "Affinity")  # "Affinity": other tools' CSVs
 # Statuses that mean "no usable score", whatever the affinity column holds.
+# Status values without a usable score: FAILED (pipeline Status.FAILED), the
+# pre-2.0 REJECTED, and ERROR from other tools' CSVs. Checked against the
+# pipeline in tests/test_benchmarks.py.
 FAILED_STATUS_PREFIXES = ("FAILED", "REJECTED", "ERROR")
 
 
@@ -432,10 +440,19 @@ def select_sample(ids, n, seed):
 # Start conformers (RDKit)
 # ---------------------------------------------------------------------------
 
-ETKDG_MMFF_ITERS = 2000
+def _pipeline_conformers():
+    """The pipeline's conformer module (autodocker/vspipeline/conformers.py),
+    so benchmark start conformers use exactly the pipeline's recipe. The
+    scripts live next to autodocker/ in the repository (also in the image's
+    /repo mount)."""
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "autodocker")
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from vspipeline import conformers
+    return conformers
 
 
-def rdkit_start_conformer(src, out_mol2, seed, mmff_iters=ETKDG_MMFF_ITERS):
+def rdkit_start_conformer(src, out_mol2, seed, mmff_iters=None):
     """Write a crystal-independent start conformer for re-docking.
 
     The molecule (topology, bond orders, formal charges) is read from
@@ -449,7 +466,10 @@ def rdkit_start_conformer(src, out_mol2, seed, mmff_iters=ETKDG_MMFF_ITERS):
     Raises ImportError when RDKit is missing, RuntimeError on failure.
     """
     from rdkit import Chem, rdBase
-    from rdkit.Chem import AllChem
+
+    conformers = _pipeline_conformers()
+    if mmff_iters is None:
+        mmff_iters = conformers.FORCE_FIELD_MAX_ITERS
 
     tmp_dir = os.path.dirname(os.path.abspath(out_mol2))
     sdf = src
@@ -463,21 +483,10 @@ def rdkit_start_conformer(src, out_mol2, seed, mmff_iters=ETKDG_MMFF_ITERS):
     mol = Chem.RemoveHs(mol)
     mol = Chem.AddHs(mol)
     mol.RemoveAllConformers()
-    params = AllChem.ETKDGv3()
-    params.randomSeed = int(seed)
-    params.numThreads = 1
-    cid = AllChem.EmbedMolecule(mol, params)
-    if cid < 0:
-        params.useRandomCoords = True
-        cid = AllChem.EmbedMolecule(mol, params)
-    if cid < 0:
-        raise RuntimeError("ETKDGv3 embedding failed")
-    if AllChem.MMFFHasAllMoleculeParams(mol):
-        status = AllChem.MMFFOptimizeMolecule(mol, maxIters=mmff_iters)
-        ff = "MMFF94"
-    else:
-        status = AllChem.UFFOptimizeMolecule(mol, maxIters=mmff_iters)
-        ff = "UFF"
+    try:
+        ff, converged = conformers.embed_and_relax(mol, seed=int(seed), max_iters=mmff_iters)
+    except ValueError as e:
+        raise RuntimeError(str(e)) from None
     tmp_sdf = out_mol2 + ".tmp.sdf"
     with open(tmp_sdf, "w", encoding="utf-8") as f:
         f.write(Chem.MolToMolBlock(mol))
@@ -490,5 +499,5 @@ def rdkit_start_conformer(src, out_mol2, seed, mmff_iters=ETKDG_MMFF_ITERS):
         if sdf != src and os.path.exists(sdf):
             os.remove(sdf)
     return {"method": "ETKDGv3+" + ff, "seed": int(seed),
-            "max_iters": mmff_iters, "converged": status == 0,
+            "max_iters": mmff_iters, "converged": converged,
             "rdkit": rdBase.rdkitVersion}

@@ -58,8 +58,8 @@ DEFAULT_IDS = os.path.join(HERE, "..", "benchmarks", "data", "casf2016_core_set.
 HETATM_FLAGS = {"none": [], "metals": ["--detect-metals"], "all": ["--keep-hetero"]}
 
 
-def ligand_grid(mol2_path, padding=_benchlib.DEFAULT_PADDING,
-                min_size=_benchlib.MIN_BOX_EDGE):
+def ligand_grid(mol2_path, padding=_benchlib.BENCH_BOX_PADDING,
+                min_size=_benchlib.BENCH_MIN_BOX_EDGE):
     """Box around the crystal ligand: ``(cx, cy, cz, edge)``."""
     center, size = _benchlib.ligand_box(_benchlib.mol2_heavy_coords(mol2_path),
                                         padding=padding, min_size=min_size)
@@ -329,8 +329,8 @@ def main(argv=None):
     ap.add_argument("--exhaustiveness", type=int, default=8)
     ap.add_argument("--binding-modes", type=int, default=9)
     ap.add_argument("--energy-range", type=float, default=3.0)
-    ap.add_argument("--padding", type=float, default=_benchlib.DEFAULT_PADDING)
-    ap.add_argument("--min-box", type=float, default=_benchlib.MIN_BOX_EDGE)
+    ap.add_argument("--padding", type=float, default=_benchlib.BENCH_BOX_PADDING)
+    ap.add_argument("--min-box", type=float, default=_benchlib.BENCH_MIN_BOX_EDGE)
     ap.add_argument("--threads", type=int, default=0,
                     help="Vina threads per complex (0 = runner default)")
     ap.add_argument("--start-conformer", choices=["rdkit", "crystal"], default="rdkit",
