@@ -29,6 +29,21 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # partially-initialized module object, which is fine because attributes are
 # only accessed at call time.
 import runner  # noqa: E402
+from vspipeline.hydrogens import (  # noqa: E402,F401  (some re-exported)
+    H_PARENT_MAX_DISTANCE,
+    OB_BOND_TOLERANCE,
+    OB_COVALENT_RADII,
+    OB_MIN_BOND_DISTANCE,
+    OB_UNKNOWN_COVALENT_RADIUS,
+    PDBQT_HYDROGEN_TYPES,
+    VINA_BOND_ALLOWANCE,
+    VINA_COVALENT_RADII,
+    VINA_METAL_COVALENT_RADIUS,
+    SpatialHash as _SpatialHash,
+    pdbqt_element as _pdbqt_element,
+    stabilize_hydrogens,
+    vina_bond_cutoff as _vina_bond_cutoff,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,38 +68,6 @@ BLANK_CHAIN_ID = "A"
 FPOCKET_DRUGGABILITY_THRESHOLD = 0.5
 
 HYDROGEN_ELEMENTS = frozenset({"H", "D"})
-PDBQT_HYDROGEN_TYPES = frozenset({"H", "HD", "HS"})
-
-# Open Babel covalent radii (src/elementtable.h) and the bond tolerance of
-# OBMol::ConnectTheDots, used to reproduce Open Babel's bond perception.
-OB_COVALENT_RADII = {
-    "H": 0.31, "C": 0.76, "N": 0.71, "O": 0.66, "F": 0.57, "P": 1.07,
-    "S": 1.05, "CL": 1.02, "BR": 1.20, "I": 1.39, "SE": 1.20, "NA": 1.66,
-    "K": 2.03, "MG": 1.41, "CA": 1.76, "MN": 1.39, "FE": 1.32, "CO": 1.26,
-    "NI": 1.24, "CU": 1.32, "ZN": 1.22, "CD": 1.44, "HG": 1.32,
-}
-OB_UNKNOWN_COVALENT_RADIUS = 1.6
-OB_BOND_TOLERANCE = 0.45
-OB_MIN_BOND_DISTANCE = 0.4
-
-# AutoDock Vina covalent radii (src/lib/atom_constants.h) and the 1.1
-# allowance of model::assign_bonds; Vina calls an N/O a donor when it is
-# bonded, by this distance rule, to an HD atom.
-VINA_COVALENT_RADII = {
-    "H": 0.37, "C": 0.77, "N": 0.75, "O": 0.73, "P": 1.06, "S": 1.02,
-    "F": 0.71, "I": 1.33, "CL": 0.99, "BR": 1.14, "SI": 1.11, "MG": 1.30,
-    "MN": 1.39, "ZN": 1.31, "CA": 1.74, "FE": 1.25,
-}
-VINA_METAL_COVALENT_RADIUS = 1.75
-VINA_BOND_ALLOWANCE = 1.1
-
-# A hydrogen's parent is the nearest heavy atom within this distance (A).
-H_PARENT_MAX_DISTANCE = 2.0
-
-_PDBQT_TYPE_ELEMENTS = {
-    "A": "C", "NA": "N", "NS": "N", "OA": "O", "OS": "O", "SA": "S",
-    "HD": "H", "HS": "H",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -265,26 +248,6 @@ def _xyz_key(line: str) -> Tuple[float, float, float]:
             round(float(line[46:54]), 3))
 
 
-class _SpatialHash:
-    """Points bucketed in cubic cells; ``near`` returns every point within
-    one cell edge of the query (and some farther ones)."""
-
-    def __init__(self, cell: float):
-        self.cell = cell
-        self.cells = defaultdict(list)
-
-    def _cell(self, xyz):
-        return tuple(int(math.floor(c / self.cell)) for c in xyz)
-
-    def add(self, xyz, item):
-        self.cells[self._cell(xyz)].append((xyz, item))
-
-    def near(self, xyz):
-        cx, cy, cz = self._cell(xyz)
-        return [entry for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
-                for entry in self.cells.get((cx + dx, cy + dy, cz + dz), ())]
-
-
 def _restore_residue_labels(pdbqt_file: str, pdb_file: str) -> int:
     """Copy atom names and residue labels from ``pdb_file`` back onto the
     PDBQT that Open Babel wrote from it.
@@ -370,275 +333,6 @@ def _count_polar_atoms(pdbqt_file: str) -> Tuple[int, int]:
                 hd += t == "HD"
                 no += t in ("N", "NA", "NS", "OA", "OS", "O")
     return hd, no
-
-
-# ---------------------------------------------------------------------------
-# Deterministic hydrogen placement
-# ---------------------------------------------------------------------------
-#
-# Open Babel adds each hydrogen along OBBuilder::GetNewBondVector. When the
-# heavy-atom geometry does not define that direction it uses
-# vector3::randomUnitVector(), seeded from the clock (OBRandom::TimeSeed), so
-# the hydrogen lands somewhere else on every run. This happens for an atom
-# with no heavy neighbour that gets two or more hydrogens (waters, atoms of
-# broken residues), for two-atom fragments, and for over-coordinated atoms
-# (e.g. a lysine NZ that already carries three input hydrogens and is then
-# protonated once more by the pH model). The functions below find those
-# hydrogens and give them a position computed from the heavy atoms only.
-
-_TETRAHEDRAL = math.radians(109.4712206)
-_SPIN_STEP_DEGREES = 30
-
-
-def _pdbqt_element(atom_type: str) -> str:
-    return _PDBQT_TYPE_ELEMENTS.get(atom_type, atom_type.upper())
-
-
-def _vsub(a, b):
-    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
-
-
-def _vadd(a, b):
-    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
-
-
-def _vscale(a, s):
-    return (a[0] * s, a[1] * s, a[2] * s)
-
-
-def _vdot(a, b):
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-
-
-def _vcross(a, b):
-    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0])
-
-
-def _vnorm(a):
-    length = math.sqrt(_vdot(a, a))
-    return _vscale(a, 1.0 / length) if length > 1e-9 else None
-
-
-_LAB_AXES = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
-
-
-def _perpendicular(axis):
-    """Unit vector perpendicular to ``axis`` built from the lab axis least
-    parallel to it (ties: x before y before z)."""
-    ref = min(_LAB_AXES, key=lambda e: abs(_vdot(e, axis)))
-    return _vnorm(_vsub(ref, _vscale(axis, _vdot(ref, axis))))
-
-
-def _cone(axis, half_angle, n, spin_degrees):
-    """``n`` unit vectors at ``half_angle`` from ``axis``, 120 deg apart."""
-    b = _perpendicular(axis)
-    c = _vcross(axis, b)
-    out = []
-    for k in range(n):
-        phi = math.radians(spin_degrees + 120.0 * k)
-        side = _vadd(_vscale(b, math.cos(phi)), _vscale(c, math.sin(phi)))
-        out.append(_vnorm(_vadd(_vscale(axis, math.cos(half_angle)),
-                                _vscale(side, math.sin(half_angle)))))
-    return out
-
-
-def _fibonacci_sphere(n=256):
-    golden = math.pi * (3.0 - math.sqrt(5.0))
-    points = []
-    for i in range(n):
-        z = 1.0 - 2.0 * (i + 0.5) / n
-        r = math.sqrt(max(0.0, 1.0 - z * z))
-        points.append((r * math.cos(golden * i), r * math.sin(golden * i), z))
-    return points
-
-
-_SPHERE = _fibonacci_sphere()
-
-
-def _spread_directions(bonds, n):
-    """Greedily add ``n`` directions that keep the largest angle to the
-    existing bond directions (fixed sampling of the sphere)."""
-    bonds = list(bonds)
-    out = []
-    for _ in range(n):
-        best = min(_SPHERE, key=lambda p: max((_vdot(p, b) for b in bonds), default=-1.0))
-        out.append(best)
-        bonds.append(best)
-    return out
-
-
-def _candidate_h_directions(bonds: List[Tuple[float, float, float]], n_h: int):
-    """Candidate sets of ``n_h`` hydrogen directions, in a fixed order, for an
-    atom whose heavy-atom bonds point along the unit vectors ``bonds``.
-
-    Hydrogens take the free tetrahedral positions; where those leave a free
-    rotation (no or one heavy neighbour) every 30 deg spin is a candidate.
-    Hydrogens beyond the free tetrahedral positions (over-coordinated atoms)
-    are spread away from the other bonds.
-    """
-    deg = len(bonds)
-    candidates = []
-    if deg == 0:
-        for axis in _LAB_AXES + tuple(_vscale(a, -1.0) for a in _LAB_AXES):
-            for spin in range(0, 360, _SPIN_STEP_DEGREES):
-                slots = [axis] + _cone(axis, _TETRAHEDRAL, 3, spin)
-                candidates.append(slots)
-    elif deg == 1:
-        away = _vscale(bonds[0], -1.0)
-        for spin in range(0, 360, _SPIN_STEP_DEGREES):
-            candidates.append(_cone(away, math.pi - _TETRAHEDRAL, 3, spin))
-    elif deg == 2:
-        bisector = _vnorm(_vscale(_vadd(bonds[0], bonds[1]), -1.0)) or _perpendicular(bonds[0])
-        normal = _vnorm(_vcross(bonds[0], bonds[1])) or _vcross(bonds[0], bisector)
-        half = _TETRAHEDRAL / 2.0
-        up = _vnorm(_vadd(_vscale(bisector, math.cos(half)), _vscale(normal, math.sin(half))))
-        down = _vnorm(_vsub(_vscale(bisector, math.cos(half)), _vscale(normal, math.sin(half))))
-        candidates = [[up, down], [down, up]]
-    elif deg == 3:
-        candidates = [[_vnorm(_vscale(_vadd(_vadd(bonds[0], bonds[1]), bonds[2]), -1.0))
-                       or _perpendicular(bonds[0])]]
-    else:
-        candidates = [[]]
-    result = []
-    for slots in candidates:
-        chosen = list(slots[:n_h])
-        if len(chosen) < n_h:
-            chosen += _spread_directions(list(bonds) + chosen, n_h - len(chosen))
-        result.append(chosen)
-    return result
-
-
-def _vina_bond_cutoff(element: str) -> float:
-    radius = VINA_COVALENT_RADII.get(element, VINA_METAL_COVALENT_RADIUS)
-    return VINA_BOND_ALLOWANCE * (VINA_COVALENT_RADII["H"] + radius)
-
-
-def _ob_bonded(el_a, xyz_a, el_b, xyz_b) -> bool:
-    cutoff = (OB_COVALENT_RADII.get(el_a, OB_UNKNOWN_COVALENT_RADIUS)
-              + OB_COVALENT_RADII.get(el_b, OB_UNKNOWN_COVALENT_RADIUS) + OB_BOND_TOLERANCE)
-    return OB_MIN_BOND_DISTANCE < math.dist(xyz_a, xyz_b) < cutoff
-
-
-def _parse_pdbqt_atoms(path: str) -> Tuple[List[str], List[int]]:
-    with open(path) as f:
-        lines = f.readlines()
-    return lines, [i for i, l in enumerate(lines) if l.startswith(("ATOM", "HETATM"))]
-
-
-def stabilize_hydrogens(pdbqt_file: str, probe_pdbqt: Optional[str] = None) -> int:
-    """Give Open Babel's randomly placed hydrogens a deterministic position.
-
-    A hydrogen group (all hydrogens of one heavy atom) is re-placed when its
-    heavy atom has no heavy neighbour and two or more hydrogens, when it
-    belongs to a two-atom fragment, or when any of its hydrogens differs
-    between ``pdbqt_file`` and ``probe_pdbqt`` (a second conversion of the
-    same input; Open Babel's random placements differ between runs, its
-    other placements never do). Heavy atoms must be identical in both files.
-
-    The new positions use the Open Babel X-H bond length (sum of covalent
-    radii) and the free tetrahedral directions around the heavy atom; where
-    those can still rotate, the first rotation (fixed 30 deg steps) that
-    keeps the hydrogens farthest from other heavy atoms is used, so each
-    hydrogen stays bonded, by Vina's distance rule, to its own heavy atom
-    only. Returns the number of hydrogens moved.
-    """
-    lines, idx = _parse_pdbqt_atoms(pdbqt_file)
-    probe_lines = None
-    if probe_pdbqt is not None:
-        probe_lines, probe_idx = _parse_pdbqt_atoms(probe_pdbqt)
-        if len(probe_idx) != len(idx):
-            raise RuntimeError(
-                f"Open Babel wrote {len(idx)} and {len(probe_idx)} atoms in two "
-                "conversions of the same receptor")
-        probe_lines = [probe_lines[i] for i in probe_idx]
-
-    heavy, hydrogens = [], []
-    for k, i in enumerate(idx):
-        line = lines[i]
-        atom_type = line[77:79].strip()
-        xyz = (float(line[30:38]), float(line[38:46]), float(line[46:54]))
-        moved = False
-        if probe_lines is not None:
-            other = probe_lines[k]
-            same_record = line[:30] == other[:30] and line[54:] == other[54:]
-            moved = line[30:54] != other[30:54]
-            if not same_record or (moved and atom_type not in PDBQT_HYDROGEN_TYPES):
-                raise RuntimeError(
-                    "Open Babel wrote different heavy atoms in two conversions of "
-                    f"the same receptor:\n  {line.rstrip()}\n  {other.rstrip()}")
-        if atom_type in PDBQT_HYDROGEN_TYPES:
-            alt = xyz
-            if moved:
-                o = probe_lines[k]
-                alt = (float(o[30:38]), float(o[38:46]), float(o[46:54]))
-            hydrogens.append((i, xyz, alt, moved))
-        else:
-            heavy.append((i, _pdbqt_element(atom_type), xyz))
-
-    if not hydrogens:
-        return 0
-    max_bond = 2 * max(OB_COVALENT_RADII.values()) + OB_BOND_TOLERANCE
-    grid = _SpatialHash(max_bond)
-    for h in range(len(heavy)):
-        grid.add(heavy[h][2], h)
-
-    # Parent: the heavy atom closest to the hydrogen in both conversions (a
-    # randomly placed hydrogen may pass close to another atom in one of them).
-    groups = defaultdict(list)
-    for i, xyz, alt, moved in hydrogens:
-        best = None
-        for p, h in grid.near(xyz):
-            d = max(math.dist(p, xyz), math.dist(p, alt))
-            if d <= H_PARENT_MAX_DISTANCE and (best is None or d < best[0]):
-                best = (d, h)
-        if best is None:
-            raise RuntimeError(
-                f"Hydrogen at ({lines[i][30:54].strip()}) has no heavy atom within "
-                f"{H_PARENT_MAX_DISTANCE} A in {pdbqt_file}")
-        groups[best[1]].append((i, moved))
-
-    def heavy_neighbours(h):
-        _, el, xyz = heavy[h]
-        return [n for p, n in grid.near(xyz)
-                if n != h and _ob_bonded(el, xyz, heavy[n][1], p)]
-
-    moved_total = 0
-    for h in sorted(groups):
-        members = groups[h]
-        nbrs = heavy_neighbours(h)
-        undefined = ((not nbrs and len(members) >= 2)
-                     or (len(nbrs) == 1 and heavy_neighbours(nbrs[0]) == [h]))
-        if not (undefined or any(moved for _, moved in members)):
-            continue
-        _, el, xyz = heavy[h]
-        bonds = [_vnorm(_vsub(heavy[n][2], xyz)) for n in nbrs]
-        bonds = [b for b in bonds if b is not None]
-        length = OB_COVALENT_RADII.get(el, OB_UNKNOWN_COVALENT_RADIUS) + OB_COVALENT_RADII["H"]
-        others = [(heavy[n][1], p) for p, n in grid.near(xyz) if n != h]
-
-        best = None
-        for directions in _candidate_h_directions(bonds, len(members)):
-            positions = [_vadd(xyz, _vscale(d, length)) for d in directions]
-            clearance = min((math.dist(pos, p) - _vina_bond_cutoff(e)
-                             for pos in positions for e, p in others), default=math.inf)
-            clearance = round(clearance, 4)
-            if best is None or clearance > best[0]:
-                best = (clearance, positions)
-        clearance, positions = best
-        if clearance <= 0:
-            logger.warning(
-                f"[!] A hydrogen of the {el} atom at ({lines[heavy[h][0]][30:54].strip()}) "
-                "is within Vina's bond distance of another heavy atom in every "
-                "orientation; check the input geometry there")
-        for (i, _), pos in zip(members, positions):
-            line = lines[i]
-            lines[i] = f"{line[:30]}{pos[0]:8.3f}{pos[1]:8.3f}{pos[2]:8.3f}{line[54:]}"
-            moved_total += 1
-
-    with open(pdbqt_file, "w") as f:
-        f.writelines(lines)
-    return moved_total
 
 
 # ---------------------------------------------------------------------------
