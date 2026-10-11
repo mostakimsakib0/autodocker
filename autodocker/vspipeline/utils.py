@@ -1,43 +1,40 @@
 #!/usr/bin/env python3
-"""UTILITIES.
+"""Shared helpers: subprocess execution, Open Babel calls, chain parsing.
 
-Split out of runner.py (behavior-preserving refactor). All cross-module
-references go through the ``runner`` namespace at call time so the public
-entry point and its monkeypatch surface stay unchanged.
+Cross-module references go through the ``runner`` namespace at call time so
+monkeypatching ``runner.<name>`` (e.g. ``runner.run`` in tests) keeps working.
 """
+import logging
 import os
 import re
-import csv
-import json
-import math
-import time
 import shlex
-import uuid
-import shutil
-import fnmatch
-import glob
-import html
-import statistics
 import subprocess
-import logging
-from collections import defaultdict
-from datetime import datetime
-from pathlib import Path
-from typing import List, Tuple, Optional, Dict
-from urllib.parse import quote
-from multiprocessing import Pool, cpu_count as mp_cpu_count
+from multiprocessing import cpu_count as mp_cpu_count
+from typing import Dict, Iterable, List, Optional, Tuple
 
 # The runner module owns the tool-path globals (OBABEL, VINA*, SMINA,
-# COMMAND_TIMEOUT) and every public name; import it lazily-safe: during the
-# initial import of runner this binds the partially-initialized module
-# object, which is fine because attributes are only accessed at call time.
+# COMMAND_TIMEOUT); during the initial import of runner this binds the
+# partially-initialized module, which is fine because attributes are only
+# accessed at call time.
 import runner  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# Chain ID assumed for a PDB whose ATOM records carry no chain identifier
+# (blank column 22, common in DUD-E-style receptors).
+DEFAULT_CHAIN = "A"
+
+# Open Babel's force fields and conformer search use OpenMP; a single thread
+# keeps their floating-point summation order, and so their output, repeatable.
+OBABEL_ENV = {"OMP_NUM_THREADS": "1"}
+
+# Lines of Open Babel stderr quoted in an error message.
+_STDERR_TAIL_LINES = 5
+
+
 def run(cmd_list: List[str], capture: bool = False,
         extra_env: Optional[Dict[str, str]] = None) -> Optional[Tuple[str, str, int]]:
-    """Run a command safely without shell injection risk.
+    """Run a command (no shell) with the global ``runner.COMMAND_TIMEOUT``.
 
     ``extra_env`` adds or overrides environment variables for this command only.
     """
@@ -52,18 +49,57 @@ def run(cmd_list: List[str], capture: bool = False,
                     result.returncode, cmd_list, output=result.stdout, stderr=result.stderr
                 )
             return result.stdout, result.stderr, result.returncode
-        else:
-            subprocess.run(cmd_list, check=True, timeout=runner.COMMAND_TIMEOUT, env=env)
+        subprocess.run(cmd_list, check=True, timeout=runner.COMMAND_TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
-        logger.error(f"Command timed out: {' '.join(cmd_list)}")
+        logger.error(f"Command timed out after {runner.COMMAND_TIMEOUT}s: {shlex.join(cmd_list)}")
         raise
     except subprocess.CalledProcessError as e:
         logger.error(
-            f"Command failed with return code {e.returncode}: {' '.join(cmd_list)}")
+            f"Command failed with return code {e.returncode}: {shlex.join(cmd_list)}")
         raise
-    except FileNotFoundError as e:
-        logger.error(f"Command not found: {' '.join(cmd_list)}")
+    except FileNotFoundError:
+        logger.error(f"Command not found: {shlex.join(cmd_list)}")
         raise
+    return None
+
+
+def _tail(text: Optional[str]) -> str:
+    lines = [line for line in (text or "").strip().splitlines() if line.strip()]
+    return " | ".join(lines[-_STDERR_TAIL_LINES:])
+
+
+def run_obabel(args: List[str], outputs: Iterable[str] = ()) -> str:
+    """Run Open Babel single-threaded and return its stdout.
+
+    Every Open Babel call of the ligand pipeline goes through here, so each
+    one gets ``OMP_NUM_THREADS=1``, the global command timeout and a DEBUG
+    log line with the exact command. On failure the files in ``outputs`` are
+    deleted (a partial output must never be mistaken for a prepared ligand)
+    and a RuntimeError with Open Babel's last stderr lines is raised.
+    """
+    if not runner.OBABEL:
+        raise RuntimeError("Open Babel (obabel) not found in PATH")
+    cmd = [runner.OBABEL, *args]
+    logger.debug(f"Running: OMP_NUM_THREADS=1 {shlex.join(cmd)}")
+    try:
+        result = runner.run(cmd, capture=True, extra_env=dict(OBABEL_ENV))
+    except BaseException as e:
+        for path in outputs:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+        if isinstance(e, subprocess.TimeoutExpired):
+            raise RuntimeError(
+                f"obabel timed out after {runner.COMMAND_TIMEOUT}s") from e
+        if isinstance(e, subprocess.CalledProcessError):
+            raise RuntimeError(
+                f"obabel exited with code {e.returncode}: {_tail(e.stderr)}") from e
+        raise
+    stdout, stderr = (result[0], result[1]) if result else ("", "")
+    if stderr and stderr.strip():
+        logger.debug(f"obabel: {_tail(stderr)}")
+    return stdout or ""
 
 
 def ligand_name(path: str) -> str:
@@ -126,32 +162,46 @@ def _safe_ligand_id(name: str) -> str:
 
 
 def get_chains(pdb_file: str) -> List[str]:
-    """Extract unique chains from PDB file."""
-    chains = set()
-    try:
-        with open(pdb_file) as f:
-            for line in f:
-                if line.startswith("ATOM"):
-                    chain = line[21]
-                    if chain.strip():
-                        chains.add(chain)
-    except Exception as e:
-        logger.warning(f"Could not parse chains: {e}")
-        return ["A"]
+    """Sorted unique chain IDs of the ATOM records of a PDB file.
 
-    return sorted(list(chains)) if chains else ["A"]
+    A file whose ATOM records carry no chain ID yields ``[DEFAULT_CHAIN]``.
+    An unreadable file raises (OSError) instead of silently defaulting.
+    Chain IDs are case-sensitive and returned as written.
+    """
+    chains = set()
+    with open(pdb_file, errors="replace") as f:
+        for line in f:
+            if line.startswith("ATOM") and len(line) > 21:
+                chain = line[21]
+                if chain.strip():
+                    chains.add(chain)
+    return sorted(chains) if chains else [DEFAULT_CHAIN]
 
 
 def _parse_chain_selection(chain: str, available: List[str]) -> List[str]:
+    """Resolve a --chain value ("A", "A,B", "all") against the available IDs.
+
+    PDB chain IDs are case-sensitive (large complexes use both "A" and "a"),
+    so IDs are compared exactly; a case-insensitive match is suggested in the
+    error message.
+    """
     choice = (chain or "").strip()
     if not choice or choice.lower() in {"all", "*"}:
         return available
 
-    selected = [c.strip().upper()
-                for c in re.split(r"[,\s]+", choice) if c.strip()]
+    selected = [c.strip() for c in re.split(r"[,\s]+", choice) if c.strip()]
     invalid = [c for c in selected if c not in available]
     if invalid:
-        raise ValueError(
-            f"Invalid chain(s): {', '.join(invalid)}. Available chains: {', '.join(available)}"
-        )
+        hints = []
+        for c in invalid:
+            matches = [a for a in available if a.lower() == c.lower()]
+            if matches:
+                hints.append(f"'{c}' -> '{matches[0]}'")
+        message = (f"Invalid chain(s): {', '.join(invalid)}. "
+                   f"Available chains: {', '.join(available)}")
+        if hints:
+            message += (" (chain IDs are case-sensitive; did you mean "
+                        + ", ".join(hints) + "?)")
+            logger.warning(f"[!] {message}")
+        raise ValueError(message)
     return selected

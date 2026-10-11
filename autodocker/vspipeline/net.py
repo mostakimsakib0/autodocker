@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
-"""HTTP FETCHING (with retry/backoff).
-
-Split out of runner.py (behavior-preserving refactor).
-"""
+"""HTTP fetching with retry and exponential backoff (PubChem downloads)."""
+import http.client
 import logging
 import time
+import urllib.error
+import urllib.request
 from typing import Optional
 
 try:
     import requests
-except ModuleNotFoundError:
+except ModuleNotFoundError:  # the stdlib client below is used instead
     requests = None
 
-try:
-    import urllib.request
-    import urllib.error
-except ImportError:  # pragma: no cover
-    urllib = None
-
 logger = logging.getLogger(__name__)
+
+# Per-request timeout in seconds (connect + read).
+HTTP_TIMEOUT = 30
 
 # Retry policy: transient network failures (connection resets, timeouts,
 # HTTP 429/5xx) are retried with exponential backoff. Non-transient HTTP
@@ -29,7 +26,7 @@ RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
 class _RetryableHTTPError(Exception):
-    """Internal marker for a transient failure worth retrying."""
+    """A transient HTTP failure (429/5xx); raised once retries are exhausted."""
 
 
 def _http_status(error: BaseException) -> Optional[int]:
@@ -43,16 +40,24 @@ def _http_status(error: BaseException) -> Optional[int]:
     return None
 
 
-def _http_get_once(url: str, timeout: int = 30) -> bytes:
-    """Single fetch attempt, using requests when available and urllib otherwise."""
+def is_network_failure(error: BaseException) -> bool:
+    """True if ``error`` means the server could not be reached or kept
+    failing transiently (connection error, timeout, persistent 429/5xx),
+    as opposed to an answer such as 404."""
+    if isinstance(error, _RetryableHTTPError):
+        return True
+    return (isinstance(error, (OSError, http.client.HTTPException))
+            and _http_status(error) is None)
+
+
+def _http_get_once(url: str, timeout: float = HTTP_TIMEOUT) -> bytes:
+    """Single fetch attempt, using requests when installed and urllib otherwise."""
     if requests is not None:
         resp = requests.get(url, timeout=timeout)
         if resp.status_code in RETRYABLE_STATUS:
             raise _RetryableHTTPError(f"HTTP {resp.status_code} from {url}")
         resp.raise_for_status()
         return resp.content
-    if urllib is None:
-        raise RuntimeError("No HTTP library available (requests/urllib)")
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return resp.read()
@@ -62,29 +67,26 @@ def _http_get_once(url: str, timeout: int = 30) -> bytes:
         raise
 
 
-def _http_get_bytes(url: str, timeout: int = 30,
+def _http_get_bytes(url: str, timeout: float = HTTP_TIMEOUT,
                     retries: Optional[int] = None,
                     backoff: float = DEFAULT_BACKOFF) -> bytes:
     """Fetch a URL with retries and exponential backoff.
 
-    Transient failures (connection errors, timeouts, HTTP 429/5xx) are
-    retried up to ``retries`` times (default: ``DEFAULT_RETRIES``) with a
+    Transient failures (connection errors, timeouts, HTTP 429/5xx) are tried
+    up to ``retries`` times in total (default: ``DEFAULT_RETRIES``) with a
     backoff that doubles between attempts. Permanent client errors (e.g.
-    404) raise immediately.
+    404) and programming errors raise immediately.
     """
     attempts = DEFAULT_RETRIES if retries is None else max(1, retries)
     last_error: Optional[BaseException] = None
     for attempt in range(1, attempts + 1):
         try:
             return _http_get_once(url, timeout=timeout)
-        except _RetryableHTTPError as e:
-            last_error = e
-        except (OSError, RuntimeError) as e:
-            # requests raises requests.exceptions.* subclasses of OSError;
-            # urllib raises URLError (subclass of OSError). Their HTTPError
-            # subclasses carry a status: a 4xx (other than 429) is permanent
-            # and is raised at once instead of being retried.
-            if _http_status(e) is not None:
+        except (_RetryableHTTPError, OSError, http.client.HTTPException) as e:
+            # requests' exceptions subclass OSError; urllib raises URLError
+            # (an OSError). An HTTPError carrying a 4xx status other than 429
+            # is permanent and is raised at once instead of being retried.
+            if not is_network_failure(e):
                 raise
             last_error = e
         if attempt < attempts:
