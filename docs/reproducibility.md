@@ -40,8 +40,8 @@ fixed, what is not, and how it is tested.
 - Open Babel always runs single-threaded (`OMP_NUM_THREADS=1`).
 - Pocket choice: pockets are ranked by fpocket score, then druggability, then
   pocket number; fpocket's pocket atoms and scores are deterministic.
-- Text outputs contain no timestamps or absolute paths; timestamps are only
-  in `run_manifest.json`.
+- Text outputs and the HTML report (`results_report.html`) contain no
+  timestamps or absolute paths; timestamps are only in `run_manifest.json`.
 - Benchmark scripts seed every sampling step (ligand subsets, complex
   subsets, bootstrap, RDKit start conformers) and record their parameters
   and tool versions in `summary.json`.

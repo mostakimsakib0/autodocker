@@ -467,3 +467,27 @@ def test_viewer_click_on_ligand_outside_top_hits_does_not_reload_current(tmp_pat
     assert shown[0] == ["ligB", "NGL viewer failed to load."]
     assert shown[1][0] == "ligB"
     assert "outsider is not among the top hits" in shown[1][1]
+
+
+def test_reports_of_identical_inputs_are_byte_identical(tmp_path, monkeypatch):
+    """No wall-clock timestamp and no output path in the report: identical
+    runs (here in two output directories) write identical bytes."""
+    monkeypatch.setattr(runner, "_fetch_ngljs", lambda: b"/* fake ngl */")
+    reports = []
+    for run in ("a", "b"):
+        outdir = str(tmp_path / run)
+        os.makedirs(os.path.join(outdir, "docked"))
+        _write(os.path.join(outdir, "docked", "ligA_out.pdbqt"), _pose_pdbqt("ligA"))
+        csv_path = _ranking_csv(outdir, [
+            {"Ligand": "ligA", "Binding_Affinity": "-7.25", "Status": "OK",
+             "Docked_File": "docked/ligA_out.pdbqt"},
+            {"Ligand": "ligB", "Binding_Affinity": "FAILED", "Status": "FAILED"}])
+        report = os.path.join(outdir, "results_report.html")
+        assert runner.generate_html_report(
+            csv_path, os.path.join(outdir, "docked"), report,
+            meta={"Seed": 42, "Exhaustiveness": 8})
+        with open(report, "rb") as f:
+            reports.append(f.read())
+    assert reports[0] == reports[1]
+    assert b"Generated:" not in reports[0]
+    assert runner.__version__.encode() in reports[0]

@@ -18,7 +18,6 @@ import html
 import statistics
 import logging
 from collections import defaultdict
-from datetime import datetime
 from typing import List, Tuple, Optional, Dict
 
 # The runner module owns the tool-path globals (OBABEL, VINA*, SMINA,
@@ -667,7 +666,8 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                 if os.path.isdir(poses_dir) else {})
 
     css = _REPORT_CSS(bool(ranked_ligands))
-    generated = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # No wall-clock time: identical runs write identical reports (the run's
+    # start and end times are in run_manifest.json).
     version = getattr(runner, "__version__", None) or "unknown"
 
     meta_items = ""
@@ -773,7 +773,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
         <main>
             <div class="header">
                 <h1>Virtual Screening Results Report</h1>
-                <p>Generated: {generated} · AutoDocker {version}</p>
+                <p>AutoDocker {version} · run times and settings in run_manifest.json</p>
             </div>
 
             <div class="section" id="summary">
