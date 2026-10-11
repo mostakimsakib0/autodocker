@@ -105,6 +105,8 @@ changes (below) are part of 2.0.0.
 - `Top_hits.txt`, `metrics.txt` and `Results_full.txt` contain no timestamps;
   `receptor.pdbqt` contains no output path.
 - Chain IDs are case-sensitive.
+- The HTML report highlights `--top-n` ligands (default 20) in its top-hits
+  table and 3D viewer, like `Top_hits.txt`; it always showed 10.
 - Open Babel always runs single-threaded.
 - Exit codes: 2 for invalid options, environment or missing tools; 3 when
   more ligands fail than `--max-failure-fraction` (default 0.5) allows;

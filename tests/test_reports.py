@@ -77,6 +77,23 @@ class TestHtmlReport:
         assert "Virtual Screening Results Report" in content
         assert "ligA" in content
 
+    def test_top_hits_follow_top_n(self, tmp_path):
+        """The report highlights --top-n ligands, like Top_hits.txt."""
+        outdir = str(tmp_path / "topn")
+        os.makedirs(outdir)
+        rows = [{"Ligand": f"lig{i}", "Binding_Affinity": f"-{9 - i}.0",
+                 "SimScore": "0.9", "Binding_Modes": "9", "Status": "OK"}
+                for i in range(5)]
+        csv_path = _ranking_csv(outdir, rows)
+        html_path = os.path.join(outdir, "results_report.html")
+        runner.generate_html_report(csv_path, os.path.join(outdir, "docked"),
+                                    html_path, top_n=3)
+        with open(html_path, encoding="utf-8") as f:
+            content = f.read()
+        assert "Top 3 Hits" in content
+        top_table = content.split("Top 3 Hits", 1)[1].split("</table>", 1)[0]
+        assert "lig2" in top_table and "lig3" not in top_table
+
     def test_html_missing_csv_warns(self, outdir, caplog):
         runner.generate_html_report(
             os.path.join(outdir, "no.csv"), os.path.join(outdir, "docked"),

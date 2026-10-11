@@ -325,9 +325,6 @@ AFFINITY_BANDS = (
 # report (a common rule of thumb; the number itself is always shown).
 # Seconds allowed for downloading the NGL viewer when no local copy exists.
 NGL_DOWNLOAD_TIMEOUT = 60
-# Ligands shown in the report's 3D viewer and top-hits table (the full
-# ranking is in the sortable all-results table and in ranking.csv).
-REPORT_TOP_LIGANDS = 10
 RHO_STRENGTH_BANDS = ((0.7, "strong"), (0.4, "moderate"), (0.2, "weak"))
 STRONG_BINDER_CUTOFF = -6.0  # "Good" or better
 
@@ -529,7 +526,8 @@ def _pose_file(lig, name: str, poses_dir: str,
 def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
                           receptor_pdbqt: Optional[str] = None,
                           output_file=None, grid_box=None,
-                          base_dir: Optional[str] = None) -> str:
+                          base_dir: Optional[str] = None,
+                          top_n: int = defaults.TOP_N) -> str:
     """Create the interactive NGL 3D viewer HTML section.
 
     The NGL library and the receptor/pose PDB texts are inlined into the
@@ -538,7 +536,7 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
     ``_fetch_ngljs``); when no verified NGL copy is available the viewer is
     omitted and replaced by a notice. Returns "" when there are no hits.
     """
-    top = ranked_ligands[:REPORT_TOP_LIGANDS]
+    top = ranked_ligands[:top_n]
     if not top:
         return ""
 
@@ -585,8 +583,12 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                           meta: Optional[Dict] = None,
                           grid_file: Optional[str] = None,
                           scorer_agreement: Optional[Dict] = None,
-                          rmsd_threshold: float = defaults.RMSD_THRESHOLD) -> bool:
+                          rmsd_threshold: float = defaults.RMSD_THRESHOLD,
+                          top_n: int = defaults.TOP_N) -> bool:
     """Write a single-file HTML screening report.
+
+    ``top_n`` ligands (``--top-n``, as in Top_hits.txt) are shown in the 3D
+    viewer and the top-hits table; the all-results table lists every ligand.
 
     Includes a table of contents, run metadata, summary statistics, an
     interactive NGL 3D viewer (with the docking box when ``grid_file`` is
@@ -671,7 +673,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
     # Top hits rows
     top_rows = ""
     top_names = set()
-    for i, (lig, affinity) in enumerate(ranked_ligands[:REPORT_TOP_LIGANDS], 1):
+    for i, (lig, affinity) in enumerate(ranked_ligands[:top_n], 1):
         top_names.add(str(lig.get('Ligand', 'Unknown')))
         conf_class, conf_text = _confidence(affinity)
         top_rows += f"""
@@ -778,7 +780,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
             {agreement_section}
 
             <div class="section" id="top">
-                <h2>Top 10 Hits</h2>
+                <h2>Top {min(top_n, len(ranked_ligands))} Hits</h2>
                 <table>
                     <thead><tr><th>#</th><th>Ligand Name</th><th>Affinity (kcal/mol)</th><th>Poses</th><th>Score band</th></tr></thead>
                     <tbody>{top_rows}
@@ -786,7 +788,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                 </table>
             </div>
 
-            {_build_viewer_section(ranked_ligands, poses_dir, receptor_pdbqt, output_file, grid_box=grid_box, base_dir=os.path.dirname(os.path.abspath(results_csv)))}
+            {_build_viewer_section(ranked_ligands, poses_dir, receptor_pdbqt, output_file, grid_box=grid_box, base_dir=os.path.dirname(os.path.abspath(results_csv)), top_n=top_n)}
 
             <div class="section" id="dist">
                 <h2>Affinity Distribution</h2>

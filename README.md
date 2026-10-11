@@ -137,7 +137,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `--no-resume` | Ignore the checkpoint (it is also discarded when receptor, box, parameters or engine binaries change) | off |
 | `--consensus` | Rescore Vina's top pose with SMINA's Vinardo function; writes `consensus_ranking.csv` and `consensus_summary.json` (needs SMINA) | off |
 | `--smina-only` | Dock with SMINA instead of Vina (1 mode, no resume) | off |
-| `--top-n` | Hits in `Top_hits.txt` | `20` |
+| `--top-n` | Top-ranked compounds highlighted in `Top_hits.txt` and the HTML report (`ranking.csv` lists all) | `20` |
 | `--no-html-report` | Skip the self-contained HTML report | report on |
 | `-v, --verbose` | Debug logging for all modules | off |
 | `--version` | Print version and exit | — |
@@ -156,7 +156,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `EXHAUSTIVENESS` | Vina exhaustiveness | `8` |
 | `BINDING_MODES` | Vina binding modes | `9` |
 | `ENERGY_RANGE` | Vina energy range | `3.0` |
-| `TOP_N` | Top hits count | `20` |
+| `TOP_N` | Compounds highlighted in `Top_hits.txt` and the HTML report | `20` |
 | `TIMEOUT` | Per-command timeout (s) | `VS_COMMAND_TIMEOUT` or `900` |
 | `LIPINSKI` | Set `0` to disable the Lipinski filter (`ADMET=0` is a deprecated alias) | `1` |
 | `NO_MINIMIZE` | Set `1` to skip MMFF94 minimization | `0` |

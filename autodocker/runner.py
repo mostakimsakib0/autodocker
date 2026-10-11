@@ -507,7 +507,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     out = parser.add_argument_group("analysis and reports")
     out.add_argument("--top-n", type=int, default=defaults.TOP_N,
-                     help="Number of compounds in Top_hits.txt")
+                     help="Number of top-ranked compounds highlighted in Top_hits.txt and in the HTML report's top-hits table and 3D viewer (ranking.csv always lists every ligand)")
     out.add_argument("--html-report", dest="html_report", action="store_true",
                      default=True,
                      help="Write results_report.html (on by default; the flag is accepted "
@@ -1069,7 +1069,8 @@ def _run_pipeline(args, state: Dict) -> int:
             meta=report_meta,
             grid_file=protein_prep.grid_conf,
             scorer_agreement=scorer_agreement,
-            rmsd_threshold=args.rmsd_threshold)
+            rmsd_threshold=args.rmsd_threshold,
+            top_n=args.top_n)
 
     failed = _failed_docking(results, metrics_dict)
     state["docking_failures"] = {"failed": len(failed), "docked": len(results)}
