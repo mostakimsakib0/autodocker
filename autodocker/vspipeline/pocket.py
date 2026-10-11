@@ -186,6 +186,7 @@ def detect_cofactors(pdb_file: str) -> List[Dict]:
             pdb_file, lambda r: r["resname"] in COFACTOR_RESNAMES):
         cofactors.append({
             "name": res["resname"],
+            "resname": res["resname"],
             "chain": res["chain"],
             "resnum": res["resnum"],
             "coords": res["coords"],

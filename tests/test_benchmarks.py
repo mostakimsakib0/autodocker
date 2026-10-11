@@ -373,6 +373,32 @@ class TestBenchlib:
         assert not any("SER" in ln for ln in models[0]["lines"])
         assert bl.first_vina_result(str(path)) == ("-7.512", -7.512)
 
+    @pytest.mark.parametrize("text", [
+        POSE,
+        # SMINA docking output: minimizedAffinity only.
+        "MODEL 1\nREMARK minimizedAffinity -8.12345\nATOM      1  C1  UNL     1"
+        "       0.000   0.000   0.000  0.00  0.00    +0.000 C\nENDMDL\n",
+        # smina --score_only copies the input's Vina remark: minimizedAffinity wins.
+        "MODEL 1\nREMARK VINA RESULT:    -7.000      0.000      0.000\n"
+        "REMARK minimizedAffinity -6.54321\nENDMDL\n",
+        # A model without a score, and a file without MODEL records.
+        "MODEL 1\nATOM      1  C1  UNL     1       0.000   0.000   0.000  0.00  0.00"
+        "    +0.000 C\nENDMDL\nMODEL 2\nREMARK VINA RESULT:    -5.250      1.0      2.0\n"
+        "ENDMDL\n",
+        "REMARK VINA RESULT:    -9.876      0.000      0.000\n",
+    ])
+    def test_scores_match_pipeline_parser(self, tmp_path, text):
+        """The standalone parser gives the pipeline's scores (same rules)."""
+        from vspipeline.docking import parse_pdbqt_results
+        path = tmp_path / "out.pdbqt"
+        path.write_text(text)
+        ours = [m["affinity"] for m in bl.parse_vina_models(str(path))
+                if m["affinity_str"] is not None]
+        pipeline = [aff for aff, _lb, _ub in parse_pdbqt_results(str(path))]
+        assert ours == pipeline and pipeline
+        first = bl.first_vina_result(str(path))[1]
+        assert first == pipeline[0]
+
     def test_ligand_box_rule(self):
         center, size = bl.ligand_box([(0, 0, 0), (10, 2, 2)])
         assert center == (5.0, 1.0, 1.0) and size == 22.5     # max(22.5, 10 + 12)

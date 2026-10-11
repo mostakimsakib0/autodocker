@@ -316,9 +316,9 @@ def test_failure_fraction_rules():
 
 def test_consensus_csv_has_only_data_rows(tmp_path):
     path = tmp_path / "consensus_ranking.csv"
-    agreement = runner.write_consensus_ranking(
-        str(path), [("a", -8.0), ("b", -6.0), ("c", -7.0), ("d", None)],
-        {"a": -7.5, "b": -6.5, "c": -7.2, "d": -5.0})
+    agreement = runner.write_consensus_outputs(
+        str(tmp_path), [("a", -8.0), ("b", -6.0), ("c", -7.0), ("d", None)],
+        {"a": -7.5, "b": -6.5, "c": -7.2, "d": -5.0}, "vinardo")
     rows = list(csv.reader(open(path)))
     assert rows[0] == ["Ligand", "Vina_Affinity", "SMINA_Affinity", "Consensus"]
     assert [r[0] for r in rows[1:]] == ["a", "c", "b", "d"]

@@ -87,6 +87,7 @@ class DockingCheckpoint:
     def __init__(self, outdir: str, fingerprint: Optional[str] = None,
                  resume: bool = True):
         self.outdir = outdir
+        self.fingerprint = fingerprint
         self.checkpoint_file = os.path.join(outdir, ".docking_checkpoint.json")
         self.journal_file = os.path.join(outdir, ".docking_checkpoint.jsonl")
         self.meta_file = os.path.join(outdir, ".docking_checkpoint.meta.json")

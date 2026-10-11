@@ -10,7 +10,7 @@ import re
 import shlex
 import subprocess
 from multiprocessing import cpu_count as mp_cpu_count
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 # The runner module owns the tool-path globals (OBABEL, VINA*, SMINA,
 # COMMAND_TIMEOUT); during the initial import of runner this binds the
@@ -68,14 +68,17 @@ def _tail(text: Optional[str]) -> str:
     return " | ".join(lines[-_STDERR_TAIL_LINES:])
 
 
-def run_obabel(args: List[str], outputs: Iterable[str] = ()) -> str:
-    """Run Open Babel single-threaded and return its stdout.
+def run_obabel(args: List[str], outputs: Iterable[str] = (),
+               return_stderr: bool = False) -> Union[str, Tuple[str, str]]:
+    """Run Open Babel single-threaded and return its stdout (with
+    ``return_stderr``: ``(stdout, stderr)``).
 
-    Every Open Babel call of the ligand pipeline goes through here, so each
-    one gets ``OMP_NUM_THREADS=1``, the global command timeout and a DEBUG
-    log line with the exact command. On failure the files in ``outputs`` are
-    deleted (a partial output must never be mistaken for a prepared ligand)
-    and a RuntimeError with Open Babel's last stderr lines is raised.
+    Every Open Babel call of the pipeline (ligands, charges, receptor) goes
+    through here, so each one gets ``OMP_NUM_THREADS=1``, the global command
+    timeout and a DEBUG log line with the exact command. On failure the files
+    in ``outputs`` are deleted (a partial output must never be mistaken for a
+    prepared ligand or receptor) and a RuntimeError with Open Babel's last
+    stderr lines is raised.
     """
     if not runner.OBABEL:
         raise RuntimeError("Open Babel (obabel) not found in PATH")
@@ -97,6 +100,8 @@ def run_obabel(args: List[str], outputs: Iterable[str] = ()) -> str:
                 f"obabel exited with code {e.returncode}: {_tail(e.stderr)}") from e
         raise
     stdout, stderr = (result[0], result[1]) if result else ("", "")
+    if return_stderr:
+        return stdout or "", stderr or ""
     if stderr and stderr.strip():
         logger.debug(f"obabel: {_tail(stderr)}")
     return stdout or ""

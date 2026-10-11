@@ -77,7 +77,7 @@ def test_fix_pdbqt_charges_success(tmp_path, monkeypatch):
     src = tmp_path / "src.pdb"
     src.write_text("REMARK source")
 
-    def fake_run(cmd, capture=False):
+    def fake_run(cmd, capture=False, **kwargs):
         # Simulate OpenBabel producing a charged PDBQT
         out.write_text(
             "ATOM      1  C   ALA A   1      0.0 0.0 0.0  0.0 0.0    -0.250 C\n")
@@ -94,24 +94,13 @@ def test_fix_pdbqt_charges_failure_raises(tmp_path, monkeypatch):
     src = tmp_path / "src.pdb"
     src.write_text("REMARK source")
 
-    def fake_run(cmd, capture=False):
+    def fake_run(cmd, capture=False, **kwargs):
         raise RuntimeError("obabel missing")
 
     monkeypatch.setattr(runner, "run", fake_run)
     monkeypatch.setattr(runner, "OBABEL", "obabel")
     with pytest.raises(RuntimeError):
         ch._fix_pdbqt_charges(str(out), str(src))
-
-
-def test_assign_simple_charges(tmp_path):
-    p = tmp_path / "s.pdbqt"
-    line = "ATOM" + "A" * 66 + " 0.000" + " " + " O"  # charge 0.0, atom type O at 77-78
-    _write(p, [line])
-    ch._assign_simple_charges(str(p))
-    content = p.read_text()
-    # Oxygen maps to -0.5; charge field should no longer be 0.000
-    assert "0.000" not in content
-    assert "-0.500" in content or "+0.500" in content or "0.500" in content
 
 
 def test_new_name_and_backwards_compatible_alias():
@@ -126,7 +115,7 @@ ATOM_2D = "ATOM      1  C   LIG A   1       1.000   2.000   0.000  0.00  0.00   
 def _capture_run(monkeypatch, write=None):
     calls = []
 
-    def fake_run(cmd, capture=False):
+    def fake_run(cmd, capture=False, **kwargs):
         calls.append(cmd)
         target = cmd[cmd.index("-O") + 1]
         with open(target, "w") as f:

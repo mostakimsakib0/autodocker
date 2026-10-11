@@ -4,10 +4,8 @@
 All cross-module references go through the ``runner`` namespace at call
 time so the public entry point and its monkeypatch surface stay unchanged.
 The report's CSS, JavaScript and viewer markup live in ``templates/``.
-
-Note: the PDBQT model/REMARK parsing below (``_models_from_vina_output``)
-should switch to the pipeline's shared parser in ``vspipeline.docking``
-(``parse_pdbqt_results``) once that exists.
+Per-model scores of docking outputs come from the pipeline's shared parser
+(``docking.parse_pdbqt_results``), the same one that produces ranking.csv.
 """
 import os
 import re
@@ -129,10 +127,11 @@ _HYDROGEN_TYPES = ("H", "HD", "HS")
 
 
 def _models_from_vina_output(path: str) -> List[Dict]:
-    """One pose per MODEL of a Vina output file: heavy-atom coordinates
-    (flexible side chains excluded) and the mode's affinity."""
+    """One pose per MODEL of a Vina/SMINA output file: heavy-atom
+    coordinates (flexible side chains excluded) and the mode's affinity
+    (``docking.parse_pdbqt_results``; None when it cannot be matched)."""
     poses = []
-    current, affinity, model, in_flex = [], 0.0, 0, False
+    current, model, in_flex = [], 0, False
     try:
         with open(path) as f:
             for line in f:
@@ -144,13 +143,8 @@ def _models_from_vina_output(path: str) -> List[Dict]:
                 elif in_flex:
                     continue
                 elif line.startswith('MODEL'):
-                    current, affinity = [], 0.0
+                    current = []
                     model += 1
-                elif line.startswith('REMARK VINA RESULT:'):
-                    try:
-                        affinity = float(line.split()[3])
-                    except (IndexError, ValueError):
-                        pass
                 elif line.startswith(('ATOM', 'HETATM')):
                     # Heavy atoms only: the AutoDock type (last field) of
                     # hydrogens is H/HD/HS.
@@ -164,9 +158,15 @@ def _models_from_vina_output(path: str) -> List[Dict]:
                         pass
                 elif line.startswith('ENDMDL') and current:
                     poses.append({'file': f"{os.path.basename(path)}#{model}",
-                                  'coords': current, 'affinity': affinity})
-    except OSError as e:
+                                  'coords': current, 'affinity': None})
+        scores = runner.parse_pdbqt_results(path)
+    except (OSError, ValueError) as e:
         logger.debug(f"Could not read poses from {path}: {e}")
+        return poses
+    # One score per MODEL in file order; only matched when the counts agree.
+    if len(scores) == len(poses):
+        for pose, (affinity, _lb, _ub) in zip(poses, scores):
+            pose['affinity'] = affinity
     return poses
 
 
@@ -190,12 +190,14 @@ def _cluster_into(clusters: Dict, ligand: str, pose_data: List[Dict],
             cluster_id += 1
 
 
-# NGL is inlined into the report. A downloaded copy must be exactly this
-# file (the standalone bundle that defines a global ``NGL``); anything else
-# is rejected and the viewer is left out of the report.
-NGL_VERSION = "2.4.0"
+# NGL is inlined into the report. Every copy (the image's /ngl/ngl.js, a
+# checkout's tools/ngl install or a download) must be exactly this file: the
+# standalone ngl.js bundle of the version pinned in tools/ngl/package.json
+# and pnpm-lock.yaml. Anything else is rejected and, when no verified copy is
+# found, the viewer is left out of the report.
+NGL_VERSION = "2.5.0"
 NGL_CDN_URL = f"https://cdn.jsdelivr.net/npm/ngl@{NGL_VERSION}/dist/ngl.js"
-NGL_SHA256 = "be8d4b16f1d73458efd70d2a3319ef2888fb6fa821732c319a99ff43a8e4f7e0"
+NGL_SHA256 = "ceab08a04b246cd4ba799749fce0a822c370e34b7366a3c090530ea5e8d48507"
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
 # PDB lines that are safe/meaningful to NGL (PDBQT adds ROOT/BRANCH
@@ -259,9 +261,12 @@ def _fetch_ngljs() -> Optional[bytes]:
          discarded.
 
     Only the standalone ``ngl.js`` bundle is used: ``ngl.umd.js`` needs
-    external peer globals and does not work when inlined on its own. Local
-    copies are logged with their SHA-256 but not rejected when they differ
-    from the pinned file (they come from the image or checkout).
+    external peer globals and does not work when inlined on its own. Every
+    copy, local or downloaded, must have the SHA-256 ``NGL_SHA256``: the
+    library is embedded as executable script in a report that is shared and
+    opened in browsers, and the image and a lockfile install both produce
+    exactly the pinned file, so a different local file is an unverified
+    build. It is skipped with a warning and the next source is tried.
 
     Returns None when no usable copy exists; the caller then omits the
     viewer and shows a notice instead.
@@ -275,9 +280,13 @@ def _fetch_ngljs() -> Optional[bytes]:
                 logger.debug(f"Could not read NGL from {path}: {e}")
                 continue
             digest = hashlib.sha256(data).hexdigest()
-            note = "" if digest == NGL_SHA256 else f" (not the pinned {NGL_VERSION} build)"
-            logger.info(f"[*] Using local NGL viewer {path} "
-                        f"(sha256 {digest[:12]}{note})")
+            if digest != NGL_SHA256:
+                logger.warning(
+                    f"[!] Local NGL {path} has SHA-256 {digest}, not the pinned NGL "
+                    f"{NGL_VERSION} ({NGL_SHA256}); not embedding it")
+                continue
+            logger.info(f"[*] Using local NGL viewer {path} (NGL {NGL_VERSION}, "
+                        f"sha256 {digest[:12]})")
             return data
 
     for attempt in (1, 2):
@@ -312,8 +321,12 @@ AFFINITY_BANDS = (
 )
 STRONG_BINDER_CUTOFF = -6.0  # "Good" or better
 
-# Status values of ranking.csv rows that carry no usable score.
+# Status values of ranking.csv rows that carry no usable score
+# (OUT_OF_WINDOW rows have a score, but it is outside the accepted window and
+# is not ranked; REJECTED is the pre-1.2 name of OUT_OF_WINDOW).
 _UNSCORED_STATUS = ("FAILED", "REJECTED", "ERROR", "OUT_OF_WINDOW")
+# Status values of in-window results.
+_SCORED_STATUS = ("OK", "WEAK")
 
 
 def _confidence(affinity: float):
@@ -340,7 +353,11 @@ def _interpretation_items() -> str:
 
 
 def _valid_score(row: Dict) -> Optional[float]:
-    """The row's affinity when it is a usable docking score, else None."""
+    """The row's affinity when it is an in-window docking score, else None.
+
+    Rows with Status OK/WEAK are in the window by construction; rows without
+    a recognised status (older ranking files) count only for a negative
+    finite affinity."""
     status = str(row.get('Status', '') or '').strip().upper()
     if status.startswith(_UNSCORED_STATUS):
         return None
@@ -348,9 +365,16 @@ def _valid_score(row: Dict) -> Optional[float]:
         value = float(str(row.get('Binding_Affinity', '')).strip())
     except ValueError:
         return None
-    if value != value or value >= 0:
+    if not math.isfinite(value):
+        return None
+    if status not in _SCORED_STATUS and value >= 0:
         return None
     return value
+
+
+def _is_out_of_window(row: Dict) -> bool:
+    status = str(row.get('Status', '') or '').strip().upper()
+    return status.startswith(("OUT_OF_WINDOW", "REJECTED"))
 
 
 def _template(name: str) -> str:
@@ -470,9 +494,11 @@ def _viewer_notice(message: str) -> str:
 """
 
 
-def _pose_file(lig, name: str, poses_dir: str) -> Optional[str]:
+def _pose_file(lig, name: str, poses_dir: str,
+               base_dir: Optional[str] = None) -> Optional[str]:
     """Docked pose file of a ranking row: the recorded Docked_File (absolute,
-    or relative to the output directory), then ``docked/<basename>``, then
+    or relative to ``base_dir``, the directory of ranking.csv; default: the
+    parent of ``poses_dir``), then ``docked/<basename>``, then
     ``<name>_out.pdbqt``."""
     recorded = lig.get('Docked_File', '') if isinstance(lig, dict) else ''
     candidates = []
@@ -480,8 +506,8 @@ def _pose_file(lig, name: str, poses_dir: str) -> Optional[str]:
         if os.path.isabs(recorded):
             candidates.append(recorded)
         else:
-            candidates.append(os.path.join(os.path.dirname(os.path.abspath(poses_dir)),
-                                           recorded))
+            base = base_dir or os.path.dirname(os.path.abspath(poses_dir))
+            candidates.append(os.path.join(base, recorded))
         candidates.append(os.path.join(poses_dir, os.path.basename(recorded)))
     candidates.append(os.path.join(poses_dir, f"{name}_out.pdbqt"))
     return next((p for p in candidates if os.path.isfile(p)), None)
@@ -489,7 +515,8 @@ def _pose_file(lig, name: str, poses_dir: str) -> Optional[str]:
 
 def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
                           receptor_pdbqt: Optional[str] = None,
-                          output_file=None, grid_box=None) -> str:
+                          output_file=None, grid_box=None,
+                          base_dir: Optional[str] = None) -> str:
     """Create the interactive NGL 3D viewer HTML section.
 
     The NGL library and the receptor/pose PDB texts are inlined into the
@@ -520,7 +547,7 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
     if os.path.isdir(poses_dir):
         for lig, affinity in top:
             name = str(lig.get('Ligand', lig) if isinstance(lig, dict) else lig)
-            path = _pose_file(lig, name, poses_dir)
+            path = _pose_file(lig, name, poses_dir, base_dir)
             pose_text = _pdbqt_to_pdb_string(path, first_model_only=True) if path else None
             if pose_text:
                 hits.append({"name": name, "affinity": affinity, "pose": pose_text})
@@ -556,8 +583,12 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
     and the structures are inlined); see ``_fetch_ngljs`` for where NGL
     comes from while the report is generated.
 
-    A row counts as scored when its Binding_Affinity is a negative number
-    and its Status is not FAILED/REJECTED/ERROR/OUT_OF_WINDOW.
+    A row counts as scored when its Status is OK/WEAK (or, without a status,
+    its Binding_Affinity is a negative number). OUT_OF_WINDOW rows are counted
+    separately and left out of the statistics, charts and top hits; FAILED
+    rows count as failed. Relative Docked_File paths are resolved against the
+    directory of ``results_csv``. ``scorer_agreement`` is the consensus
+    summary ({"rho", "n"} and optionally "scoring").
     """
     logger.info("[*] Generating HTML report...")
 
@@ -575,7 +606,8 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
     scores = [_valid_score(lig) for lig in ligands]
     valid_affinities = [v for v in scores if v is not None]
 
-    failed_count = len(ligands) - len(valid_affinities)
+    out_of_window_count = sum(1 for lig in ligands if _is_out_of_window(lig))
+    failed_count = len(ligands) - len(valid_affinities) - out_of_window_count
     avg_affinity = statistics.mean(valid_affinities) if valid_affinities else 0.0
     best_affinity = min(valid_affinities) if valid_affinities else 0.0
     worst_affinity = max(valid_affinities) if valid_affinities else 0.0
@@ -659,9 +691,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                 <td>{html.escape(str(lig.get('Status', '-')))}</td>
             </tr>"""
 
-    # Global, citable scorer-concordance metric (Spearman rho) -- shown as the
-    # defensible agreement statistic. The per-ligand "Agreement (heuristic)"
-    # column in consensus_ranking.csv is only a quick UI indicator.
+    # Scorer concordance over the screen (consensus_summary.json).
     agreement_section = ""
     if scorer_agreement and scorer_agreement.get("rho") is not None:
         _rho = float(scorer_agreement["rho"])
@@ -677,25 +707,19 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
             _strength = "negligible"
         _direction = ("concordant" if _rho > 0 else
                       "discordant" if _rho < 0 else "uncorrelated")
+        _scoring = html.escape(str(scorer_agreement.get("scoring") or "vinardo"))
         agreement_section = f"""
             <div class="section" id="agreement">
-                <h2>Scorer Agreement (Vina vs SMINA)</h2>
-                <p class="muted"><em>Global, citable measure of scorer concordance
-                across the screen (Spearman rank correlation).</em></p>
+                <h2>Scorer Agreement (Vina vs SMINA rescoring)</h2>
+                <p class="muted"><em>Spearman rank correlation between the Vina score of
+                each ligand's top pose and the score of the same pose from
+                <code>smina --score_only --scoring {_scoring}</code>
+                (consensus_summary.json).</em></p>
                 <div class="stat-grid">
                     {_stat_card(f"{_rho:.3f}", "Spearman &rho;")}
                     {_stat_card(_n, "Paired ligands (n)")}
                 </div>
-                <p>The two scoring functions are <strong>{_strength}
-                {_direction}</strong> (|&rho;| = {_abs:.3f}). This &rho; is the
-                statistically grounded agreement metric and may be reported as
-                such.</p>
-                <p class="muted"><small>Note: the per-ligand
-                <code>Agreement (heuristic)</code> column in
-                <code>consensus_ranking.csv</code> is only a quick UI indicator
-                (max(0, 100 &minus; |&Delta;|&times;10)) and is
-                <strong>not</strong> a validated metric &mdash; do not cite it
-                quantitatively.</small></p>
+                <p>The two scores are {_strength} {_direction} (|&rho;| = {_abs:.3f}).</p>
             </div>
 """
 
@@ -740,7 +764,8 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                     {_stat_card(f"{avg_affinity:.2f}", "Average Affinity")}
                     {_stat_card(f"{strong_binders}/{len(valid_affinities)}", f"Score &lt; {STRONG_BINDER_CUTOFF:g} kcal/mol")}
                     {_stat_card(f"{success_rate:.1f}%", "Scored ligands")}
-                    {_stat_card(failed_count, "Failed / not scored")}
+                    {_stat_card(out_of_window_count, "Outside the accepted window")}
+                    {_stat_card(failed_count, "Failed")}
                 </div>
             </div>
 
@@ -755,7 +780,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                 </table>
             </div>
 
-            {_build_viewer_section(ranked_ligands, poses_dir, receptor_pdbqt, output_file, grid_box=grid_box)}
+            {_build_viewer_section(ranked_ligands, poses_dir, receptor_pdbqt, output_file, grid_box=grid_box, base_dir=os.path.dirname(os.path.abspath(results_csv)))}
 
             <div class="section" id="dist">
                 <h2>Affinity Distribution</h2>
@@ -803,7 +828,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                 poses = cluster['poses']
                 html_content += f"  <li>Cluster {cluster['id']}: {len(poses)} poses"
                 if poses:
-                    affs = [p['affinity'] for p in poses if p['affinity']]
+                    affs = [p['affinity'] for p in poses if p['affinity'] is not None]
                     if affs:
                         html_content += f" (Affinity: {min(affs):.2f} to {max(affs):.2f})"
                 html_content += "</li>\n"
@@ -837,7 +862,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
     try:
         with open(output_file, 'w') as f:
             f.write(html_content)
-        logger.info(f"[✔] HTML report generated: {output_file}")
+        logger.info(f"[*] HTML report generated: {output_file}")
         return True
     except Exception as e:
         logger.warning(f"Could not write HTML report: {e}")

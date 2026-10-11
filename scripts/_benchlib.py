@@ -7,9 +7,12 @@ run directly and when a test loads a script with ``importlib``.
 Only standard-library code lives here; optional dependencies (RDKit) are
 imported inside the functions that need them.
 
-The pipeline itself is getting its own PDBQT result parser
-(``vspipeline.docking.parse_pdbqt_results``); once that exists the Vina
-output helpers below should delegate to it.
+The scripts run standalone (they need not import the pipeline package), so
+the Vina/SMINA output parser below is a copy of the pipeline's rules
+(``vspipeline.docking.parse_pdbqt_results``): the score of a model is its
+first ``REMARK minimizedAffinity`` (SMINA) if present, else its first
+``REMARK VINA RESULT``. tests/test_benchmarks.py checks that both parsers
+give the same scores.
 """
 
 import csv
@@ -157,6 +160,7 @@ def box_cli_args(center, size):
 
 VINA_RESULT_RE = re.compile(
     r"^REMARK VINA RESULT:\s+(\S+)\s+(\S+)\s+(\S+)")
+MINIMIZED_AFFINITY_RE = re.compile(r"^REMARK minimizedAffinity\s+(\S+)")
 _HYDROGEN_TYPES = ("H", "HD", "HS")
 
 
@@ -172,7 +176,10 @@ def parse_vina_models(pdbqt_path):
     """Every MODEL of a Vina/SMINA output file, in file order.
 
     Returns a list of dicts: ``model`` (1-based position in the file),
-    ``affinity`` (float or None), ``affinity_str`` (the token as printed),
+    ``affinity`` (float or None), ``affinity_str`` (the token as printed:
+    the model's first ``REMARK minimizedAffinity`` when present, which is the
+    score SMINA computed, else its first ``REMARK VINA RESULT``; None when
+    the model has neither),
     ``lines`` (the ligand lines of the model, without MODEL/ENDMDL and
     without flexible-residue blocks) and ``heavy_coords``. A file without
     MODEL records is treated as a single model.
@@ -182,7 +189,12 @@ def parse_vina_models(pdbqt_path):
 
     def new_model():
         return {"model": len(models) + 1, "affinity": None,
-                "affinity_str": None, "lines": [], "heavy_coords": []}
+                "affinity_str": None, "lines": [], "heavy_coords": [],
+                "_minimized": False}
+
+    def close(model):
+        model.pop("_minimized", None)
+        models.append(model)
 
     with open(pdbqt_path) as f:
         for raw in f:
@@ -193,7 +205,7 @@ def parse_vina_models(pdbqt_path):
                 continue
             if line.startswith("ENDMDL"):
                 if current is not None:
-                    models.append(current)
+                    close(current)
                 current, in_model = None, False
                 continue
             if current is None:
@@ -208,6 +220,11 @@ def parse_vina_models(pdbqt_path):
                 continue
             if in_flex:
                 continue
+            m = MINIMIZED_AFFINITY_RE.match(line)
+            if m and not current["_minimized"]:
+                current["_minimized"] = True
+                current["affinity_str"] = m.group(1)
+                current["affinity"] = _float_or_none(m.group(1))
             m = VINA_RESULT_RE.match(line)
             if m and current["affinity_str"] is None:
                 current["affinity_str"] = m.group(1)
@@ -223,18 +240,17 @@ def parse_vina_models(pdbqt_path):
                     except ValueError:
                         pass
     if current is not None and not seen_model:
-        models.append(current)
+        close(current)
     return models
 
 
 def first_vina_result(pdbqt_path):
-    """``(token, value)`` of the first ``REMARK VINA RESULT`` line, or
-    ``(None, None)``. This is the mode-1 score exactly as Vina printed it."""
-    with open(pdbqt_path) as f:
-        for line in f:
-            m = VINA_RESULT_RE.match(line)
-            if m:
-                return m.group(1), _float_or_none(m.group(1))
+    """``(token, value)`` of the first scored model (see parse_vina_models),
+    or ``(None, None)``. For Vina output this is the mode-1 score exactly as
+    Vina printed it, the value the pipeline writes to ranking.csv."""
+    for model in parse_vina_models(pdbqt_path):
+        if model["affinity_str"] is not None:
+            return model["affinity_str"], model["affinity"]
     return None, None
 
 

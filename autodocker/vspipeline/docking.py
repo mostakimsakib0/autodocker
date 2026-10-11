@@ -85,9 +85,6 @@ MAX_GRID_EDGE = 80.0
 SIMSCORE_RMSD_LB_CUTOFF = 1.6
 SIMSCORE_RMSD_UB_CUTOFF = 3.2
 
-# Returned by _calculate_rmsd for coordinate sets of different size.
-RMSD_SIZE_MISMATCH = 999.0
-
 # Timeout (s) for the short --help/--version probes of engine binaries.
 _PROBE_TIMEOUT = 10
 
@@ -386,45 +383,6 @@ def _calculate_protocol_simscore(
     ub_fraction = sum(
         1 for mode in comparisons if mode["rmsd_ub"] < SIMSCORE_RMSD_UB_CUTOFF) / len(comparisons)
     return (lb_fraction + ub_fraction) / 2, lb_fraction, ub_fraction
-
-
-def _calculate_coordinate_simscore(output_pdbqt: str, threshold: float = 2.0) -> Optional[float]:
-    """Deprecated: coordinate-based pose consistency. Not used by the
-    pipeline (SimScore always comes from Vina's RMSD columns); kept only
-    because runner.py re-exports the name. Returns None when undefined."""
-    models: List[List[Tuple[float, float, float]]] = []
-    current: List[Tuple[float, float, float]] = []
-    try:
-        with open(output_pdbqt) as f:
-            for line in f:
-                if line.startswith("MODEL"):
-                    current = []
-                elif line.startswith("ENDMDL"):
-                    if current:
-                        models.append(current)
-                elif line.startswith(("ATOM", "HETATM")):
-                    try:
-                        current.append((float(line[30:38]), float(line[38:46]),
-                                        float(line[46:54])))
-                    except ValueError:
-                        pass
-    except OSError:
-        return None
-    if len(models) <= 1:
-        return None
-    consistent = sum(1 for m in models[1:] if _calculate_rmsd(models[0], m) < threshold)
-    return consistent / (len(models) - 1)
-
-
-def _calculate_rmsd(coords1: List[Tuple[float, float, float]],
-                    coords2: List[Tuple[float, float, float]]) -> float:
-    """Plain coordinate RMSD (same atom order); RMSD_SIZE_MISMATCH when the
-    sets differ in size."""
-    if len(coords1) != len(coords2) or not coords1:
-        return RMSD_SIZE_MISMATCH
-    sum_sq = sum((c1[0]-c2[0])**2 + (c1[1]-c2[1])**2 + (c1[2]-c2[2])**2
-                 for c1, c2 in zip(coords1, coords2))
-    return (sum_sq / len(coords1)) ** 0.5
 
 
 def _calculate_metrics(output_pdbqt: str, expected_modes: Optional[int] = None,

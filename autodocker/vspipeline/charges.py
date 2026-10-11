@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PDBQT charge inspection and Gasteiger charge assignment.
 
-Split out of runner.py. Cross-module references (OBABEL, run) go through the
+Split out of runner.py. Cross-module references (run_obabel) go through the
 ``runner`` namespace at call time so the monkeypatch surface stays unchanged.
 
 Note: the Vina, Vinardo and default SMINA scoring functions do not use
@@ -195,11 +195,11 @@ def _fix_pdbqt_charges(pdbqt_file: str, source_file: str,
     target = pdbqt_file + ".charges.tmp.pdbqt" if rebuild_in_place else pdbqt_file
     # -h: hydrogens are added again (the PDBQT keeps polar H only, and a
     # source rebuild would otherwise lose the H added by the first conversion).
-    cmd = [runner.OBABEL, f"-i{in_fmt}", input_file, "-opdbqt", "-O", target,
-           "--partialcharge", "gasteiger", "-h"]
+    args = [f"-i{in_fmt}", input_file, "-opdbqt", "-O", target,
+            "--partialcharge", "gasteiger", "-h"]
     if gen3d:
         logger.warning(f"[!] {input_file} has no 3D coordinates; generating them (--gen3d)")
-        cmd.append("--gen3d")
+        args.append("--gen3d")
 
     if not os.path.exists(input_file):
         raise RuntimeError(
@@ -207,7 +207,8 @@ def _fix_pdbqt_charges(pdbqt_file: str, source_file: str,
     if not rebuild_in_place and os.path.exists(pdbqt_file):
         os.remove(pdbqt_file)  # rebuilt from the source; never keep the old file
     try:
-        runner.run(cmd, capture=False)
+        # Single-threaded; a partial output is deleted when Open Babel fails.
+        runner.run_obabel(args, outputs=[target])
         if rebuild_in_place:
             os.replace(target, pdbqt_file)
     except Exception as e:
@@ -225,70 +226,3 @@ def _fix_pdbqt_charges(pdbqt_file: str, source_file: str,
         logger.warning(
             f"[!] All Gasteiger charges are zero in {pdbqt_file} (e.g. a pure "
             "hydrocarbon); accepted, since Vina-family scoring ignores charges")
-
-
-def _assign_simple_charges(pdbqt_file: str) -> None:
-    """Deprecated, unused by the pipeline: heuristic per-atom-type charges.
-
-    Kept only because runner.py still re-exports the name (and one unit test
-    covers it); remove together with that re-export.
-    """
-    # Simple charge assignment based on common atom types
-    charge_map = {
-        'C': 0.0,    # Carbon
-        'N': -0.3,   # Nitrogen
-        'O': -0.5,   # Oxygen
-        'S': -0.3,   # Sulfur
-        'P': 1.1,    # Phosphorus
-        'H': 0.0,    # Hydrogen (connected to C)
-        'HD': 0.12,  # Polar H
-        'OA': -0.7,  # Acceptor O
-        'NA': -0.7,  # Acceptor N
-        'SA': -0.7,  # Acceptor S
-    }
-
-    lines = []
-    modified = False
-
-    try:
-        with open(pdbqt_file, 'r') as f:
-            for line in f:
-                if line.startswith('ATOM') or line.startswith('HETATM'):
-                    # Check if charge is zero (needs assignment)
-                    if len(line) > 76:
-                        try:
-                            charge_str = line[70:76].strip()
-                            charge = float(charge_str) if charge_str else 0.0
-
-                            if charge == 0.0:
-                                # Get atom type from columns 77-78
-                                atom_type = line[77:79].strip() if len(
-                                    line) > 78 else ''
-
-                                # Look up charge
-                                new_charge = charge_map.get(atom_type, 0.0)
-
-                                if new_charge != 0.0:
-                                    # Replace charge in the line
-                                    charge_field = f"{new_charge:+7.3f}"
-                                    line_list = list(line)
-                                    for i, c in enumerate(charge_field):
-                                        if 70 + i <= 76 and i < len(charge_field):
-                                            if 70 + i < len(line_list):
-                                                line_list[70 + i] = c
-                                    line = ''.join(
-                                        line_list[:81]) + (line[81:] if len(line) > 81 else '')
-                                    modified = True
-                        except (ValueError, IndexError):
-                            pass
-
-                lines.append(line)
-
-        # Write back if modified
-        if modified:
-            with open(pdbqt_file, 'w') as f:
-                f.writelines(lines)
-            logger.debug(
-                f"Heuristic charges assigned to {os.path.basename(pdbqt_file)}")
-    except Exception as e:
-        logger.debug(f"Could not assign charges heuristically: {e}")

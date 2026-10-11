@@ -684,6 +684,16 @@ def _run_tool(cmd: List[str], tool: str, log_stderr: bool = True) -> str:
     return stdout or ""
 
 
+def _run_obabel(args: List[str], outputs: Sequence[str] = (), log_stderr: bool = True) -> str:
+    """Open Babel through ``runner.run_obabel`` (single-threaded, partial
+    outputs removed on failure); its stderr goes to the log unless
+    ``log_stderr`` is False. Returns stdout."""
+    stdout, stderr = runner.run_obabel(list(args), outputs=outputs, return_stderr=True)
+    if log_stderr:
+        _log_tool_stderr("obabel", stderr)
+    return stdout
+
+
 def _fpocket_version(fpocket: str) -> Optional[str]:
     """fpocket's version from its usage text (it has no --version flag)."""
     try:
@@ -850,13 +860,14 @@ class ProteinPreparation:
         # without polar hydrogens every N is typed as an acceptor and the
         # receptor has no hydrogen-bond donors. The PDBQT writer (-xr) keeps
         # the polar hydrogens and merges the non-polar ones.
-        base = [runner.OBABEL, "-ipdb", self.pdb_clean, "-opdbqt", "-O"]
+        base = ["-ipdb", self.pdb_clean, "-opdbqt", "-O"]
         options = ["-xr", "-p", f"{ph:g}", "--partialcharge", "gasteiger"]
         try:
-            _run_tool(base + [self.receptor_pdbqt] + options, "obabel")
+            _run_obabel(base + [self.receptor_pdbqt] + options,
+                        outputs=[self.receptor_pdbqt])
             # A second conversion exposes every hydrogen Open Babel placed at
             # random (see stabilize_hydrogens).
-            _run_tool(base + [probe] + options, "obabel", log_stderr=False)
+            _run_obabel(base + [probe] + options, outputs=[probe], log_stderr=False)
             moved = stabilize_hydrogens(self.receptor_pdbqt, probe)
         finally:
             if os.path.exists(probe):

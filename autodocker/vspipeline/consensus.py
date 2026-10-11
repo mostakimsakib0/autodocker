@@ -33,11 +33,15 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from vspipeline.docking import (
     runner,  # lazily imported runner module (see docking._LazyRunner)
     DEFAULT_MIN_VALID_AFFINITY,
+    Status,
+    _calculate_metrics,
     _mode_table_lines,
     _scores_agree,
     _stdout_best_affinity_token,
     _parse_pdbqt_result_tokens,
     affinity_in_window,
+    parse_pdbqt_results,
+    status_for_score,
     window_text,
 )
 
@@ -48,25 +52,6 @@ SMINA_RESCORING_FUNCTIONS = ("vinardo", "dkoes_scoring")
 
 _SMINA_SCORING_CACHE: Dict[str, Tuple[str, ...]] = {}
 _SCORE_ONLY_RE = re.compile(r"^Affinity:\s+(\S+)", re.MULTILINE)
-
-
-def consensus_rank(vina_affinity: float, smina_affinity: Optional[float]) -> Dict:
-    """Per-ligand consensus row: the mean of the Vina and SMINA scores.
-
-    The ``agreement`` field is deprecated (kept only because the current
-    runner.py still writes it); it is an arbitrary rule of thumb,
-    ``max(0, 100 - 10 * |vina - smina|)``, and must not be reported. Use
-    :func:`scorer_agreement_spearman` for scorer concordance.
-    """
-    if smina_affinity is None:
-        return {'vina': vina_affinity, 'smina': None, 'consensus': vina_affinity, 'agreement': 0}
-    diff = abs(vina_affinity - smina_affinity)
-    return {
-        'vina': vina_affinity,
-        'smina': smina_affinity,
-        'consensus': (vina_affinity + smina_affinity) / 2,
-        'agreement': max(0, 100 - (diff * 10)),
-    }
 
 
 def _rankdata(values: List[float]) -> List[float]:
@@ -290,7 +275,10 @@ class SminaDockJob:
 
 
 def _smina_score_one(job: SminaDockJob):
-    """Worker: dock a single ligand with SMINA. Picklable for Pool."""
+    """Worker: dock a single ligand with SMINA. Picklable for Pool.
+
+    Returns ``(name, raw score or None, error or None)``; the affinity
+    window is applied by the caller (smina_dock_all)."""
     cx, cy, cz, sx, sy, sz = job.grid
     try:
         score = run_smina_docking(
@@ -304,25 +292,29 @@ def _smina_score_one(job: SminaDockJob):
         except OSError:
             pass
         return job.name, None, str(e)
-    # Same validity window as Vina docking scores.
-    if score is not None and not affinity_in_window(score, job.min_valid):
-        return job.name, None, (f"score {score:.3f} kcal/mol outside the accepted "
-                                f"window ({window_text(job.min_valid)})")
+    if score is None:
+        return job.name, None, "SMINA not available"
     return job.name, score, None
 
 
-def _run_smina_scoring(receptor: str, ligands: List[str], outdir: str,
-                       grid: Tuple[float, float, float, float, float, float],
-                       vina_params: Dict,
-                       num_processes: int = 1,
-                       flex_file: Optional[str] = None) -> Dict[str, Optional[float]]:
+def smina_dock_all(receptor: str, ligands: List[str], outdir: str,
+                   grid: Tuple[float, float, float, float, float, float],
+                   vina_params: Dict,
+                   num_processes: int = 1,
+                   flex_file: Optional[str] = None
+                   ) -> Tuple[List[Tuple[str, Optional[float]]], Dict[str, Dict]]:
     """Dock every ligand with SMINA (``--smina-only`` mode).
 
-    Returns {name: smina_affinity} with None for ligands SMINA could not
-    score or that scored outside the accepted window. Per-ligand failures are
-    logged, never fatal. Uses a process pool when ``num_processes > 1``, with
-    the cores split between workers. For consensus scoring use
-    :func:`rescore_with_smina` instead.
+    SMINA reports one mode per ligand (``--num_modes 1``); exhaustiveness,
+    seed, threads and ``--flex`` come from ``vina_params``/``flex_file``.
+    Returns ``(results, metrics)`` shaped like :func:`docking.dock_all`:
+    ``results`` holds ``(name, score)`` with score None for FAILED and
+    OUT_OF_WINDOW ligands; ``metrics[name]`` has ``status`` (a
+    :class:`docking.Status` value), ``engine`` "SMINA", ``raw_score`` (the
+    PDBQT score, also for OUT_OF_WINDOW), ``dock_file`` and ``log_file``.
+    Per-ligand failures are logged, never fatal. Uses a process pool when
+    ``num_processes > 1``, with the cores split between workers. For
+    consensus scoring use :func:`rescore_with_smina` instead.
     """
     vina_params = vina_params or {}
     exhaustiveness = int(vina_params.get('exhaustiveness', 8))
@@ -347,17 +339,50 @@ def _run_smina_scoring(receptor: str, ligands: List[str], outdir: str,
             flex_file=flex_file, min_valid=min_valid, smina=smina, timeout=timeout))
 
     collected = _collect_with_retry(_smina_score_one, jobs, num_processes, "SMINA docking")
-    smina_scores: Dict[str, Optional[float]] = {}
+    results: List[Tuple[str, Optional[float]]] = []
+    metrics_dict: Dict[str, Dict] = {}
     for job in jobs:
         score, err = collected.get(job.name, (None, "no result"))
-        if err:
+        metrics: Dict = {"dock_file": job.out, "log_file": job.log_file,
+                         "engine": "SMINA", "engine_path": job.smina,
+                         "vina_tool": "SMINA", "fallback_used": False}
+        if err or score is None:
             logger.warning(f"  [!] SMINA failed for {job.name}: {err}")
-        smina_scores[job.name] = None if err else score
+            metrics.update(status=Status.FAILED.value, error=err or "no score")
+            results.append((job.name, None))
+        else:
+            try:
+                metrics.update(_calculate_metrics(
+                    job.out, expected_modes=1, results=parse_pdbqt_results(job.out)))
+            except (OSError, ValueError) as e:
+                logger.debug(f"Could not read SMINA modes of {job.out}: {e}")
+            metrics["raw_score"] = score
+            if affinity_in_window(score, job.min_valid):
+                metrics["status"] = status_for_score(score).value
+                results.append((job.name, score))
+            else:
+                metrics["status"] = Status.OUT_OF_WINDOW.value
+                metrics["error"] = (f"score {score:.3f} kcal/mol outside the accepted "
+                                    f"window ({window_text(job.min_valid)})")
+                logger.warning(f"  [!] {job.name}: {metrics['error']}")
+                results.append((job.name, None))
+        metrics_dict[job.name] = metrics
 
     logger.info(
-        f"[*] SMINA scored {sum(v is not None for v in smina_scores.values())}"
-        f"/{len(ligands)} ligands")
-    return smina_scores
+        f"[*] SMINA scored {sum(v is not None for _, v in results)}"
+        f"/{len(ligands)} ligands in the accepted window")
+    return results, metrics_dict
+
+
+def _run_smina_scoring(receptor: str, ligands: List[str], outdir: str,
+                       grid: Tuple[float, float, float, float, float, float],
+                       vina_params: Dict,
+                       num_processes: int = 1,
+                       flex_file: Optional[str] = None) -> Dict[str, Optional[float]]:
+    """{name: in-window SMINA score or None}; see :func:`smina_dock_all`."""
+    results, _ = smina_dock_all(receptor, ligands, outdir, grid, vina_params,
+                                num_processes=num_processes, flex_file=flex_file)
+    return dict(results)
 
 
 # ---------------------------------------------------------------------------

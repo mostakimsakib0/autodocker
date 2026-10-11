@@ -29,6 +29,7 @@ import filecmp
 import glob
 import json
 import os
+import shlex
 import subprocess
 import sys
 
@@ -49,7 +50,9 @@ def extract_command(log_path):
     with open(log_path) as f:
         for line in f:
             if line.startswith("# Command:"):
-                cmd = line.split(":", 1)[1].strip().split()
+                # The pipeline logs shlex.join(cmd); shlex.split inverts it
+                # (paths with spaces or quotes survive).
+                cmd = shlex.split(line.split(":", 1)[1].strip())
     return cmd
 
 

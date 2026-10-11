@@ -47,6 +47,15 @@ def _blank_if_none(value):
     return "" if value is None else value
 
 
+def _minimized_text(meta: Dict) -> str:
+    """ranking.csv Minimized column: yes/no from the ligand metadata, blank
+    when unknown (no metadata for the ligand)."""
+    value = meta.get("minimized")
+    if value is None:
+        return ""
+    return "yes" if value else "no"
+
+
 class ResultsAnalyzer:
     """Writes the ranking and the text reports of one screen."""
 
@@ -137,7 +146,8 @@ class ResultsAnalyzer:
                     writer.writerow([
                         "Ligand", "Binding_Affinity", "SimScore", "Binding_Modes",
                         "Mode_Coverage", "MW", "LogP", "HBA", "HBD", "TPSA",
-                        "Rotors", "ZINC_URL", "Docked_File", "Status", "Engine"
+                        "Rotors", "ZINC_URL", "Docked_File", "Status", "Engine",
+                        "Minimized"
                     ])
                     for lig, status, affinity in rows:
                         metrics = metrics_dict.get(lig, {})
@@ -154,6 +164,7 @@ class ResultsAnalyzer:
                             self._dock_file(lig, metrics),
                             status.value,
                             metrics.get("engine") or metrics.get("vina_tool", ""),
+                            _minimized_text(meta),
                         ])
                 else:
                     writer.writerow(["Ligand", "Binding_Affinity", "Status"])

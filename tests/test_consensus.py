@@ -50,20 +50,6 @@ def test_spearman_undefined_single():
     assert cons.scorer_agreement_spearman([1], [2]) == (None, 1)
 
 
-def test_consensus_rank_heuristic():
-    row = cons.consensus_rank(-7.0, -7.5)
-    assert row["consensus"] == -7.25
-    assert abs(row["agreement"] - 95.0) < 1e-9
-    assert row["smina"] == -7.5
-
-
-def test_consensus_rank_no_smina():
-    row = cons.consensus_rank(-7.0, None)
-    assert row["smina"] is None
-    assert row["agreement"] == 0
-    assert row["consensus"] == -7.0
-
-
 def test_parse_smina_affinity_table():
     stdout = (
         "Some header\n"

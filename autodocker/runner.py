@@ -8,11 +8,13 @@ The pipeline runs five stages:
      rule-of-five filter and MMFF94 minimization (SDF inputs), conversion to
      PDBQT with Gasteiger charges (Open Babel).
   2. Receptor preparation: chain selection, cleaning, hydrogens at a chosen
-     pH, PDBQT conversion, and a docking box from fpocket pockets, the
-     receptor centroid or explicit coordinates. Optionally keeps waters near
-     the site, metal ions and cofactors, and builds flexible side chains.
+     pH, PDBQT conversion, and a docking box from fpocket pockets, a box
+     around the whole receptor (--no-fpocket) or explicit coordinates.
+     Optionally keeps waters near the site, metal ions and cofactors, and
+     builds flexible side chains.
   3. Docking with Vina (or SMINA with --smina-only), seeded and resumable;
-     optional re-docking with SMINA for a consensus ranking.
+     optional SMINA (Vinardo) rescoring of Vina's top poses for a consensus
+     ranking.
   4. Analysis: pose-consistency metrics, optional RMSD clustering of poses.
   5. Outputs: ranking.csv, text reports, an HTML report and
      run_manifest.json (versions, settings and checksums of the tools used).
@@ -144,10 +146,10 @@ else:
     VINA_FALLBACK = VINA_PRIMARY
 # Optional engines and helpers.
 SMINA = find_tool("smina", "smina.exe")
-REDUCE = find_tool("reduce")
 FPOCKET = find_tool("fpocket")
-# AutoDock4/AutoGrid4 are not used by the pipeline; the paths are kept for
-# the real-tool tests that compare against them.
+# reduce and AutoDock4/AutoGrid4 are not used by the pipeline (receptor
+# hydrogens come from Open Babel); the paths are kept for the real-tool tests.
+REDUCE = find_tool("reduce")
 AUTODOCK = find_tool("autodock4", "autodock")
 AUTOGRID = find_tool("autogrid4", "autogrid")
 COMMAND_TIMEOUT = _env_command_timeout()
@@ -173,14 +175,16 @@ def _require_tools(smina_only: bool = False, consensus: bool = False) -> None:
 
 def _log_tool_availability() -> None:
     logger.debug(f"SMINA: {SMINA or 'not found (--consensus and --smina-only unavailable)'}")
-    logger.debug(f"reduce: {REDUCE or 'not found'}")
     logger.debug(f"fpocket: {FPOCKET or 'not found'}")
 
 # ---------------------------------------------------------------------------
-# Pipeline internals (split of the former monolith into vspipeline/*).
-# These imports re-export every name the CLI, tests, and scripts rely on;
-# the moved code itself resolves shared state through THIS module at call
-# time, so monkeypatching runner.<name> behaves exactly as before.
+# Pipeline internals (vspipeline/*).
+# These imports re-export the names the CLI, tests and scripts use through
+# ``runner.<name>`` (listed in __all__); the vspipeline modules resolve shared
+# state (tool paths, ``run``/``run_obabel``) through THIS module at call time,
+# so monkeypatching runner.<name> reaches them. Docking workers receive the
+# engine paths and timeout explicitly (docking.EngineConfig, built from these
+# globals when docking starts).
 # ---------------------------------------------------------------------------
 
 from vspipeline.net import _http_get_bytes  # noqa: E402
@@ -225,16 +229,18 @@ from vspipeline.flexible import (  # noqa: E402
 )
 from vspipeline.consensus import (  # noqa: E402
     _run_smina_scoring,
-    consensus_rank,
+    rescore_with_smina,
     run_smina_docking,
     scorer_agreement_spearman,
+    smina_dock_all,
+    write_consensus_outputs,
 )
 from vspipeline.charges import (  # noqa: E402
-    _assign_simple_charges,
     _ensure_pdbqt_has_charges,
     _extract_pdbqt_charge,
     _fix_pdbqt_charges,
     _pdbqt_has_atoms,
+    _pdbqt_has_nonzero_charges,
     _sanitize_receptor_pdbqt,
 )
 from vspipeline.admet import (  # noqa: E402
@@ -257,13 +263,16 @@ from vspipeline.utils import (  # noqa: E402
 )
 from vspipeline.protein import ProteinPreparation  # noqa: E402
 from vspipeline.docking import (  # noqa: E402
+    AFFINITY_FLOOR,
+    DockJob,
+    EngineConfig,
+    Status,
     _VINA_CPU_FLAG_CACHE,
     _build_vina_command,
-    _calculate_coordinate_simscore,
     _calculate_metrics,
     _calculate_protocol_simscore,
-    _calculate_rmsd,
     _detect_vina_type,
+    _engine_identity,
     _extract_score,
     _log_tool_version,
     _mode_table_lines,
@@ -272,8 +281,10 @@ from vspipeline.docking import (  # noqa: E402
     _parse_vina_modes,
     _tool_label,
     _vina_cpu_flag,
+    affinity_in_window,
     dock_all,
     dock_ligand,
+    parse_pdbqt_results,
 )
 from vspipeline.results import (  # noqa: E402
     ResultsAnalyzer,
@@ -281,6 +292,46 @@ from vspipeline.results import (  # noqa: E402
     _score_sort_key,
     _score_text,
 )
+
+# Re-exported names (see above); listed so linters treat them as used.
+__all__ = [
+    # net, report
+    "_http_get_bytes", "NGL_CDN_URL", "_PDBQT_KEEP_PREFIXES", "_PDBQT_STRIP_PREFIXES",
+    "_build_viewer_section", "_fetch_ngljs", "_pdbqt_to_pdb_string", "calculate_rmsd",
+    "cluster_poses", "extract_coordinates_from_pdbqt", "generate_html_report",
+    # pocket
+    "COFACTOR_RESNAMES", "METAL_ELEMENTS", "VINA_METAL_TYPE_MAP", "WATER_RESNAMES",
+    "_append_hetatm_to_receptor", "_hetatm_to_pdbqt_line", "_iter_hetatm_residues",
+    "_max_pdbqt_serial", "_parse_hetatm", "detect_cofactors", "detect_metal_ions",
+    "detect_water_molecules",
+    # flexible
+    "FLEX_BACKBONE_NAMES", "_ATOMIC_RADII", "_BOND_TOLERANCE", "_build_flex_residue_block",
+    "_parse_residue_key", "_pdbqt_atom_element", "_remove_residues_from_pdbqt",
+    "_residue_atoms_from_pdbqt", "_resnum_matches", "build_flexible_residue_pdbqt",
+    "detect_flexible_residues",
+    # consensus
+    "_run_smina_scoring", "rescore_with_smina", "run_smina_docking",
+    "scorer_agreement_spearman", "smina_dock_all", "write_consensus_outputs",
+    # charges
+    "_ensure_pdbqt_has_charges", "_extract_pdbqt_charge", "_fix_pdbqt_charges",
+    "_pdbqt_has_atoms", "_pdbqt_has_nonzero_charges", "_sanitize_receptor_pdbqt",
+    # admet (Lipinski filter; ADMETFilter is the deprecated alias)
+    "ADMETFilter", "LipinskiFilter", "_is_valid_sdf", "_obabel_descriptors",
+    # checkpoint, library, protein
+    "DockingCheckpoint", "LibraryManager", "ProteinPreparation",
+    # utils
+    "_parse_chain_selection", "available_cpus", "ligand_name", "_safe_ligand_id",
+    "get_chains", "parse_pdb_coords", "run", "run_obabel",
+    # docking
+    "AFFINITY_FLOOR", "DockJob", "EngineConfig", "Status", "_VINA_CPU_FLAG_CACHE",
+    "_build_vina_command", "_calculate_metrics", "_calculate_protocol_simscore",
+    "_detect_vina_type", "_engine_identity", "_extract_score", "_log_tool_version",
+    "_mode_table_lines", "_parse_grid_config", "_parse_grid_triplet", "_parse_vina_modes",
+    "_tool_label", "_vina_cpu_flag", "affinity_in_window", "dock_all", "dock_ligand",
+    "parse_pdbqt_results",
+    # results
+    "ResultsAnalyzer", "_score_csv", "_score_sort_key", "_score_text",
+]
 
 # =============================
 # COMMAND LINE
@@ -303,7 +354,7 @@ class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
 
     def _get_help_string(self, action):
         if (action.default is None or action.default is False or action.default == []
-                or isinstance(action, argparse._StoreFalseAction)):
+                or isinstance(action, (argparse._StoreFalseAction, argparse._StoreTrueAction))):
             return action.help
         return super()._get_help_string(action)
 
@@ -314,7 +365,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             f"AutoDocker {__version__}: structure-based virtual screening with AutoDock Vina.\n"
             "Stages: [1/5] ligand preparation, [2/5] receptor and box preparation,\n"
-            "[3/5] docking (Vina, or SMINA with --smina-only; optional SMINA consensus),\n"
+            "[3/5] docking (Vina, or SMINA with --smina-only; optional SMINA rescoring),\n"
             "[4/5] pose analysis, [5/5] reports and run_manifest.json.\n"
             "Exit codes: 0 success, 1 pipeline error, 2 invalid options/environment or\n"
             "missing tools, 3 more ligands failed to dock than --max-failure-fraction\n"
@@ -366,8 +417,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     rec = parser.add_argument_group("receptor and docking box")
     rec.add_argument("--chain", default=None,
-                     help="Receptor chain(s), e.g. A, A,B or all; IDs are case-sensitive. "
-                     "Default: the first chain (with a warning if there are several)")
+                     help="Protein chain(s), e.g. A, A,B, or all (IDs are case-sensitive). "
+                     "Default: the first chain in sorted order (a warning lists the others)")
     rec.add_argument("--ph", type=float, default=7.4,
                      help="pH at which receptor hydrogens are added (Open Babel -p)")
     rec.add_argument("--keep-hetero", action="store_true",
@@ -378,7 +429,8 @@ def build_parser() -> argparse.ArgumentParser:
     rec.add_argument("--padding", type=float, default=6.0,
                      help="Box padding around the selected pocket(s), Angstrom")
     rec.add_argument("--no-fpocket", action="store_true",
-                     help="Skip fpocket; box around the receptor centroid")
+                     help="Skip fpocket; dock in a box around the whole receptor (heavy-atom "
+                     "bounding box + padding, each edge at least 24 Angstrom)")
     rec.add_argument("--grid-center", default=None,
                      help="Explicit box center 'X,Y,Z' (Angstrom), e.g. 12.3,4.5,6.7; "
                      "overrides auto-detection (frame: see --grid-center-frame)")
@@ -426,7 +478,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="CPU threads per Vina process, passed as --cpu (default: all "
                       "cores, or cores divided by -p when -p > 1)")
     dock.add_argument("--min-valid-affinity", type=float, default=-1.0,
-                      help="Reject docking scores >= this threshold (kcal/mol)")
+                      help="Upper bound of the accepted affinity window (kcal/mol): scores "
+                      f">= this, or < {AFFINITY_FLOOR:g}, are reported as OUT_OF_WINDOW")
     dock.add_argument("--vina-bin",
                       help="Docking binary to use instead of the auto-detected Vina/QuickVina")
     dock.add_argument("--vina-extra", action="append", default=[],
@@ -442,11 +495,13 @@ def build_parser() -> argparse.ArgumentParser:
                       "fraction of the docked ligands failed (scores outside the "
                       "accepted window are not failures); 1.0 never fails")
     dock.add_argument("--consensus", action="store_true",
-                      help="Also dock with SMINA and write consensus_ranking.csv")
+                      help="Rescore Vina's top pose of each ligand with SMINA (Vinardo "
+                      "scoring) and write consensus_ranking.csv and consensus_summary.json "
+                      "(Spearman rho between the two scores)")
     dock.add_argument("--smina-only", action="store_true",
-                      help="Dock with SMINA instead of Vina (1 mode per ligand; not "
-                      "combinable with --consensus, --vina-bin, --vina-extra or "
-                      "non-default --binding-modes/--energy-range)")
+                      help="Dock with SMINA (default scoring) instead of Vina (1 mode per "
+                      "ligand, no checkpoint/resume; not combinable with --consensus, "
+                      "--vina-bin, --vina-extra or non-default --binding-modes/--energy-range)")
 
     out = parser.add_argument_group("analysis and reports")
     out.add_argument("--top-n", type=int, default=20,
@@ -592,7 +647,6 @@ _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 _VERSION_PROBES = {
     "obabel": ("-V", None),
     "fpocket": ("-h", re.compile(r"fpocket\s+\d[\w.]*")),
-    "reduce": ("-version", None),
 }
 
 
@@ -648,10 +702,6 @@ def _tools_for_run(args) -> Dict[str, Optional[str]]:
         tools["smina"] = SMINA
     if not args.no_fpocket:
         tools["fpocket"] = FPOCKET
-    if REDUCE:
-        # Found on PATH; whether receptor preparation used it is recorded by
-        # ProteinPreparation (attribute ``reduce_used``) when available.
-        tools["reduce"] = REDUCE
     return tools
 
 
@@ -716,14 +766,14 @@ def _keep_residue_key(residue: Dict):
 
 
 def _failed_docking(results, metrics_dict) -> List[str]:
-    """Ligands whose docking failed (no score and not a score rejected for
-    being outside the accepted window)."""
+    """Ligands whose docking failed: Status FAILED (an OUT_OF_WINDOW result
+    is a valid engine score, not a failure)."""
     failed = []
     for name, score in results:
         if score is not None:
             continue
-        status = str((metrics_dict or {}).get(name, {}).get("status", "FAILED"))
-        if not status.startswith(("REJECTED", "OUT_OF_WINDOW")):
+        status = Status.of((metrics_dict or {}).get(name, {}).get("status"), score)
+        if status is not Status.OUT_OF_WINDOW:
             failed.append(name)
     return failed
 
@@ -734,40 +784,6 @@ def _failure_exit_code(n_failed: int, n_docked: int, max_fraction: float) -> int
     if n_docked and n_failed / n_docked > max_fraction:
         return EXIT_TOO_MANY_FAILURES
     return EXIT_OK
-
-
-def write_consensus_ranking(path: str, results, smina_scores: Dict) -> Dict:
-    """Write consensus_ranking.csv (Vina, SMINA and mean score per ligand;
-    sorted by the mean; ligands only one engine scored listed with NA) and
-    return the global scorer agreement {"rho": Spearman rho, "n": pairs}.
-
-    The CSV holds data rows only; the agreement statistic is returned for
-    the reports instead of being appended as comment lines.
-    """
-    consensus_rows = []
-    unpaired = []
-    for name, vina_score in results:
-        smina_score = smina_scores.get(name)
-        if vina_score is None or smina_score is None:
-            unpaired.append((name, vina_score, smina_score))
-            continue
-        consensus_rows.append((name, consensus_rank(vina_score, smina_score)))
-    with open(path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Ligand", "Vina_Affinity", "SMINA_Affinity", "Consensus"])
-        for name, row in sorted(consensus_rows, key=lambda kv: (kv[1]["consensus"], kv[0])):
-            writer.writerow([name, _score_csv(row["vina"]), _score_csv(row["smina"]),
-                             _score_csv(row["consensus"])])
-        # Ligands one engine could not score are listed, not dropped.
-        for name, vina_score, smina_score in sorted(unpaired, key=lambda r: r[0]):
-            writer.writerow([name, _score_csv(vina_score), _score_csv(smina_score), "NA"])
-    rho, n_pairs = scorer_agreement_spearman(
-        [row["vina"] for _, row in consensus_rows],
-        [row["smina"] for _, row in consensus_rows])
-    if rho is not None:
-        logger.info(f"[*] Vina vs SMINA Spearman rho = {rho:.3f} (n={n_pairs})")
-    logger.info(f"[*] Consensus ranking saved: {path} ({len(consensus_rows)} ligands)")
-    return {"rho": rho, "n": n_pairs}
 
 
 def _run_pipeline(args, state: Dict) -> int:
@@ -811,7 +827,7 @@ def _run_pipeline(args, state: Dict) -> int:
 
     if args.no_fpocket:
         cx, cy, cz, sx, sy, sz = protein_prep.centroid_grid(padding=args.padding)
-        logger.warning("[!] Using centroid fallback grid (fpocket skipped)")
+        logger.info("[*] Docking box: whole-receptor box (--no-fpocket)")
     else:
         cx, cy, cz, sx, sy, sz = protein_prep.detect_pocket(
             pocket_spec=args.pockets, padding=args.padding)
@@ -869,8 +885,9 @@ def _run_pipeline(args, state: Dict) -> int:
             if metals:
                 logger.info(f"[*] Found {len(metals)} metal ion(s); keeping them in receptor:")
                 for metal in metals:
-                    logger.info(f"   - {metal['name']} ({metal['element']}) chain "
-                                f"{metal['chain']} residue {metal['resnum']}")
+                    logger.info(f"   - {metal['name']} ({metal['element']}, atom "
+                                f"{metal['atom']}) chain {metal['chain']} "
+                                f"residue {metal['resnum']}")
                 keep_residues += [_keep_residue_key(m) for m in metals]
             else:
                 logger.info("[*] No metal ions detected")
@@ -959,35 +976,34 @@ def _run_pipeline(args, state: Dict) -> int:
         # own poses and failures (not Vina metadata next to SMINA scores).
         # Ligand names are unique: LibraryManager resolves same-name files.
         logger.info("[*] SMINA-only mode: docking with SMINA instead of Vina")
-        smina_scores = _run_smina_scoring(
+        results, metrics_dict = smina_dock_all(
             dock_receptor, ligands, args.output, grid_box, vina_params,
             num_processes=args.processes, flex_file=flex_file)
-        results = [(ligand_name(lig), smina_scores.get(ligand_name(lig)))
-                   for lig in ligands]
-        if not any(score is not None for _, score in results):
-            raise RuntimeError("SMINA produced no valid score for any ligand")
-        metrics_dict = {
-            name: {"status": "OK" if score is not None else "FAILED",
-                   "vina_tool": "SMINA",
-                   "dock_file": os.path.join(args.output, "docked", f"{name}_smina.pdbqt")}
-            for name, score in results}
+        if not any(score is not None or Status.of(metrics_dict[name].get("status"))
+                   is Status.OUT_OF_WINDOW for name, score in results):
+            raise RuntimeError("SMINA produced no score for any ligand")
         checkpoint = None
     else:
+        # The engine paths and timeout are passed to the workers explicitly
+        # (after --vina-bin/--timeout were applied in main()).
+        engine = EngineConfig.from_runner()
+        state["engine"] = engine
         results, checkpoint, metrics_dict = dock_all(
             dock_receptor, ligands, protein_prep.grid_conf,
             args.output, num_processes=args.processes, resume=resume,
-            vina_params=vina_params, flex_file=flex_file
-        )
+            vina_params=vina_params, flex_file=flex_file, engine=engine)
+        state["run_fingerprint"] = getattr(checkpoint, "fingerprint", None)
 
     scorer_agreement = None
     if args.consensus:
-        logger.info("[3/5] Consensus scoring (SMINA)")
-        smina_scores = _run_smina_scoring(
-            dock_receptor, ligands, args.output, grid_box, vina_params,
+        logger.info("[3/5] Consensus: SMINA rescoring of the Vina top poses")
+        smina_scores, scoring = rescore_with_smina(
+            dock_receptor, results, args.output, metrics_dict=metrics_dict,
             num_processes=args.processes, flex_file=flex_file)
-        consensus_file = os.path.join(args.output, "consensus_ranking.csv")
-        scorer_agreement = write_consensus_ranking(consensus_file, results, smina_scores)
-        state["scorer_agreement"] = scorer_agreement
+        scorer_agreement = {
+            **write_consensus_outputs(args.output, results, smina_scores, scoring),
+            "scoring": scoring}
+        state["consensus"] = scorer_agreement
 
     # ===== [4/5] Analysis =====
     logger.info("[4/5] Pose analysis")
@@ -1056,6 +1072,9 @@ def _run_pipeline(args, state: Dict) -> int:
                ("Ligand metadata", lib_manager.metadata_file),
                ("Grid visualization", protein_prep.grid_box_script),
                ("Docked structures", os.path.join(args.output, "docked"))]
+    if args.consensus:
+        outputs += [("Consensus ranking", os.path.join(args.output, "consensus_ranking.csv")),
+                    ("Consensus summary", os.path.join(args.output, "consensus_summary.json"))]
     if args.cluster_poses:
         outputs.append(("Pose clusters", clusters_file))
     if args.html_report:
@@ -1123,15 +1142,21 @@ def main(argv: Optional[List[str]] = None) -> None:
             logger.error(traceback.format_exc())
     finally:
         extra = {}
-        protein = state.get("protein")
-        if protein is not None and hasattr(protein, "reduce_used"):
-            extra["reduce_used"] = bool(protein.reduce_used)
         library = state.get("library")
         if library is not None:
             extra["ligand_preparation"] = {"failed": len(library.failed),
                                            "superseded": len(library.superseded)}
         if "docking_failures" in state:
             extra["docking_failures"] = state["docking_failures"]
+        if state.get("run_fingerprint"):
+            # The checkpoint fingerprint: receptor, grid, flex file, docking
+            # parameters and engine binaries (see docking._run_fingerprint).
+            extra["run_fingerprint"] = state["run_fingerprint"]
+        if state.get("engine") is not None:
+            extra["docking_engines"] = [
+                _engine_identity(path) for path, _ in state["engine"].docking_engines()]
+        if "consensus" in state:
+            extra["consensus"] = state["consensus"]
         manifest_file = os.path.join(args.output, "run_manifest.json")
         try:
             write_run_manifest(manifest_file, _build_manifest(
