@@ -65,6 +65,22 @@ screens that need comparable numbers.
 - The Vina submodule is pinned to the v1.2.7 release tag (same C++ source as
   before).
 
+- SDF files whose molblock contains text such as "404" or "Status:" are no
+  longer rejected as PubChem error pages; when Open Babel cannot compute
+  descriptors, ADMET properties are read from SDF data items (including
+  PubChem tags).
+- Checkpoints written by earlier versions (no run fingerprint) are discarded,
+  so the first 1.1.5 run on an old output directory docks every ligand again.
+- `scripts/patch.sh` stops the image build when a patch no longer applies.
+
+### Added
+
+- `--ph` (receptor protonation pH, default 7.4) and `--grid-center-frame`.
+- `scripts/fetch_casf_rcsb.py` rebuilds the CASF-2016 core-set complexes
+  from public RCSB files (no PDBbind registration needed; two-letter element
+  symbols such as CL/BR are normalised); `scripts/benchmark_redock.py` passes
+  the box center in input coordinates.
+
 ### Removed
 
 - `autodocker/uidmapper.sh` (unused).
