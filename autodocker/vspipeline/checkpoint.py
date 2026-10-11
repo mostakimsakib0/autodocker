@@ -5,7 +5,16 @@ Results are appended to a JSON-lines journal as they arrive and consolidated
 into ``.docking_checkpoint.json`` by :meth:`DockingCheckpoint.flush`, which
 writes atomically (temporary file + ``os.replace``) and then truncates the
 journal. An advisory lock (``fcntl``) on ``.docking.lock`` keeps two runs
-from sharing one output directory.
+from sharing one output directory. runner.main() takes it before writing
+anything into the output directory and holds it to the end of the run; a
+checkpoint opened while the lock is held re-uses it (one lock per directory
+and process) and leaves releasing it to whoever took it.
+
+The per-ligand file paths in the stored metrics (``dock_file``, ``log_file``)
+are kept relative to the output directory (``docked/<file>``) and resolved
+against the checkpoint's directory when read, so a run resumed from another
+working directory, or after the output directory was moved, still finds its
+poses.
 
 The stored timestamp is bookkeeping only: it never reaches ranking.csv or any
 other result file.
@@ -16,6 +25,8 @@ import logging
 import os
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+
+from vspipeline import outputs
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +43,21 @@ class OutputDirLockedError(RuntimeError):
     """Another process holds the output directory's docking lock."""
 
 
-def acquire_lock(outdir: str) -> None:
+# Metrics keys holding a per-ligand file in DOCKED_DIR.
+_PATH_KEYS = ("dock_file", "log_file")
+
+
+def acquire_lock(outdir: str) -> bool:
     """Take the advisory lock of ``outdir`` (re-entrant within a process).
 
-    Raises OutputDirLockedError when another process holds it.
+    Returns True when this call took the lock, False when this process
+    already held it. Raises OutputDirLockedError when another process holds
+    it; nothing in ``outdir`` is changed then (the lock file is opened, not
+    rewritten).
     """
     key = os.path.realpath(outdir)
     if key in _HELD_LOCKS:
-        return
+        return False
     os.makedirs(outdir, exist_ok=True)
     path = os.path.join(outdir, LOCK_FILENAME)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
@@ -54,6 +72,12 @@ def acquire_lock(outdir: str) -> None:
     os.ftruncate(fd, 0)
     os.write(fd, f"{os.getpid()}\n".encode())
     _HELD_LOCKS[key] = fd
+    return True
+
+
+def holds_lock(outdir: str) -> bool:
+    """True when this process holds the lock of ``outdir``."""
+    return os.path.realpath(outdir) in _HELD_LOCKS
 
 
 def release_lock(outdir: str) -> None:
@@ -91,7 +115,9 @@ class DockingCheckpoint:
         self.checkpoint_file = os.path.join(outdir, ".docking_checkpoint.json")
         self.journal_file = os.path.join(outdir, ".docking_checkpoint.jsonl")
         self.meta_file = os.path.join(outdir, ".docking_checkpoint.meta.json")
-        acquire_lock(outdir)
+        # Normally runner.main() already holds the lock; then close() must
+        # not release it.
+        self._owns_lock = acquire_lock(outdir)
         if not resume:
             self.completed = {}
             self.clear()
@@ -165,6 +191,9 @@ class DockingCheckpoint:
                             continue
             except Exception as e:
                 logger.warning(f"Could not replay checkpoint journal: {e}")
+        for entry in data.values():
+            if isinstance(entry, dict) and isinstance(entry.get("metrics"), dict):
+                entry["metrics"] = _portable_metrics(entry["metrics"])
         if data:
             logger.info(
                 f"[*] Loaded checkpoint: {len(data)} ligands already docked")
@@ -186,10 +215,11 @@ class DockingCheckpoint:
         Updates the in-memory record and appends one line to the journal;
         :meth:`flush` consolidates the journal into the JSON file at run end.
         """
+        metrics = _portable_metrics(metrics or {})
         self.completed[ligand_name] = {
             "score": score,
             "timestamp": datetime.now().isoformat(),
-            "metrics": metrics or {},
+            "metrics": metrics,
             "ligand_hash": ligand_hash,
         }
         try:
@@ -198,7 +228,7 @@ class DockingCheckpoint:
                     "name": ligand_name,
                     "score": score,
                     "timestamp": self.completed[ligand_name]["timestamp"],
-                    "metrics": metrics or {},
+                    "metrics": metrics,
                     "ligand_hash": ligand_hash,
                 }) + "\n")
                 f.flush()
@@ -232,9 +262,12 @@ class DockingCheckpoint:
                 logger.warning(f"Could not truncate checkpoint journal: {e}")
 
     def close(self):
-        """Flush and release the output-directory lock."""
+        """Flush, and release the output-directory lock if this checkpoint
+        took it (not when runner.main() holds it for the whole run)."""
         self.flush()
-        release_lock(self.outdir)
+        if self._owns_lock:
+            release_lock(self.outdir)
+            self._owns_lock = False
 
     def get_results(self, names: Optional[List[str]] = None) -> List[Tuple[str, float]]:
         """Return completed results as (ligand_name, score) tuples, limited to
@@ -246,5 +279,31 @@ class DockingCheckpoint:
     def get_metrics(self, names: Optional[List[str]] = None) -> Dict:
         """Return cached metrics keyed by ligand name (limited to ``names``)."""
         keep = None if names is None else set(names)
-        return {name: data.get("metrics", {}) for name, data in self.completed.items()
+        return {name: self._resolved_metrics(data.get("metrics", {}))
+                for name, data in self.completed.items()
                 if keep is None or name in keep}
+
+    def _resolved_metrics(self, metrics: Dict) -> Dict:
+        """``metrics`` with its per-ligand file paths under this checkpoint's
+        output directory (they are stored relative to it)."""
+        resolved = dict(metrics)
+        for key in _PATH_KEYS:
+            if resolved.get(key):
+                resolved[key] = os.path.join(self.outdir, resolved[key])
+        return resolved
+
+
+def _portable_metrics(metrics: Dict) -> Dict:
+    """``metrics`` with ``dock_file``/``log_file`` as ``docked/<file name>``,
+    relative to the output directory.
+
+    dock_all writes every per-ligand file to ``<outdir>/docked``, so the file
+    name is all that identifies it. Paths of older checkpoints (relative to
+    the working directory of the run that wrote them, or absolute) are
+    normalized the same way."""
+    portable = dict(metrics)
+    for key in _PATH_KEYS:
+        value = portable.get(key)
+        if isinstance(value, str) and value:
+            portable[key] = os.path.join(outputs.DOCKED_DIR, os.path.basename(value))
+    return portable

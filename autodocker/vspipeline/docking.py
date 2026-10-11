@@ -17,17 +17,22 @@ import hashlib
 import json
 import logging
 import math
+import multiprocessing
+import multiprocessing.connection
 import os
 import re
 import shlex
+import signal
 import subprocess
+import threading
 import time
 import traceback
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from enum import Enum
-from multiprocessing import Pool
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 from vspipeline import defaults  # noqa: E402
 from vspipeline import outputs  # noqa: E402
 
@@ -697,6 +702,13 @@ def _failed(name: str, out: str, log: str, error: str, **extra) -> Tuple[str, No
                         "log_file": log, "error": error, **extra}
 
 
+def _job_paths(job: DockJob) -> Tuple[str, str, str]:
+    """(ligand name, pose file, log file) of one job."""
+    name = runner.ligand_name(job.ligand)
+    return (name, os.path.join(job.dock_dir, name + outputs.POSE_SUFFIX),
+            os.path.join(job.dock_dir, name + outputs.VINA_LOG_SUFFIX))
+
+
 def _preflight(job: DockJob) -> Dict[str, float]:
     """Validate the inputs of one job; return the parsed grid config.
 
@@ -838,9 +850,7 @@ def dock_ligand(job: Union[DockJob, Sequence]) -> Tuple[str, Optional[float], Di
     Every attempt is recorded in ``docked/<name>_vina.log``.
     """
     job = _as_job(job)
-    name = runner.ligand_name(job.ligand)
-    out = os.path.join(job.dock_dir, name + outputs.POSE_SUFFIX)
-    log_path = os.path.join(job.dock_dir, name + outputs.VINA_LOG_SUFFIX)
+    name, out, log_path = _job_paths(job)
 
     try:
         grid_config = _preflight(job)
@@ -938,8 +948,15 @@ def _run_fingerprint(receptor: str, grid_file: str, flex_file: Optional[str],
                      vina_params: Dict, engine: Optional[EngineConfig] = None) -> str:
     """Hash of everything that determines a ligand's docking result apart from
     the ligand itself: receptor and flex files (byte-exact), grid file,
-    docking parameters and the engine binaries (path, SHA-256, version). The
-    thread count is left out: seeded Vina output does not depend on it."""
+    docking parameters and the primary engine binary (path, SHA-256,
+    version). The thread count is left out: seeded Vina output does not
+    depend on it.
+
+    The fallback engine (--qvina-fallback) is not part of it: a result the
+    primary engine produced stays valid whether or not a fallback is
+    configured. A result the fallback produced is tagged with the fallback's
+    SHA-256 (metrics ``fallback_sha256``) and re-docked on its own when the
+    fallback changes or is turned off (see dock_all)."""
     engine = engine or EngineConfig.from_runner()
     params = {k: v for k, v in vina_params.items() if k != "threads"}
     payload = json.dumps({
@@ -947,10 +964,214 @@ def _run_fingerprint(receptor: str, grid_file: str, flex_file: Optional[str],
         "grid": _file_sha256(grid_file),
         "flex": _file_sha256(flex_file),
         "params": params,
-        "engines": [_engine_identity(engine.vina_primary),
-                    _engine_identity(engine.vina_fallback)],
+        "engines": [_engine_identity(engine.vina_primary)],
     }, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _fallback_sha256(engine: EngineConfig) -> Optional[str]:
+    """SHA-256 of the fallback engine when one is in use (else None)."""
+    engines = engine.docking_engines()
+    if len(engines) < 2:
+        return None
+    return _engine_identity(engines[1][0])["sha256"] or None
+
+
+# ---------------------------------------------------------------------------
+# Worker processes
+# ---------------------------------------------------------------------------
+
+# Error of a ligand whose worker process died in both attempts.
+WORKER_DIED_ERROR = ("the worker process died while docking this ligand, twice (killed by "
+                     "a signal, e.g. by the out-of-memory killer); no result")
+
+
+def _worker_init() -> None:
+    """Initializer of every docking/scoring worker process.
+
+    The worker leads its own process group, so the engine processes it starts
+    belong to that group and _stop_workers can stop a worker together with
+    them. SIGTERM gets its default action back (a forked worker inherits
+    runner.main()'s handler)."""
+    try:
+        os.setpgrp()
+    except OSError:
+        pass
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+
+def _new_executor(workers: int) -> ProcessPoolExecutor:
+    return ProcessPoolExecutor(max_workers=workers, initializer=_worker_init)
+
+
+def _worker_pids(executor: ProcessPoolExecutor) -> List[int]:
+    """PIDs of the executor's worker processes (all of them are started by
+    the submit() calls)."""
+    return [pid for pid in (getattr(executor, "_processes", None) or {})]
+
+
+def _stop_workers(executor: ProcessPoolExecutor, pids: Sequence[int]) -> None:
+    """Kill the workers and every process in their process groups (the
+    engine subprocesses, also those orphaned by a worker that died), then
+    shut the executor down."""
+    for pid in pids:
+        for kill in (os.killpg, os.kill):
+            try:
+                kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    executor.shutdown(wait=True, cancel_futures=True)
+
+
+def _run_shared_pool(fn: Callable, jobs: Sequence, num_processes: int,
+                     on_result: Callable) -> List:
+    """Run ``fn(job)`` for every job in one pool of ``num_processes``
+    workers; ``on_result(job, result)`` is called as results arrive. Returns
+    the jobs left without a result because a worker process died (which
+    breaks the whole pool)."""
+    executor = _new_executor(max(1, min(num_processes, len(jobs))))
+    order = {id(job): i for i, job in enumerate(jobs)}
+    futures: Dict = {}
+    unfinished: List = []
+    pids: List[int] = []
+    try:
+        for job in jobs:
+            try:
+                futures[executor.submit(fn, job)] = job
+            except BrokenProcessPool:
+                unfinished.append(job)
+        pids = _worker_pids(executor)
+        pending = set(futures)
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in sorted(done, key=lambda f: order[id(futures[f])]):
+                try:
+                    result = future.result()
+                except BrokenProcessPool:
+                    unfinished.append(futures[future])
+                    continue
+                on_result(futures[future], result)
+    except BaseException:
+        _stop_workers(executor, pids or _worker_pids(executor))
+        raise
+    if unfinished:
+        # The pool is broken: its other workers were stopped mid-job and
+        # their engine processes may still run. Stop them before the
+        # unfinished jobs are run again (they write the same files).
+        _stop_workers(executor, pids)
+    else:
+        executor.shutdown(wait=True)
+    return sorted(unfinished, key=lambda job: order[id(job)])
+
+
+def _isolated_entry(fn: Callable, job, conn) -> None:
+    """Body of a single-job worker process (see _run_isolated)."""
+    _worker_init()
+    try:
+        message = ("ok", fn(job))
+    except BaseException as e:  # reported to the main process
+        message = ("error", f"{type(e).__name__}: {e}")
+    conn.send(message)
+    conn.close()
+
+
+def _run_isolated(fn: Callable, jobs: Sequence, num_processes: int,
+                  on_result: Callable) -> List:
+    """Run every job in a fresh worker process of its own (at most
+    ``num_processes`` at a time), so a job that kills its worker affects no
+    other job. Returns the jobs whose worker died.
+
+    Plain processes with a pipe each, not one executor per job: an executor
+    runs a thread in this process, and forking while other threads run can
+    deadlock the child."""
+    ctx = multiprocessing.get_context()
+    # The broken pool's helper threads may take a moment to finish.
+    deadline = time.monotonic() + 5
+    while threading.active_count() > 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    order = {id(job): i for i, job in enumerate(jobs)}
+    queue = list(jobs)
+    running: Dict = {}   # receiving connection -> (job, process)
+    died: List = []
+
+    def stop(process) -> None:
+        for kill in (os.killpg, os.kill):
+            try:
+                kill(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        process.join()
+
+    try:
+        while queue or running:
+            while queue and len(running) < num_processes:
+                job = queue.pop(0)
+                receiver, sender = ctx.Pipe(duplex=False)
+                process = ctx.Process(target=_isolated_entry, args=(fn, job, sender),
+                                      daemon=True)
+                process.start()
+                sender.close()
+                running[receiver] = (job, process)
+            ready = multiprocessing.connection.wait(list(running))
+            for receiver in sorted(ready, key=lambda r: order[id(running[r][0])]):
+                job, process = running.pop(receiver)
+                try:
+                    kind, payload = receiver.recv()
+                except (EOFError, OSError):
+                    kind, payload = "died", None
+                finally:
+                    receiver.close()
+                if kind == "died":
+                    stop(process)   # and engine processes left in its group
+                    died.append(job)
+                    continue
+                process.join()
+                if kind == "error":
+                    raise RuntimeError(f"worker failed on {_job_label(job)}: {payload}")
+                on_result(job, payload)
+    except BaseException:
+        for receiver, (_, process) in running.items():
+            stop(process)
+            receiver.close()
+        raise
+    return sorted(died, key=lambda job: order[id(job)])
+
+
+def run_in_workers(fn: Callable, jobs: Sequence, num_processes: int,
+                   on_result: Callable, label: str = "Docking") -> List:
+    """Run ``fn(job)`` for every job in worker processes.
+
+    ``fn`` and the jobs must be picklable (module-level function, frozen
+    dataclasses) so this works with the ``spawn`` start method too.
+    ``on_result(job, result)`` is called in the main process, in job order
+    among results that arrive together.
+
+    A worker process that dies (SIGKILL, out-of-memory killer) breaks the
+    pool instead of hanging it: the jobs left without a result are run once
+    more, each in a fresh worker process of its own. The jobs whose worker
+    died again are returned (the caller marks them FAILED). On any exception
+    in the main process (KeyboardInterrupt, SIGTERM via runner.main()) the
+    workers and their engine subprocesses are killed before it propagates.
+    """
+    jobs = list(jobs)
+    unfinished = _run_shared_pool(fn, jobs, num_processes, on_result)
+    if not unfinished:
+        return []
+    logger.warning(
+        f"[!] {label}: a worker process died; running the {len(unfinished)} ligand(s) "
+        "without a result again, each in a fresh worker process")
+    died = _run_isolated(fn, unfinished, num_processes, on_result)
+    for job in died:
+        logger.error(f"[x] {label}: the worker process died again on {_job_label(job)}")
+    return died
+
+
+def _job_label(job) -> str:
+    name = getattr(job, "name", None)
+    if name:
+        return name
+    ligand = getattr(job, "ligand", None)
+    return runner.ligand_name(ligand) if ligand else repr(job)
 
 
 # ---------------------------------------------------------------------------
@@ -1019,10 +1240,23 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
                                              vina_params, engine),
         resume=resume)
 
+    # A result of the fallback engine is only valid with the same fallback
+    # (the fingerprint covers the primary engine only).
+    fallback_sha = _fallback_sha256(engine)
+    stale_fallback = {
+        name for name, entry in checkpoint.completed.items()
+        if (entry.get("metrics") or {}).get("fallback_used")
+        and (entry.get("metrics") or {}).get("fallback_sha256") != fallback_sha}
+    if stale_fallback and resume:
+        logger.info(
+            f"[*] Docking {len(stale_fallback)} cached ligand(s) again: their result came "
+            "from a fallback engine that is no longer configured")
+
     if resume:
         ligands_todo = [
             lig for lig in ligands
-            if not checkpoint.is_completed(runner.ligand_name(lig),
+            if runner.ligand_name(lig) in stale_fallback
+            or not checkpoint.is_completed(runner.ligand_name(lig),
                                            ligand_hashes[runner.ligand_name(lig)])
         ]
     else:
@@ -1054,21 +1288,15 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
                 f"[!] All receptor partial charges are zero in {receptor} "
                 "(not used by the Vina scoring function; docking continues)")
 
-    if not ligands_todo:
-        logger.info("[*] All ligands already docked (checkpoint)")
-        results = checkpoint.get_results(ligand_names)
-        return results, checkpoint, checkpoint.get_metrics(ligand_names)
-
-    jobs = [DockJob(receptor, lig, grid_file, dock_dir, vina_params, flex_file, engine)
-            for lig in ligands_todo]
-
     metrics_dict = checkpoint.get_metrics(ligand_names) if resume else {}
-    failed_results = []
+    failed_results: Dict[str, None] = {}
 
     def record(result):
         """Store one ligand's result as soon as it arrives, so an interrupted
         screen keeps everything docked so far."""
         name, score, metrics = result
+        if metrics.get("fallback_used"):
+            metrics["fallback_sha256"] = fallback_sha
         metrics_dict[name] = metrics
         status = Status.of(metrics.get("status"), score)
         if status is Status.OUT_OF_WINDOW:
@@ -1081,39 +1309,57 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
             logger.warning(
                 f"  [!] {name}: FAILED (see {metrics.get('log_file', 'log')})")
             # Failures are not checkpointed; they are retried on resume.
-            failed_results.append((name, None))
+            failed_results[name] = None
             return
         logger.info(f"  [+] {name}: {score:.3f} kcal/mol")
         checkpoint.save_result(name, score, metrics, ligand_hash=ligand_hashes.get(name))
 
-    start_time = time.time()
-    total = len(jobs)
+    if not ligands_todo:
+        logger.info("[*] All ligands already docked (checkpoint)")
+    else:
+        jobs = [DockJob(receptor, lig, grid_file, dock_dir, vina_params, flex_file, engine)
+                for lig in ligands_todo]
+        start_time = time.time()
+        total = len(jobs)
+        done = 0
 
-    def log_progress(done: int):
-        elapsed = max(time.time() - start_time, 1e-6)
-        rate_per_min = done / elapsed * 60
-        remaining = total - done
-        eta_minutes = remaining / rate_per_min if rate_per_min else 0
-        logger.info(
-            f"[*] Progress: {done}/{total} docked "
-            f"({rate_per_min:.2f} ligands/min, ETA {eta_minutes:.1f} min)"
-        )
+        def log_progress():
+            elapsed = max(time.time() - start_time, 1e-6)
+            rate_per_min = done / elapsed * 60
+            remaining = total - done
+            eta_minutes = remaining / rate_per_min if rate_per_min else 0
+            logger.info(
+                f"[*] Progress: {done}/{total} docked "
+                f"({rate_per_min:.2f} ligands/min, ETA {eta_minutes:.1f} min)"
+            )
 
-    try:
-        if num_processes > 1:
-            with Pool(num_processes) as pool:
-                for idx, result in enumerate(pool.imap_unordered(dock_ligand, jobs), 1):
-                    record(result)
-                    log_progress(idx)
-        else:
-            for idx, job in enumerate(jobs, 1):
-                record(dock_ligand(job))
-                log_progress(idx)
-    finally:
-        checkpoint.flush()  # consolidate O(1) journal writes into the JSON file
+        def on_result(job, result):
+            nonlocal done
+            record(result)
+            done += 1
+            log_progress()
 
-    all_results = checkpoint.get_results(ligand_names)
-    all_results.extend(failed_results)
+        try:
+            if num_processes > 1:
+                died = run_in_workers(dock_ligand, jobs, num_processes, on_result)
+                for job in died:
+                    name, out, log_path = _job_paths(job)
+                    try:
+                        with open(log_path, "a", encoding="utf-8") as log:
+                            log.write(f"\n# FINAL ERROR: {WORKER_DIED_ERROR}\n")
+                    except OSError:
+                        pass
+                    on_result(job, _failed(name, out, log_path, WORKER_DIED_ERROR))
+            else:
+                for job in jobs:
+                    on_result(job, dock_ligand(job))
+        finally:
+            checkpoint.flush()  # consolidate O(1) journal writes into the JSON file
+
+    # In library order, whatever order the workers finished in.
+    by_name = dict(checkpoint.get_results(ligand_names))
+    by_name.update(failed_results)
+    all_results = [(name, by_name[name]) for name in ligand_names if name in by_name]
 
     # No ligand produced any score (in or out of the window): say so loudly.
     # The caller still writes every output (FAILED rows included) and turns

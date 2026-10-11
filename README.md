@@ -76,7 +76,10 @@ Results are written under `/workspace/output/`:
   so repeated runs give identical files)
 - `run_manifest.json` — everything needed to audit or repeat the run: version,
   command line and resolved options, seed, tool paths, versions and SHA-256,
-  the docking fingerprint, platform, timestamps and failure counts
+  the docking fingerprint, the threads given to each engine process
+  (`threads_per_process`), platform, timestamps and failure counts
+  (`failures`: ligands that could not be prepared and ligands whose docking
+  failed). It is replaced atomically, so it is never seen half-written
 - `ligand_metadata.json` — per-ligand source, descriptors, preparation details
 - `pocket_summary.csv` — fpocket pocket scores (the `Volume` column is
   fpocket's clock-seeded Monte Carlo estimate and varies between runs; it is
@@ -84,7 +87,11 @@ Results are written under `/workspace/output/`:
 - `grid.conf`, `grid_box.pml` — the docking box and a PyMOL script that draws it
 - `docked/*_out.pdbqt` — docked poses; `*_vina.log` — per-ligand logs whose
   first line is the exact command
-- `consensus_ranking.csv`, `consensus_summary.json` — with `--consensus`
+- `consensus_ranking.csv`, `consensus_summary.json` — with `--consensus`.
+  Ligands without both scores follow the ranked ones with `Consensus` `NA`
+  (a missing score is `FAILED`); a ligand whose Vina score is
+  `OUT_OF_WINDOW` is not rescored and keeps its Vina score, with
+  `SMINA_Affinity` `NA` and `Consensus` `OUT_OF_WINDOW`
 - `pose_clusters.json` — with `--cluster-poses`
 - `frame_offset.txt` — translation back to the input PDB's coordinates (see below)
 
@@ -94,7 +101,15 @@ and fpocket's output; listed in `autodocker/vspipeline/outputs.py`), so
 every file present belongs to the latest run; for example
 `results_report.html` is gone after a `--no-html-report` rerun, and
 `pocket_summary.csv` after a run with an explicit box. Docked poses and the
-checkpoint (`docked/`, `.docking_checkpoint*.json`) are kept for resuming.
+checkpoint (`docked/`, `.docking_checkpoint*.json`) are kept for resuming;
+the checkpoint stores file paths relative to the output directory, so a run
+can be resumed from any working directory and after the output directory
+was moved.
+
+Only one run at a time can use an output directory: a run takes the lock
+`.docking.lock` before it writes anything there (in every mode, including
+`--smina-only`) and holds it to the end. A second run into the same
+directory stops at once with exit code 2 and changes nothing in it.
 
 Hydrogens present in the input receptor are removed and the receptor is
 protonated at pH 7.4 (`--ph`); it is centered at the origin
@@ -141,9 +156,9 @@ Direct use (inside the image or with tools on `PATH`):
 | `--seed` | Random seed, 1 to 2147483647 | `$VS_SEED` or `42` |
 | `--min-valid-affinity` | Scores ≥ this (or < −20) are reported as `OUT_OF_WINDOW`; must be > −20 | `-1.0` |
 | `--vina-bin`, `--vina-extra` | Custom docking binary; extra engine arguments | auto, none |
-| `--qvina-fallback` | Re-dock a ligand with QuickVina 2 when Vina fails on it (the `Engine` column shows which engine scored each ligand) | off |
+| `--qvina-fallback` | Re-dock a ligand with QuickVina 2 when Vina fails on it (the `Engine` column shows which engine scored each ligand). Turning it on or off keeps the checkpointed Vina results; only results of the fallback are docked again | off |
 | `--timeout` | Per-command timeout (s) | `$VS_COMMAND_TIMEOUT` or `900` |
-| `--max-failure-fraction` | Exit 3 if more than this fraction of ligands fail (also when all fail; `1.0` never fails) | `0.5` |
+| `--max-failure-fraction` | Exit 3 if more than this fraction of ligands fail: (ligands that could not be prepared + ligands whose docking failed) / all ligands (superseded files are not counted; `OUT_OF_WINDOW` is not a failure). Also when all fail; `1.0` never fails | `0.5` |
 | `--no-resume` | Ignore the checkpoint (it is also discarded when receptor, box, parameters or engine binaries change) | off |
 | `--consensus` | Rescore Vina's top pose with SMINA's Vinardo function; writes `consensus_ranking.csv` and `consensus_summary.json` (needs SMINA) | off |
 | `--smina-only` | Dock with SMINA instead of Vina (1 mode, no resume) | off |
@@ -186,9 +201,18 @@ options must be finite numbers. Settings are logged in `run_manifest.json`
 |---|---|
 | 0 | Screen completed |
 | 1 | Pipeline error |
-| 2 | Invalid options, input files or environment, or a required tool is missing (also from the container's `entry.sh`, e.g. a missing protein or ligand folder) |
+| 2 | Invalid options, input files or environment, a required tool is missing (also from the container's `entry.sh`, e.g. a missing protein or ligand folder), or the output directory is in use by another run (nothing is written then, not even `run_manifest.json`) |
 | 3 | More ligands failed than `--max-failure-fraction` allows, including all of them (all outputs are still written) |
-| 130 | Interrupted |
+| 130 | Interrupted (Ctrl-C) |
+| 143 | Terminated by SIGTERM (e.g. `docker stop`) |
+
+On Ctrl-C or SIGTERM the run stops its docking workers and their engine
+processes, keeps the checkpoint (rerun the same command to resume), writes
+`run_manifest.json` with status `interrupted` and releases the output
+directory. A docking worker process that dies (e.g. killed by the
+out-of-memory killer) does not stop the screen: its unfinished ligands are
+docked again, each in a fresh worker, and a ligand whose worker dies again is
+reported as `FAILED`.
 
 For a debug shell as root, run the image with `--root-shell` as the first
 argument. `--help` and `--version` work without a workspace.

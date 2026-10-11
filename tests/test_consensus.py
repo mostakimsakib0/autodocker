@@ -1,9 +1,11 @@
 import os
+from dataclasses import dataclass
 
 import pytest
 
 import runner
 import vspipeline.consensus as cons
+from vspipeline import docking
 
 
 def test_rankdata_no_ties():
@@ -293,34 +295,77 @@ def test_consensus_outputs_summary_json_and_no_agreement_column(tmp_path):
     assert "vinardo" in summary["scorer_b"]
 
 
-def test_pool_failure_retries_only_unfinished(monkeypatch):
-    from dataclasses import dataclass
+@dataclass(frozen=True)
+class _Job:
+    name: str
+    marks: str
 
-    @dataclass(frozen=True)
-    class J:
-        name: str
 
-    done = []
+def _dying_worker(job):
+    """Module level (picklable). Records each attempt; "boom" kills its
+    worker process, like the out-of-memory killer would."""
+    with open(os.path.join(job.marks, job.name), "a", encoding="utf-8") as f:
+        f.write("x")
+    if job.name == "boom":
+        os._exit(1)
+    return job.name, -1.0, None
 
-    class BrokenPool:
-        def __init__(self, n):
-            pass
 
-        def __enter__(self):
-            return self
+def test_dead_worker_fails_only_its_ligand(tmp_path):
+    """A worker process that dies breaks the pool instead of hanging it: the
+    unfinished ligands run again in fresh processes, the one that kills its
+    worker again is FAILED, every other ligand gets its result."""
+    marks = str(tmp_path)
+    jobs = [_Job(n, marks) for n in ("a", "b", "boom", "c", "d")]
+    out = cons._collect_with_retry(_dying_worker, jobs, 2, "t")
+    assert out["boom"] == (None, docking.WORKER_DIED_ERROR)
+    assert {n: out[n] for n in "abcd"} == {n: (-1.0, None) for n in "abcd"}
+    assert (tmp_path / "boom").read_text() == "xx"     # retried once, not forever
 
-        def __exit__(self, *a):
-            return False
 
-        def imap_unordered(self, fn, jobs):
-            yield fn(jobs[0])
-            raise RuntimeError("pool died")
+def test_consensus_probe_missing_pose_fails_only_that_ligand(fake_rescore, tmp_path):
+    """The scoring-function probe used the first ligand's pose outside the
+    per-ligand error handling, so one missing pose crashed --consensus."""
+    outdir = _dock_outputs(tmp_path, ["b"])
+    results = [("a", -8.0), ("b", -7.512)]   # a's pose file is missing
+    scores, scoring = cons.rescore_with_smina(
+        "rec.pdbqt", results, outdir, smina="smina", timeout=10)
+    assert scoring == "vinardo"
+    assert scores["a"] is None and scores["b"] is not None
 
-    def worker(job):
-        done.append(job.name)
-        return job.name, -1.0, None
 
-    monkeypatch.setattr(cons, "Pool", BrokenPool)
-    out = cons._collect_with_retry(worker, [J("a"), J("b"), J("c")], 2, "t")
-    assert set(out) == {"a", "b", "c"}
-    assert sorted(done) == ["a", "b", "c"]   # "a" ran once, not again serially
+def test_smina_rescoring_nan_is_failed(tmp_path, monkeypatch):
+    """A non-finite SMINA score is a failure (as in the Vina path), never a
+    number in consensus_ranking.csv."""
+    smina = tmp_path / "smina"
+    smina.write_text("#!/bin/bash\nwhile [ $# -gt 0 ]; do [ \"$1\" = \"-o\" ] && out=$2; "
+                     "shift; done\nprintf 'MODEL 1\\nREMARK minimizedAffinity nan\\n"
+                     "ATOM      1  C   UNL     1       0.000   0.000   0.000  0.00  0.00"
+                     "    +0.000 C\\nENDMDL\\n' > \"$out\"\n")
+    smina.chmod(0o755)
+    outdir = _dock_outputs(tmp_path, ["a"])
+    scores, _ = cons.rescore_with_smina("rec.pdbqt", [("a", -7.512)], outdir,
+                                        scoring="vinardo", smina=str(smina), timeout=10)
+    assert scores == {"a": None}
+    log = (tmp_path / "out" / "docked" / "a_smina.log").read_text()
+    assert "Non-finite score nan" in log
+    with pytest.raises(RuntimeError, match="Non-finite"):
+        cons.run_smina_docking("rec.pdbqt", "lig.pdbqt", str(tmp_path / "o.pdbqt"),
+                               0, 0, 0, 20, 20, 20, smina=str(smina), timeout=10)
+
+
+def test_consensus_ranking_out_of_window_keeps_its_score(tmp_path):
+    """OUT_OF_WINDOW Vina results were written as FAILED in
+    consensus_ranking.csv; they keep their score, as in ranking.csv."""
+    import csv
+    results = [("a", -9.0), ("b", -8.0), ("oow", None), ("d", None)]
+    smina = {"a": -6.0, "b": -5.0}
+    metrics = {"a": {"status": "OK"}, "b": {"status": "OK"}, "d": {"status": "FAILED"},
+               "oow": {"status": "OUT_OF_WINDOW", "raw_score": -0.5}}
+    cons.write_consensus_outputs(str(tmp_path), results, smina, "vinardo",
+                                 metrics_dict=metrics)
+    with open(tmp_path / "consensus_ranking.csv", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    assert rows[1:] == [["a", "-9.0", "-6.0", "-7.5"], ["b", "-8.0", "-5.0", "-6.5"],
+                        ["d", "FAILED", "FAILED", "NA"],
+                        ["oow", "-0.5", "NA", "OUT_OF_WINDOW"]]

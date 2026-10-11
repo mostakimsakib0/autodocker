@@ -78,6 +78,25 @@ are assigned to threads, so seeded Vina output is not expected to depend on
 These tests cover the committed fixtures and the Vina build on the test
 machine; they are evidence, not a proof for every input.
 
+The threads given to each Vina/QuickVina/SMINA process (`--threads`, else
+the available CPUs divided by `-p` when `-p > 1`, else the engine's default
+of all cores) are recorded in `run_manifest.json` as `threads_per_process`.
+
+## Resuming
+
+Docking results are checkpointed per ligand under a fingerprint of the
+receptor and flexible-residue files, the grid file, the docking parameters
+and the primary engine binary (path, SHA-256, version); a change of any of
+them discards the checkpoint. The QuickVina fallback (`--qvina-fallback`) is
+not part of the fingerprint: a result of the fallback is tagged with the
+fallback binary's SHA-256 and docked again on its own when the fallback
+changes or is turned off, while the primary engine's results are kept.
+Paths in the checkpoint are relative to the output directory, so a resumed
+run gives the same `ranking.csv` from any working directory and after the
+output directory was moved. Results are collected in library order, never in
+the order the workers finish; a ligand whose worker process dies is docked
+again in a fresh worker and reported `FAILED` if that worker dies too.
+
 ## End-to-end determinism check
 
 ```bash

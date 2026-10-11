@@ -130,6 +130,41 @@ changes (below) are part of 2.0.0.
   when no ligand has an in-window score, drops the dead 3D-viewer link when
   there is no viewer, and clicking the scatter point of a ligand outside the
   top hits says so instead of reloading the current hit.
+- One run per output directory: the lock is taken before anything is
+  written (it was taken only when docking started, after ligand and receptor
+  preparation and the manifest, and never with `--smina-only`, so a second
+  run could rewrite the grid, receptor and ligands of a running screen).
+  A run that finds the directory in use exits with 2 and writes nothing.
+- The checkpoint stores per-ligand file paths relative to the output
+  directory: a run resumed from another working directory, or after the
+  output directory was moved, wrote a wrong `Docked_File` and `--consensus`
+  crashed. A missing Vina pose now fails only that ligand's rescoring.
+- A docking or rescoring worker process that dies (e.g. out-of-memory
+  killer) no longer hangs the screen: its unfinished ligands are run again,
+  each in a fresh worker, and a ligand whose worker dies again is `FAILED`.
+- SIGTERM (`docker stop`) is handled like Ctrl-C: workers and their engine
+  processes are stopped, the checkpoint is kept, `run_manifest.json` records
+  status `interrupted`, and the exit code is 143. Before, the run died
+  without a manifest while its workers kept docking into the unlocked
+  directory.
+- `--max-failure-fraction` counts ligands that could not be prepared, as
+  documented ("if more than this fraction of ligands fail"); superseded
+  files are not counted. `run_manifest.json` records both counts
+  (`failures`).
+- `consensus_ranking.csv` labelled `OUT_OF_WINDOW` ligands `FAILED`; they
+  keep their Vina score, with `SMINA_Affinity` `NA` and `Consensus`
+  `OUT_OF_WINDOW`.
+- A non-finite SMINA score (`nan`) fails the ligand in `--smina-only` and
+  `--consensus` instead of being reported as a score.
+- `run_manifest.json` is written atomically and records the threads given
+  to each engine process (`threads_per_process`).
+- Turning `--qvina-fallback` on or off no longer discards the checkpoint:
+  the fingerprint covers the primary engine only, and results produced by
+  the fallback (tagged with its SHA-256) are docked again individually when
+  the fallback changes. Checkpoints written by earlier 2.0.0 development
+  builds are discarded once.
+- Docking results are collected in library order, independent of the order
+  in which the workers finish.
 
 ### Changed
 

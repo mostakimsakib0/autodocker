@@ -694,3 +694,155 @@ def test_qvina_env_conflict_names_the_variable(cli, fake_tools, monkeypatch, cap
     err = capsys.readouterr().err
     assert "$VS_ENABLE_QVINA_FALLBACK=1 in the environment" in err
     assert "cannot be combined" in err
+
+
+# ---------------------------------------------------------------------------
+# Output-directory lock, SIGTERM, failure fraction, manifest (review fixes)
+# ---------------------------------------------------------------------------
+
+def _hold_lock(outdir):
+    """Another process holding the output directory's lock (as a running
+    screen does); returns the Popen (release with .communicate(""))."""
+    import subprocess
+    code = ("import sys; sys.path.insert(0, sys.argv[2]);"
+            "from vspipeline import checkpoint as c;"
+            "c.acquire_lock(sys.argv[1]); print('locked', flush=True); sys.stdin.read()")
+    pkg = os.path.join(os.path.dirname(__file__), "..", "autodocker")
+    holder = subprocess.Popen([sys.executable, "-c", code, str(outdir), pkg],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    assert holder.stdout.readline().strip() == "locked"
+    return holder
+
+
+def _tree_digest(root):
+    """{relative path: (sha256, mtime_ns)} of every file under root."""
+    digest = {}
+    for dirpath, _, files in os.walk(root):
+        for name in files:
+            path = os.path.join(dirpath, name)
+            with open(path, "rb") as f:
+                digest[os.path.relpath(path, root)] = (
+                    hashlib.sha256(f.read()).hexdigest(), os.stat(path).st_mtime_ns)
+    return digest
+
+
+@pytest.mark.parametrize("extra", [[], ["--smina-only"]])
+def test_locked_output_dir_is_left_untouched(cli, fake_tools, monkeypatch, caplog, extra):
+    """A second run into the -o of a running screen used to rewrite ligands/,
+    receptor.pdbqt, grid.conf and run_manifest.json before it hit the lock
+    (and --smina-only never locked). It now stops with exit 2 before writing
+    anything, in every mode."""
+    monkeypatch.setattr(runner, "SMINA", sys.executable)
+
+    def must_not_run(args, state):
+        raise AssertionError("the pipeline must not start")
+
+    monkeypatch.setattr(runner, "_run_pipeline", must_not_run)
+    argv, out = cli
+    out.mkdir()
+    for name in ("run_manifest.json", "grid.conf", "ranking.csv"):
+        (out / name).write_text("from the running screen\n")
+    (out / "docked").mkdir()
+    (out / "docked" / "a_out.pdbqt").write_text("pose\n")
+    holder = _hold_lock(out)
+    try:
+        before = _tree_digest(out)
+        with caplog.at_level(logging.ERROR):
+            assert _exit_code(argv + extra) == runner.EXIT_USAGE
+        assert _tree_digest(out) == before
+    finally:
+        holder.communicate("")
+    assert "in use by another AutoDocker run" in caplog.text
+
+
+def test_lock_is_held_for_the_whole_run_and_released(cli, fake_tools, monkeypatch):
+    from vspipeline import checkpoint as ckpt
+    seen = {}
+
+    def pipeline(args, state):
+        seen["held"] = ckpt.holds_lock(args.output)
+        # The checkpoint re-uses the run's lock and must not release it.
+        cp = runner.DockingCheckpoint(args.output)
+        cp.close()
+        seen["after_close"] = ckpt.holds_lock(args.output)
+        return runner.EXIT_OK
+
+    monkeypatch.setattr(runner, "_run_pipeline", pipeline)
+    argv, out = cli
+    runner.main(argv)
+    assert seen == {"held": True, "after_close": True}
+    assert not ckpt.holds_lock(str(out))
+
+
+def test_sigterm_exits_143_with_manifest(cli, fake_tools, monkeypatch, caplog):
+    """SIGTERM (docker stop) takes the interrupt path: manifest written with
+    status interrupted, exit 143, lock released, previous handler restored."""
+    import signal
+    from vspipeline import checkpoint as ckpt
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def pipeline(args, state):
+        state["docking_started"] = True
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise AssertionError("SIGTERM must interrupt the run")
+
+    monkeypatch.setattr(runner, "_run_pipeline", pipeline)
+    argv, out = cli
+    with caplog.at_level(logging.WARNING):
+        assert _exit_code(argv) == runner.EXIT_TERMINATED == 143
+    m = _manifest(out)
+    assert m["status"] == "interrupted" and m["error"] == "SIGTERM"
+    assert m["exit_code"] == 143
+    assert "terminated (SIGTERM)" in caplog.text
+    assert signal.getsignal(signal.SIGTERM) == previous
+    assert not ckpt.holds_lock(str(out))
+
+
+def test_failure_counts_include_preparation_failures():
+    """README: exit 3 "if more than this fraction of ligands fail": ligands
+    that could not be prepared are failures too."""
+    counts = runner._failure_counts(n_prep_failed=2, n_dock_failed=1, n_docked=3,
+                                    max_fraction=0.5)
+    assert counts == {"preparation_failed": 2, "docking_failed": 1, "failed": 3,
+                      "ligands": 5, "fraction": 0.6, "max_failure_fraction": 0.5}
+    assert runner._failure_exit_code(counts["failed"], counts["ligands"], 0.5) \
+        == runner.EXIT_TOO_MANY_FAILURES
+    # Docking alone (1/3) would have passed.
+    assert runner._failure_exit_code(1, 3, 0.5) == runner.EXIT_OK
+
+
+def test_run_manifest_write_is_atomic(tmp_path, monkeypatch):
+    path = tmp_path / "run_manifest.json"
+    runner.write_run_manifest(str(path), {"a": 1})
+    old = path.read_text()
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner.json, "dump", boom)
+    with pytest.raises(OSError):
+        runner.write_run_manifest(str(path), {"a": 2})
+    assert path.read_text() == old
+    assert os.listdir(tmp_path) == ["run_manifest.json"]
+
+
+def test_threads_per_process_recorded(cli, fake_tools, monkeypatch):
+    monkeypatch.setattr(runner, "available_cpus", lambda: 8)
+    seen = {}
+
+    def fake_args(processes, threads):
+        return type("A", (), {"processes": processes, "threads": threads})()
+
+    assert runner._threads_per_process(fake_args(4, None)) == 2
+    assert runner._threads_per_process(fake_args(1, None)) is None
+    assert runner._threads_per_process(fake_args(4, 3)) == 3
+
+    def pipeline(args, state):
+        state["threads_per_process"] = {"threads": 2, "source": "x", "processes": 4}
+        seen["ok"] = True
+        return runner.EXIT_OK
+
+    monkeypatch.setattr(runner, "_run_pipeline", pipeline)
+    argv, out = cli
+    runner.main(argv)
+    assert _manifest(out)["threads_per_process"]["threads"] == 2

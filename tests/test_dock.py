@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -167,6 +168,10 @@ mode = os.environ.get("FAKE_MODE_" + os.path.basename(sys.argv[0]), "ok")
 if mode == "crash":
     sys.stderr.write("simulated crash\n"); sys.exit(3)
 if mode == "sleep":
+    time.sleep(30)
+killer = os.environ.get("FAKE_KILL_PARENT_FOR")
+if killer and killer in os.path.basename(args[args.index("--ligand") + 1]):
+    os.kill(os.getppid(), 9)   # the docking worker dies (as by the OOM killer)
     time.sleep(30)
 out = args[args.index("--out") + 1]
 aff = os.environ.get("FAKE_AFF", "-11.521")
@@ -449,3 +454,118 @@ def test_dock_all_under_spawn_uses_explicit_engine(tmp_path):
     data = json.loads(proc.stdout.strip().splitlines()[-1])
     assert data["results"] == [["lig", -11.521], ["lig2", -11.521]]
     assert data["engines"] == [eng, eng]
+
+
+# ---------------------------------------------------------------------------
+# Worker processes that die; fallback engine and the checkpoint
+# ---------------------------------------------------------------------------
+
+def _grid(tmp_path):
+    grid = tmp_path / "g.conf"
+    grid.write_text("center_x=0\ncenter_y=0\ncenter_z=0\nsize_x=20\nsize_y=20\nsize_z=20\n")
+    return str(grid)
+
+
+def test_dead_worker_fails_its_ligand_and_the_run_finishes(tmp_path, monkeypatch):
+    """A worker killed while docking (kill -9, OOM killer) used to hang the
+    screen forever ("Progress 8/9"). The ligand whose worker dies twice is
+    FAILED; every other ligand is docked; results are in library order."""
+    eng = _fake_engine(tmp_path)
+    monkeypatch.setenv("FAKE_KILL_PARENT_FOR", "killer")
+    job = _job(tmp_path, eng)
+    ligs = [_ligand(tmp_path, name=n) for n in ("l1", "killer", "l2", "l3", "l4")]
+    results, cp, metrics = docking.dock_all(
+        job.receptor, ligs, job.grid_file, str(tmp_path / "o"), num_processes=2,
+        resume=False, vina_params={"seed": 42, "binding_modes": 2},
+        engine=docking.EngineConfig(eng, eng, None, 60))
+    assert results == [("l1", -11.521), ("killer", None), ("l2", -11.521),
+                       ("l3", -11.521), ("l4", -11.521)]
+    assert metrics["killer"]["status"] == "FAILED"
+    assert metrics["killer"]["error"] == docking.WORKER_DIED_ERROR
+    assert "killer" not in cp.completed
+    attempts = [c for c in (tmp_path / "bin" / "calls.log").read_text().splitlines()
+                if "killer" in c]
+    assert len(attempts) == 2      # first pool, then once in a fresh worker
+
+
+def _fallback_engines(tmp_path):
+    primary = _fake_engine(tmp_path, "vina")
+    fallback = _fake_engine(tmp_path, "qvina2")
+    return primary, fallback
+
+
+def _calls(tmp_path):
+    path = tmp_path / "bin" / "calls.log"
+    return path.read_text().count("\n") if path.exists() else 0
+
+
+def test_toggling_fallback_keeps_primary_results(tmp_path):
+    """The fallback engine is not part of the run fingerprint: turning
+    --qvina-fallback on or off keeps every result the primary produced."""
+    primary, fallback = _fallback_engines(tmp_path)
+    job = _job(tmp_path, primary)
+    ligs = [_ligand(tmp_path, name=n) for n in ("a", "b")]
+    out = str(tmp_path / "o")
+    params = {"seed": 42, "binding_modes": 2}
+    docking.dock_all(job.receptor, ligs, job.grid_file, out, vina_params=params,
+                     engine=docking.EngineConfig(primary, primary, None, 60))
+    assert _calls(tmp_path) == 2
+    results, _, _ = docking.dock_all(
+        job.receptor, ligs, job.grid_file, out, vina_params=params,
+        engine=docking.EngineConfig(primary, fallback, None, 60))
+    assert _calls(tmp_path) == 2 and results == [("a", -11.521), ("b", -11.521)]
+
+
+def test_fallback_result_redocked_when_fallback_turned_off(tmp_path, monkeypatch):
+    """A result of the fallback engine is tagged with its SHA-256 and docked
+    again (alone) once that fallback is no longer configured."""
+    primary, fallback = _fallback_engines(tmp_path)
+    job = _job(tmp_path, primary)
+    ligs = [_ligand(tmp_path, name=n) for n in ("a",)]
+    out = str(tmp_path / "o")
+    params = {"seed": 42, "binding_modes": 2}
+    with_fallback = docking.EngineConfig(primary, fallback, None, 60)
+    monkeypatch.setenv("FAKE_MODE_vina", "crash")
+    _, _, metrics = docking.dock_all(job.receptor, ligs, job.grid_file, out,
+                                     vina_params=params, engine=with_fallback)
+    assert metrics["a"]["fallback_used"] is True
+    assert metrics["a"]["fallback_sha256"] == docking._file_sha256(fallback)
+    n = _calls(tmp_path)
+    docking.dock_all(job.receptor, ligs, job.grid_file, out, vina_params=params,
+                     engine=with_fallback)
+    assert _calls(tmp_path) == n          # same fallback: cached
+    monkeypatch.delenv("FAKE_MODE_vina")
+    results, _, metrics = docking.dock_all(
+        job.receptor, ligs, job.grid_file, out, vina_params=params,
+        engine=docking.EngineConfig(primary, primary, None, 60))
+    assert _calls(tmp_path) == n + 1      # docked again with the primary
+    assert results == [("a", -11.521)] and metrics["a"]["fallback_used"] is False
+
+
+def test_checkpointed_paths_survive_cwd_change_and_move(tmp_path, monkeypatch):
+    """dock_file/log_file were stored relative to the working directory of
+    the run that docked; a resume from elsewhere (or of a moved directory)
+    pointed at files that do not exist."""
+    eng = _fake_engine(tmp_path)
+    job = _job(tmp_path, eng)
+    lig = _ligand(tmp_path, name="a")
+    params = {"seed": 42, "binding_modes": 2}
+    cfg = docking.EngineConfig(eng, eng, None, 60)
+    monkeypatch.chdir(tmp_path)
+    docking.dock_all(job.receptor, [lig], job.grid_file, "o", vina_params=params,
+                     engine=cfg)
+    with open(tmp_path / "o" / ".docking_checkpoint.json", encoding="utf-8") as f:
+        stored = json.load(f)["a"]["metrics"]
+    assert stored["dock_file"] == os.path.join("docked", "a_out.pdbqt")
+    assert stored["log_file"] == os.path.join("docked", "a_vina.log")
+    from vspipeline import checkpoint as ckpt
+    ckpt.release_lock("o")
+    (tmp_path / "moved").mkdir()
+    os.rename(tmp_path / "o", tmp_path / "moved" / "o")
+    monkeypatch.chdir(tmp_path / "bin")
+    new_out = str(tmp_path / "moved" / "o")
+    _, _, metrics = docking.dock_all(job.receptor, [lig], job.grid_file, new_out,
+                                     vina_params=params, engine=cfg)
+    assert metrics["a"]["dock_file"] == os.path.join(new_out, "docked", "a_out.pdbqt")
+    assert os.path.exists(metrics["a"]["dock_file"])
+    ckpt.release_lock(new_out)

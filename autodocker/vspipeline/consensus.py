@@ -21,13 +21,13 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import math
 import os
 import re
 import shlex
 import subprocess
 import traceback
 from dataclasses import dataclass
-from multiprocessing import Pool
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from vspipeline import defaults  # noqa: E402
@@ -42,6 +42,8 @@ from vspipeline.docking import (
     _stdout_best_affinity_token,
     _parse_pdbqt_result_tokens,
     affinity_in_window,
+    run_in_workers,
+    WORKER_DIED_ERROR,
     parse_pdbqt_results,
     status_for_score,
     window_text,
@@ -137,6 +139,18 @@ def _run_smina_command(cmd: List[str], timeout: int, log_file: Optional[str]
     return result
 
 
+def _finite_score(token: str, path: str) -> float:
+    """``token`` as a float; RuntimeError when it is not a finite number
+    (SMINA can write nan/inf for a broken input, as Vina can)."""
+    try:
+        score = float(token)
+    except ValueError:
+        raise RuntimeError(f"Unreadable score {token!r} in SMINA output {path}") from None
+    if not math.isfinite(score):
+        raise RuntimeError(f"Non-finite score {token} in SMINA output {path}")
+    return score
+
+
 def _first_pdbqt_affinity(path: str) -> str:
     """Affinity token of the first model of a SMINA output PDBQT
     (``REMARK minimizedAffinity``). Raises RuntimeError when absent."""
@@ -203,12 +217,13 @@ def run_smina_docking(
         os.remove(output_pdbqt)
     result = _run_smina_command(cmd, timeout, log_file)
     token = _first_pdbqt_affinity(output_pdbqt)
+    score = _finite_score(token, output_pdbqt)
     stdout_token = _stdout_best_affinity_token(result.stdout or "")
     if stdout_token is not None and not _scores_agree(token, stdout_token):
         logger.warning(
             f"[!] SMINA output PDBQT score {token} disagrees with stdout "
             f"({stdout_token}) for {ligand_pdbqt}; using the PDBQT value")
-    return float(token)
+    return score
 
 
 def _parse_smina_affinity(stdout: str) -> Optional[float]:
@@ -235,23 +250,18 @@ def _parse_smina_affinity(stdout: str) -> Optional[float]:
 
 def _collect_with_retry(worker: Callable, jobs: Sequence, num_processes: int,
                         label: str) -> Dict[str, Tuple[Optional[float], Optional[str]]]:
-    """Run ``worker`` over ``jobs`` (in a pool when num_processes > 1).
-    If the pool itself breaks, only the jobs without a result are retried
-    serially. Returns {name: (score, error)}."""
+    """Run ``worker`` over ``jobs`` (in worker processes when
+    num_processes > 1, see docking.run_in_workers: a job whose worker
+    process dies is run once more in a fresh process, then fails).
+    Returns {name: (score, error)}."""
     collected: Dict[str, Tuple[Optional[float], Optional[str]]] = {}
     if num_processes > 1 and len(jobs) > 1:
-        try:
-            with Pool(num_processes) as pool:
-                for name, score, err in pool.imap_unordered(worker, jobs):
-                    collected[name] = (score, err)
-        except Exception as e:
-            remaining = [j for j in jobs if j.name not in collected]
-            logger.warning(
-                f"  [!] {label}: parallel run failed ({e}); retrying the "
-                f"{len(remaining)} unfinished ligand(s) serially")
-            for job in remaining:
-                name, score, err = worker(job)
-                collected[name] = (score, err)
+        def on_result(job, result):
+            name, score, err = result
+            collected[name] = (score, err)
+
+        for job in run_in_workers(worker, jobs, num_processes, on_result, label=label):
+            collected[job.name] = (None, WORKER_DIED_ERROR)
     else:
         for job in jobs:
             name, score, err = worker(job)
@@ -502,12 +512,13 @@ def _smina_rescore_one(job: SminaRescoreJob):
                                 pose_flex if has_flex else None)
         result = _run_smina_command(cmd, job.timeout, log_file)
         token = _first_pdbqt_affinity(out)
+        score = _finite_score(token, out)
         m = _SCORE_ONLY_RE.search(result.stdout or "")
         if m and not _scores_agree(token, m.group(1)):
             logger.warning(
                 f"[!] {job.name}: SMINA rescoring PDBQT score {token} disagrees with "
                 f"stdout ({m.group(1)}); using the PDBQT value")
-        return job.name, float(token), None
+        return job.name, score, None
     except Exception as e:
         try:
             _write_log(log_file, f"# Error: {e}\n# Traceback:\n{traceback.format_exc()}\n")
@@ -547,10 +558,25 @@ def rescore_with_smina(receptor: str, results: List[Tuple[str, Optional[float]]]
         return scores, scoring or SMINA_RESCORING_FUNCTIONS[0]
 
     if scoring is None:
-        probe_pose = os.path.join(dock_dir, names[0] + outputs.VINA_TOP_POSE_SUFFIX)
-        _extract_top_pose(dock_files[names[0]], probe_pose,
-                          os.path.join(dock_dir, names[0] + outputs.VINA_TOP_FLEX_SUFFIX))
-        scoring = select_rescoring_function(smina, receptor, probe_pose, timeout)
+        # Any readable top pose will do to list SMINA's scoring functions; a
+        # ligand whose pose is missing or unreadable fails on its own below.
+        probe_pose = None
+        for name in names:
+            candidate = os.path.join(dock_dir, name + outputs.VINA_TOP_POSE_SUFFIX)
+            try:
+                _extract_top_pose(dock_files[name], candidate,
+                                  os.path.join(dock_dir, name + outputs.VINA_TOP_FLEX_SUFFIX))
+            except (OSError, RuntimeError) as e:
+                logger.debug(f"No probe pose from {dock_files[name]}: {e}")
+                continue
+            probe_pose = candidate
+            break
+        if probe_pose is None:
+            scoring = SMINA_RESCORING_FUNCTIONS[0]
+            logger.warning("[!] Consensus: no readable Vina top pose; every ligand's "
+                           "rescoring will fail")
+        else:
+            scoring = select_rescoring_function(smina, receptor, probe_pose, timeout)
     logger.info(f"[*] Consensus: rescoring Vina top poses with smina --score_only "
                 f"--scoring {scoring}")
 
@@ -568,26 +594,42 @@ def rescore_with_smina(receptor: str, results: List[Tuple[str, Optional[float]]]
     return scores, scoring
 
 
+def _score_cell(v):
+    """A score for consensus_ranking.csv (FAILED when missing)."""
+    return Status.FAILED.value if v is None else v
+
+
+# consensus_ranking.csv: Consensus value of a ligand that has no consensus.
+CONSENSUS_NA = "NA"
+
+
 def write_consensus_outputs(outdir: str, results: List[Tuple[str, Optional[float]]],
                             smina_scores: Dict[str, Optional[float]],
-                            scoring: str) -> Dict:
+                            scoring: str, metrics_dict: Optional[Dict] = None) -> Dict:
     """Write consensus_ranking.csv and consensus_summary.json.
 
     consensus_ranking.csv: Ligand, Vina_Affinity, SMINA_Affinity, Consensus
-    (mean of the two), sorted by Consensus then name; ligands one scorer could
-    not score follow with NA. consensus_summary.json holds the global
-    Spearman rho and n. Returns ``{"rho": rho, "n": n}``.
+    (mean of the two), sorted by Consensus then name. Ligands without both
+    scores follow, by name, with Consensus ``NA``; a missing score is
+    written ``FAILED``. A ligand whose Vina score is OUT_OF_WINDOW (status in
+    ``metrics_dict``, as in ranking.csv) is not rescored: its row has the
+    Vina score as a number, SMINA_Affinity ``NA`` and Consensus
+    ``OUT_OF_WINDOW``. consensus_summary.json holds the global Spearman rho
+    and n. Returns ``{"rho": rho, "n": n}``.
     """
+    metrics_dict = metrics_dict or {}
     paired, unpaired = [], []
     for name, vina_score in results:
         smina_score = smina_scores.get(name)
-        if vina_score is None or smina_score is None:
-            unpaired.append((name, vina_score, smina_score))
+        metrics = metrics_dict.get(name) or {}
+        raw = metrics.get("raw_score")
+        if (vina_score is None and Status.of(metrics.get("status")) is Status.OUT_OF_WINDOW
+                and isinstance(raw, (int, float))):
+            unpaired.append((name, float(raw), CONSENSUS_NA, Status.OUT_OF_WINDOW.value))
+        elif vina_score is None or smina_score is None:
+            unpaired.append((name, _score_cell(vina_score), _score_cell(smina_score), CONSENSUS_NA))
         else:
             paired.append((name, vina_score, smina_score, (vina_score + smina_score) / 2))
-
-    def fmt(v):
-        return Status.FAILED.value if v is None else v
 
     consensus_file = os.path.join(outdir, outputs.CONSENSUS_RANKING_CSV)
     with open(consensus_file, "w", newline="", encoding="utf-8") as f:
@@ -595,8 +637,8 @@ def write_consensus_outputs(outdir: str, results: List[Tuple[str, Optional[float
         writer.writerow([outputs.COL_LIGAND, "Vina_Affinity", "SMINA_Affinity", "Consensus"])
         for name, v, s, c in sorted(paired, key=lambda r: (r[3], r[0])):
             writer.writerow([name, v, s, c])
-        for name, v, s in sorted(unpaired, key=lambda r: r[0]):
-            writer.writerow([name, fmt(v), fmt(s), "NA"])
+        for row in sorted(unpaired, key=lambda r: r[0]):
+            writer.writerow(row)
 
     rho, n = scorer_agreement_spearman([r[1] for r in paired], [r[2] for r in paired])
     summary = {

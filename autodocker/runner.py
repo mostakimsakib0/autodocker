@@ -30,6 +30,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -76,6 +77,14 @@ EXIT_FAILURE = 1            # the pipeline failed
 EXIT_USAGE = 2              # invalid options/environment or missing tools
 EXIT_TOO_MANY_FAILURES = 3  # outputs written, but too many ligands failed to dock
 EXIT_INTERRUPTED = 130      # Ctrl-C (128 + SIGINT)
+EXIT_TERMINATED = 143       # SIGTERM, e.g. docker stop (128 + SIGTERM)
+
+
+class TerminatedBySignal(KeyboardInterrupt):
+    """Raised in the main process when it receives SIGTERM. A subclass of
+    KeyboardInterrupt, so a terminated run takes the interrupted path:
+    workers and engine processes are stopped, the checkpoint is flushed and
+    run_manifest.json records status "interrupted"."""
 
 DEFAULT_SEED = defaults.SEED
 DEFAULT_COMMAND_TIMEOUT = defaults.COMMAND_TIMEOUT  # seconds
@@ -268,7 +277,12 @@ from vspipeline.admet import (  # noqa: E402
     _is_valid_sdf,
     _obabel_descriptors,
 )
-from vspipeline.checkpoint import DockingCheckpoint  # noqa: E402
+from vspipeline.checkpoint import (  # noqa: E402
+    DockingCheckpoint,
+    OutputDirLockedError,
+    acquire_lock,
+    release_lock,
+)
 from vspipeline.library import LibraryManager  # noqa: E402
 from vspipeline.utils import (  # noqa: E402
     _parse_chain_selection,
@@ -338,7 +352,8 @@ __all__ = [
     # admet (Lipinski filter; ADMETFilter is the deprecated alias)
     "ADMETFilter", "LipinskiFilter", "_is_valid_sdf", "_obabel_descriptors",
     # checkpoint, library, protein
-    "DockingCheckpoint", "LibraryManager", "ProteinPreparation",
+    "DockingCheckpoint", "LibraryManager", "ProteinPreparation", "OutputDirLockedError",
+    "acquire_lock", "release_lock",
     # utils
     "_parse_chain_selection", "available_cpus", "ligand_name", "_safe_ligand_id",
     "get_chains", "parse_pdb_coords", "run", "run_obabel",
@@ -398,9 +413,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Stages: [1/5] ligand preparation, [2/5] receptor and box preparation,\n"
             "[3/5] docking (Vina, or SMINA with --smina-only; optional SMINA rescoring),\n"
             "[4/5] pose analysis, [5/5] reports and run_manifest.json.\n"
-            "Exit codes: 0 success, 1 pipeline error, 2 invalid options/environment or\n"
-            "missing tools, 3 more ligands failed to dock than --max-failure-fraction\n"
-            "allows (outputs are still written), 130 interrupted."),
+            "Exit codes: 0 success, 1 pipeline error, 2 invalid options/environment,\n"
+            "missing tools or an output directory in use by another run, 3 more ligands\n"
+            "failed than --max-failure-fraction allows (outputs are still written),\n"
+            "130 interrupted (Ctrl-C), 143 terminated (SIGTERM)."),
         formatter_class=_HelpFormatter,
         # Abbreviated long options (--lig for --ligands) are not accepted:
         # the container entry point (entry.sh) must recognise -r/-l/-o and
@@ -543,9 +559,10 @@ def build_parser() -> argparse.ArgumentParser:
     dock.add_argument("--max-failure-fraction", type=float,
                       default=DEFAULT_MAX_FAILURE_FRACTION,
                       help="Exit with code 3 (after writing all outputs) when more than this "
-                      "fraction of the docked ligands failed (scores outside the "
-                      "accepted window are not failures); 1.0 never fails, not even "
-                      "when every ligand failed")
+                      "fraction of the ligands failed: (ligands that could not be prepared "
+                      "+ ligands whose docking failed) / (ligands prepared or not, without "
+                      "superseded files). Scores outside the accepted window are not "
+                      "failures; 1.0 never fails, not even when every ligand failed")
     dock.add_argument("--consensus", action="store_true",
                       help="Rescore Vina's top pose of each ligand with SMINA (Vinardo "
                       "scoring) and write consensus_ranking.csv and consensus_summary.json "
@@ -942,11 +959,20 @@ def _json_safe(value):
 
 def write_run_manifest(path: str, manifest: Dict) -> None:
     """Write run_manifest.json with sorted keys (deterministic layout) as
-    strict JSON."""
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(_json_safe(manifest), f, indent=2, sort_keys=True, default=str,
-                  allow_nan=False)
-        f.write("\n")
+    strict JSON, atomically: a reader (or a run killed mid-write) sees the
+    previous file or the new one, never a truncated one."""
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_json_safe(manifest), f, indent=2, sort_keys=True, default=str,
+                      allow_nan=False)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def _remove_stale_outputs(outdir: str) -> List[str]:
@@ -1021,12 +1047,37 @@ def _failed_docking(results, metrics_dict) -> List[str]:
     return failed
 
 
-def _failure_exit_code(n_failed: int, n_docked: int, max_fraction: float) -> int:
-    """EXIT_TOO_MANY_FAILURES if more than ``max_fraction`` of the docked
-    ligands failed, else EXIT_OK."""
-    if n_docked and n_failed / n_docked > max_fraction:
+def _failure_exit_code(n_failed: int, n_ligands: int, max_fraction: float) -> int:
+    """EXIT_TOO_MANY_FAILURES if more than ``max_fraction`` of the ligands
+    failed, else EXIT_OK. ``n_failed`` and ``n_ligands`` include the ligands
+    that could not be prepared (see _failure_counts)."""
+    if n_ligands and n_failed / n_ligands > max_fraction:
         return EXIT_TOO_MANY_FAILURES
     return EXIT_OK
+
+
+def _failure_counts(n_prep_failed: int, n_dock_failed: int, n_docked: int,
+                    max_fraction: float) -> Dict:
+    """The --max-failure-fraction bookkeeping recorded in run_manifest.json.
+    A ligand fails when it cannot be prepared or its docking fails; files
+    superseded by a same-name file of higher precedence are not ligands."""
+    n_ligands = n_docked + n_prep_failed
+    n_failed = n_dock_failed + n_prep_failed
+    return {"preparation_failed": n_prep_failed, "docking_failed": n_dock_failed,
+            "failed": n_failed, "ligands": n_ligands,
+            "fraction": n_failed / n_ligands if n_ligands else 0.0,
+            "max_failure_fraction": max_fraction}
+
+
+def _threads_per_process(args) -> Optional[int]:
+    """Threads per engine process (Vina/QuickVina --cpu, SMINA --cpu):
+    --threads, else the available cores split between the -p workers when
+    -p > 1, else None (the engine uses every core)."""
+    if args.threads:
+        return args.threads
+    if args.processes > 1:
+        return max(1, available_cpus() // args.processes)
+    return None
 
 
 def _run_pipeline(args, state: Dict) -> int:
@@ -1231,7 +1282,14 @@ def _run_pipeline(args, state: Dict) -> int:
         'seed': args.seed,
         'min_valid_affinity': args.min_valid_affinity,
         'extra_args': args.vina_extra,
-        'threads': args.threads,
+        'threads': _threads_per_process(args),
+    }
+    state["threads_per_process"] = {
+        "threads": vina_params['threads'],
+        "source": ("--threads" if args.threads else
+                   "available CPUs / --processes" if vina_params['threads'] else
+                   "engine default (all cores)"),
+        "processes": args.processes,
     }
     dock_receptor = rigid_receptor if flex_file else protein_prep.receptor_pdbqt
     grid_box = (cx, cy, cz, sx, sy, sz)
@@ -1270,7 +1328,8 @@ def _run_pipeline(args, state: Dict) -> int:
             dock_receptor, results, args.output, metrics_dict=metrics_dict,
             num_processes=args.processes, flex_file=flex_file)
         scorer_agreement = {
-            **write_consensus_outputs(args.output, results, smina_scores, scoring),
+            **write_consensus_outputs(args.output, results, smina_scores, scoring,
+                                      metrics_dict=metrics_dict),
             "scoring": scoring}
         state["consensus"] = scorer_agreement
 
@@ -1325,15 +1384,20 @@ def _run_pipeline(args, state: Dict) -> int:
 
     failed = _failed_docking(results, metrics_dict)
     state["docking_failures"] = {"failed": len(failed), "docked": len(results)}
-    exit_code = _failure_exit_code(len(failed), len(results), args.max_failure_fraction)
+    counts = _failure_counts(len(lib_manager.failed), len(failed), len(results),
+                             args.max_failure_fraction)
+    state["failures"] = counts
+    exit_code = _failure_exit_code(counts["failed"], counts["ligands"],
+                                   args.max_failure_fraction)
 
     logger.info("=" * 70)
     if exit_code == EXIT_OK:
         logger.info(f"PIPELINE COMPLETED SUCCESSFULLY (v{__version__})")
     else:
-        logger.error(f"PIPELINE COMPLETED, BUT {len(failed)}/{len(results)} LIGANDS FAILED "
-                     f"TO DOCK (more than --max-failure-fraction "
-                     f"{args.max_failure_fraction:g})")
+        logger.error(f"PIPELINE COMPLETED, BUT {counts['failed']}/{counts['ligands']} LIGANDS "
+                     f"FAILED ({counts['preparation_failed']} in preparation, "
+                     f"{counts['docking_failed']} in docking; more than "
+                     f"--max-failure-fraction {args.max_failure_fraction:g})")
     logger.info("=" * 70)
     logger.info(f"Results saved to: {args.output}")
     written = [("Ranking", analyzer.csv_file), ("Full results", analyzer.results_file),
@@ -1360,6 +1424,8 @@ def _run_pipeline(args, state: Dict) -> int:
         logger.info(f"  - Flexible residues: "
                     f"{', '.join(flexible_residues) if flexible_residues else 'none (rigid docking)'}")
     logger.info(f"Total compounds docked: {len(results)} ({len(failed)} failed)")
+    if lib_manager.failed:
+        logger.info(f"Ligands that could not be prepared: {len(lib_manager.failed)}")
     logger.info("=" * 70)
     return exit_code
 
@@ -1399,59 +1465,122 @@ def main(argv: Optional[List[str]] = None) -> None:
     except OSError as e:
         logger.error(f"[!] -o/--output: cannot create {args.output!r}: {e}")
         sys.exit(EXIT_USAGE)
+    # One run per output directory: take its lock before anything is written
+    # there (stale-output removal, ligands, receptor, grid, manifest), in
+    # every mode, and hold it until the run ends. A run that finds the
+    # directory in use writes nothing, not even a manifest.
+    try:
+        acquire_lock(args.output)
+    except OutputDirLockedError as e:
+        logger.error(f"[!] {e}")
+        sys.exit(EXIT_USAGE)
+    except OSError as e:
+        logger.error(f"[!] -o/--output: cannot lock {args.output!r}: {e}")
+        sys.exit(EXIT_USAGE)
+    try:
+        exit_code = _main_locked(args, argv, started_at)
+    finally:
+        release_lock(args.output)
+    if exit_code != EXIT_OK:
+        sys.exit(exit_code)
 
+
+def _on_sigterm(signum, frame):
+    # Later SIGTERMs must not interrupt the cleanup of the first one.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise TerminatedBySignal()
+
+
+def _install_sigterm_handler():
+    """SIGTERM -> TerminatedBySignal in the main thread; returns the previous
+    handler (None when signals cannot be set here, e.g. in a thread)."""
+    try:
+        return signal.signal(signal.SIGTERM, _on_sigterm)
+    except ValueError:
+        return None
+
+
+def _main_locked(args, argv: List[str], started_at: str) -> int:
+    """The run itself, with the output directory locked. Returns the exit
+    code; always writes run_manifest.json."""
+    previous_sigterm = _install_sigterm_handler()
     state: Dict = {"docking_started": False}
     tools: Dict = {}
     status, exit_code, error = "failed", EXIT_FAILURE, None
     try:
-        tools = _probe_tools(args)
-        _remove_stale_outputs(args.output)
-        exit_code = _run_pipeline(args, state)
-        status = "completed" if exit_code == EXIT_OK else "too_many_failures"
-    except KeyboardInterrupt:
-        status, exit_code, error = "interrupted", EXIT_INTERRUPTED, "KeyboardInterrupt"
-        if not state["docking_started"]:
-            logger.warning("[!] Pipeline interrupted before docking started.")
-        elif args.smina_only:
-            logger.warning("[!] Pipeline interrupted during SMINA docking. --smina-only "
-                           "keeps no checkpoint; rerun the command to dock again.")
-        else:
-            logger.warning("[!] Pipeline interrupted. Docking progress is saved in the "
-                           "checkpoint; rerun the same command to resume.")
-    except Exception as e:
-        error = f"{type(e).__name__}: {e}"
-        logger.error(f"Pipeline failed: {error}")
-        if args.verbose:
-            import traceback
-            logger.error(traceback.format_exc())
-    finally:
-        extra = {}
-        library = state.get("library")
-        if library is not None:
-            extra["ligand_preparation"] = {"failed": len(library.failed),
-                                           "superseded": len(library.superseded)}
-        if "docking_failures" in state:
-            extra["docking_failures"] = state["docking_failures"]
-        if state.get("run_fingerprint"):
-            # The checkpoint fingerprint: receptor, grid, flex file, docking
-            # parameters and engine binaries (see docking._run_fingerprint).
-            extra["run_fingerprint"] = state["run_fingerprint"]
-        if state.get("engine") is not None:
-            extra["docking_engines"] = [
-                _engine_identity(path) for path, _ in state["engine"].docking_engines()]
-        if "consensus" in state:
-            extra["consensus"] = state["consensus"]
-        if "flexible_residues" in state:
-            # The residues docked as flexible side chains ([] = rigid).
-            extra["flexible_residues"] = list(state["flexible_residues"])
-        manifest_file = os.path.join(args.output, outputs.RUN_MANIFEST_JSON)
         try:
-            write_run_manifest(manifest_file, _build_manifest(
-                args, argv, tools, started_at, status, exit_code, error, extra))
-        except OSError as e:
-            logger.warning(f"Could not write {manifest_file}: {e}")
-    if exit_code != EXIT_OK:
-        sys.exit(exit_code)
+            tools = _probe_tools(args)
+            _remove_stale_outputs(args.output)
+            exit_code = _run_pipeline(args, state)
+            status = "completed" if exit_code == EXIT_OK else "too_many_failures"
+        except KeyboardInterrupt as e:
+            terminated = isinstance(e, TerminatedBySignal)
+            status = "interrupted"
+            exit_code = EXIT_TERMINATED if terminated else EXIT_INTERRUPTED
+            error = "SIGTERM" if terminated else "KeyboardInterrupt"
+            what = "terminated (SIGTERM)" if terminated else "interrupted"
+            if not state["docking_started"]:
+                logger.warning(f"[!] Pipeline {what} before docking started.")
+            elif args.smina_only:
+                logger.warning(f"[!] Pipeline {what} during SMINA docking. --smina-only "
+                               "keeps no checkpoint; rerun the command to dock again.")
+            else:
+                logger.warning(f"[!] Pipeline {what}. Docking progress is saved in the "
+                               "checkpoint; rerun the same command to resume.")
+        except Exception as e:
+            error = f"{type(e).__name__}: {e}"
+            logger.error(f"Pipeline failed: {error}")
+            if args.verbose:
+                import traceback
+                logger.error(traceback.format_exc())
+        finally:
+            # The manifest is written whatever happened; a second SIGTERM
+            # must not cut it short.
+            try:
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            except ValueError:
+                pass
+            _write_final_manifest(args, argv, tools, started_at, status, exit_code,
+                                  error, state)
+    finally:
+        if previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+    return exit_code
+
+
+def _write_final_manifest(args, argv, tools, started_at, status, exit_code, error,
+                          state) -> None:
+    extra = {}
+    library = state.get("library")
+    if library is not None:
+        extra["ligand_preparation"] = {"failed": len(library.failed),
+                                       "superseded": len(library.superseded)}
+    if "docking_failures" in state:
+        extra["docking_failures"] = state["docking_failures"]
+    if "failures" in state:
+        # What --max-failure-fraction was applied to (preparation + docking).
+        extra["failures"] = state["failures"]
+    if "threads_per_process" in state:
+        # Threads of each Vina/QuickVina/SMINA process (--cpu); null = all cores.
+        extra["threads_per_process"] = state["threads_per_process"]
+    if state.get("run_fingerprint"):
+        # The checkpoint fingerprint: receptor, grid, flex file, docking
+        # parameters and the primary engine binary (see docking._run_fingerprint).
+        extra["run_fingerprint"] = state["run_fingerprint"]
+    if state.get("engine") is not None:
+        extra["docking_engines"] = [
+            _engine_identity(path) for path, _ in state["engine"].docking_engines()]
+    if "consensus" in state:
+        extra["consensus"] = state["consensus"]
+    if "flexible_residues" in state:
+        # The residues docked as flexible side chains ([] = rigid).
+        extra["flexible_residues"] = list(state["flexible_residues"])
+    manifest_file = os.path.join(args.output, outputs.RUN_MANIFEST_JSON)
+    try:
+        write_run_manifest(manifest_file, _build_manifest(
+            args, argv, tools, started_at, status, exit_code, error, extra))
+    except OSError as e:
+        logger.warning(f"Could not write {manifest_file}: {e}")
 
 
 if __name__ == "__main__":
