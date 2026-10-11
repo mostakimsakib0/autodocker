@@ -1,1 +1,2 @@
-run openbabel
+run libstdc++6
+run zlib1g

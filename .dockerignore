@@ -1,7 +1,7 @@
 # Build context for the Dockerfile. The image only needs: Dockerfile, deps,
 # requirements.txt, autodocker/, scripts/{apt,shlib,patch}.sh and
-# tools/{aclmgr.c,autodock-vina,fpocket,ngl,qvina,smina}. Patterns without a
-# leading **/ match at the context root only.
+# tools/{aclmgr.c,autodock-vina,fpocket,ngl,openbabel,qvina,smina}. Patterns
+# without a leading **/ match at the context root only.
 
 # VCS metadata (submodule .git files point outside the context anyway)
 .git
@@ -28,8 +28,9 @@ tests
 benchmarks
 docs
 paper
-tools/openbabel
 **/node_modules
+# Open Babel's own test suite (~220 MB; built with ENABLE_TESTS=OFF)
+tools/openbabel/repo/test
 
 # Local docking runs and their outputs
 works

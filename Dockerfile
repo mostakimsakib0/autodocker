@@ -7,11 +7,13 @@
 # -ffp-contract=off (AD_FPFLAGS) on both, so the compiler never fuses
 # multiply-adds; GCC does so by default on arm64 but cannot on baseline
 # x86-64, and the fusion changes rounding and hence scores.
-#  - Debian packages (toolchain, Boost, Open Babel, runtime libraries) come
-#    from snapshot.debian.org at a fixed timestamp, so every build resolves the
+#  - Debian packages (toolchain, Boost, Eigen, runtime libraries) come from
+#    snapshot.debian.org at a fixed timestamp, so every build resolves the
 #    exact same package versions. Old snapshots are never removed, unlike
 #    superseded versions on deb.debian.org, so version pins cannot rot.
 #    Set DEBIAN_SNAPSHOT="" to use the live mirrors instead.
+#  - Open Babel is built from tools/openbabel/repo (submodule pinned to the
+#    openbabel-3-2-1 tag), not taken from Debian (3.1.1); SMINA links it too.
 #  - NGL is installed from a committed pnpm lockfile (--frozen-lockfile).
 #  - Python packages are pinned exactly in requirements.txt.
 #  - No "# syntax=" directive on purpose: the builder's built-in Dockerfile
@@ -56,6 +58,65 @@ apt-get install \
 EOF
 
 # ============================================================
+# Stage 1 — Build Open Babel
+# ============================================================
+# Open Babel 3.2.1 (tools/openbabel/repo, tag openbabel-3-2-1 = commit
+# 0e94434fa75c9f61095023e3c12e0d5f2ac035ff). 3.2 honours OB_RANDOM_SEED,
+# which the pipeline sets on every call, and no longer adds a hydrogen to
+# pre-protonated Lys/Arg (see docs/openbabel.md). Only the command-line tools
+# and the library are built: no GUI, no language bindings, no tests, and no
+# optional component that CMake would download (MaeParser, CoordGen,
+# RapidJSON) or AutoDocker does not use (Cairo PNG depiction, libxml2 CML).
+# OpenMP stays off (single-threaded force fields). USE_RANDOMMT=ON selects
+# the generator OB_RANDOM_SEED seeds. SOURCE_DATE_EPOCH (the commit time of
+# the tag, 2026-07-11T19:21:27Z) fixes the __DATE__/__TIME__ that "obabel -V"
+# prints, so the binary does not record when the image was built.
+FROM builder AS openbabel_builder
+ARG OPENBABEL_VERSION=3.2.1
+ARG OPENBABEL_SOURCE_DATE_EPOCH=1783797687
+WORKDIR /src
+COPY tools/openbabel ./openbabel
+RUN /scripts/apt.sh dev openbabel/deps
+RUN <<EOF
+set -eu
+test -f openbabel/repo/CMakeLists.txt || {
+	echo "tools/openbabel/repo is empty: run git submodule update --init" >&2
+	exit 1
+}
+export SOURCE_DATE_EPOCH="${OPENBABEL_SOURCE_DATE_EPOCH}"
+cmake -S openbabel/repo -B openbabel/build \
+	-DCMAKE_BUILD_TYPE=Release \
+	-DCMAKE_INSTALL_PREFIX=/usr/local \
+	-DCMAKE_C_FLAGS="$AD_FPFLAGS" -DCMAKE_CXX_FLAGS="$AD_FPFLAGS" \
+	-DBUILD_GUI=OFF -DPYTHON_BINDINGS=OFF -DRUN_SWIG=OFF -DENABLE_TESTS=OFF \
+	-DENABLE_OPENMP=OFF -DOPTIMIZE_NATIVE=OFF -DUSE_RANDOMMT=ON \
+	-DWITH_MAEPARSER=OFF -DWITH_COORDGEN=OFF -DWITH_JSON=OFF \
+	-DCMAKE_DISABLE_FIND_PACKAGE_Boost=ON \
+	-DCMAKE_DISABLE_FIND_PACKAGE_Cairo=ON \
+	-DCMAKE_DISABLE_FIND_PACKAGE_LibXml2=ON
+make -j"$(nproc)" -C openbabel/build
+make -C openbabel/build install DESTDIR=/out/full
+prefix=/out/full/usr/local
+strip "$prefix"/bin/* "$prefix"/lib/lib*.so.*.* "$prefix"/lib/openbabel/"${OPENBABEL_VERSION}"/*.so
+# Runtime subset: tools, shared libraries, plugins and data (no headers,
+# CMake or pkg-config files).
+mkdir -p /out/runtime/lib /out/runtime/share
+cp -a "$prefix"/bin /out/runtime/
+cp -a "$prefix"/lib/lib*.so.* "$prefix"/lib/openbabel /out/runtime/lib/
+cp -a "$prefix"/share/openbabel /out/runtime/share/
+# The build must be the pinned release, load its plugins and write PDBQT.
+export LD_LIBRARY_PATH="$prefix/lib"
+export BABEL_LIBDIR="$prefix/lib/openbabel/${OPENBABEL_VERSION}"
+export BABEL_DATADIR="$prefix/share/openbabel/${OPENBABEL_VERSION}"
+version="$("$prefix"/bin/obabel -V)"
+formats="$("$prefix"/bin/obabel -L formats)"
+pdbqt="$("$prefix"/bin/obabel -:CCO -opdbqt -h)"
+case "$version" in "Open Babel ${OPENBABEL_VERSION} "*) ;; *) echo "built: $version" >&2; exit 1 ;; esac
+case "$formats" in *"pdbqt -- "*) ;; *) echo "no PDBQT format plugin" >&2; exit 1 ;; esac
+case "$pdbqt" in *ROOT*ENDROOT*) ;; *) echo "PDBQT conversion failed" >&2; exit 1 ;; esac
+EOF
+
+# ============================================================
 # Stage 1 — Build AutoDock Vina
 # ============================================================
 FROM builder AS vina_builder
@@ -74,6 +135,10 @@ FROM builder AS smina_builder
 WORKDIR /src
 COPY tools/smina ./smina
 RUN /scripts/apt.sh dev smina/deps
+# SMINA links the same Open Babel 3.2.1 (headers and library from the
+# openbabel_builder stage; the runtime image ships the library).
+COPY --from=openbabel_builder /out/full/usr/local/ /usr/local/
+RUN ldconfig
 RUN cmake -S smina/repo -B smina/build \
 	-DCMAKE_C_FLAGS="$AD_FPFLAGS" -DCMAKE_CXX_FLAGS="$AD_FPFLAGS"
 RUN make -j"$(nproc)" -C smina/build
@@ -173,9 +238,9 @@ FROM ${PYTHON_IMAGE}
 
 ARG PYTHON_IMAGE
 ARG DEBIAN_SNAPSHOT
-# The Open Babel build the published results were produced with. The build
-# fails if the package set above resolves to anything else.
-ARG OPENBABEL_VERSION=3.1.1+dfsg-9+b3
+# The Open Babel release built in openbabel_builder (tools/openbabel/repo);
+# the build fails if obabel reports anything else.
+ARG OPENBABEL_VERSION=3.2.1
 
 LABEL org.opencontainers.image.title="AutoDocker" \
       org.opencontainers.image.description="Containerized virtual-screening pipeline (protein/ligand prep, Vina docking, ranked reports)." \
@@ -185,7 +250,8 @@ LABEL org.opencontainers.image.title="AutoDocker" \
       org.opencontainers.image.vendor="Mostakim Sakib" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.base.name="${PYTHON_IMAGE}" \
-      io.github.mostakimsakib0.autodocker.debian-snapshot="${DEBIAN_SNAPSHOT}"
+      io.github.mostakimsakib0.autodocker.debian-snapshot="${DEBIAN_SNAPSHOT}" \
+      io.github.mostakimsakib0.autodocker.openbabel-version="${OPENBABEL_VERSION}"
 
 COPY --from=deps /deps /deps
 COPY scripts/apt.sh /apt.sh
@@ -201,13 +267,39 @@ fi
 apt-get update -o Acquire::Retries=5
 /apt.sh run /deps
 rm -f /apt.sh
-# dpkg-query -W prints "openbabel<TAB>VERSION"; keep the last field.
-installed="$(dpkg-query -W openbabel)"
-installed="${installed##*[[:space:]]}"
-if [ "$installed" != "${OPENBABEL_VERSION}" ]; then
-	echo "openbabel ${installed} installed, expected ${OPENBABEL_VERSION}" >&2
-	exit 1
-fi
+# Debian's Open Babel (3.1.1) must not come in through a dependency.
+for pkg in openbabel libopenbabel7; do
+	if dpkg -s "$pkg" > /dev/null 2>&1; then
+		echo "Debian package $pkg is installed; the image ships Open Babel ${OPENBABEL_VERSION}" >&2
+		exit 1
+	fi
+done
+EOF
+
+# Open Babel (tools, library, plugins, data) under /usr/local. These are
+# also the compiled-in plugin and data directories; the variables make them
+# explicit.
+COPY --from=openbabel_builder /out/runtime/ /usr/local/
+ENV BABEL_LIBDIR=/usr/local/lib/openbabel/${OPENBABEL_VERSION} \
+    BABEL_DATADIR=/usr/local/share/openbabel/${OPENBABEL_VERSION}
+RUN <<EOF
+set -eu
+ldconfig
+test "$(command -v obabel)" = /usr/local/bin/obabel
+version="$(obabel -V)"
+case "$version" in
+	"Open Babel ${OPENBABEL_VERSION} "*) ;;
+	*)
+		echo "obabel -V reports '${version}', expected Open Babel ${OPENBABEL_VERSION}" >&2
+		exit 1
+		;;
+esac
+formats="$(obabel -L formats)"
+case "$formats" in *"pdbqt -- "*) ;; *) echo "obabel finds no PDBQT format plugin" >&2; exit 1 ;; esac
+# The compiled-in directories must work too (an environment without the
+# variables, e.g. setpriv --reset-env).
+formats="$(env -u BABEL_LIBDIR -u BABEL_DATADIR obabel -L formats)"
+case "$formats" in *"pdbqt -- "*) ;; *) echo "obabel needs BABEL_LIBDIR" >&2; exit 1 ;; esac
 EOF
 
 COPY requirements.txt /requirements.txt

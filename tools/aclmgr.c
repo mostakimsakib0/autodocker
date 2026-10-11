@@ -22,6 +22,9 @@ static const char* const forwarded_env[] = {
 	"EXHAUST", "EXHAUSTIVENESS", "INPUT", "LIGAND_MODE", "LIGS", "LIPINSKI",
 	"MAX_WORKERS", "NO_MINIMIZE", "OMP_NUM_THREADS", "PADDING", "PDB",
 	"POCKETS", "PROCESSES", "PUBCHEM_REST", "RESUME", "TIMEOUT", "TOP_N",
+	/* Open Babel's plugin and data directories (Dockerfile ENV; the same
+	 * as its compiled-in defaults) */
+	"BABEL_DATADIR", "BABEL_LIBDIR",
 	/* proxies, so PubChem library modes work behind one */
 	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy",
 	"no_proxy", NULL
