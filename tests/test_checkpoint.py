@@ -228,3 +228,20 @@ def test_rejected_score_is_cached(tmp_path, charged_pdbqt, monkeypatch, outdir):
         assert sorted(result, key=lambda r: r[0]) == [("good", -7.0), ("weak", None)]
         assert metrics["weak"]["status"].startswith("REJECTED")
     assert sorted(calls) == ["good", "weak"]  # the second run docked nothing
+
+
+def test_fingerprint_ignores_hydrogen_coordinates(tmp_path):
+    """obabel -p places rotatable polar H differently on every run; Vina ignores
+    H coordinates, so the run fingerprint (and the checkpoint) must too."""
+    from vspipeline import docking
+    grid = tmp_path / "grid.txt"
+    grid.write_text("center_x=0\ncenter_y=0\ncenter_z=0\nsize_x=20\nsize_y=20\nsize_z=20\n")
+    heavy = "ATOM      1  N   LYS A   1       1.000   2.000   3.000  0.00  0.00    -0.300 N \n"
+    h_at = lambda x: f"ATOM      2  H   LYS A   1    {x:8.3f}   2.000   3.000  0.00  0.00    +0.000 HD\n"
+    a, b, c = (tmp_path / n for n in ("a.pdbqt", "b.pdbqt", "c.pdbqt"))
+    a.write_text(heavy + h_at(1.5))
+    b.write_text(heavy + h_at(0.4))                      # hydrogen moved
+    c.write_text(heavy.replace("1.000", "1.200") + h_at(1.5))  # heavy atom moved
+    fp = lambda r: docking._run_fingerprint(str(r), str(grid), None, {"seed": 42})
+    assert fp(a) == fp(b)
+    assert fp(a) != fp(c)

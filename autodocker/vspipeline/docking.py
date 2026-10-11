@@ -652,6 +652,27 @@ def _file_sha256(path: Optional[str]) -> str:
     return h.hexdigest()
 
 
+def _receptor_sha256(path: Optional[str]) -> str:
+    """Hash of a receptor PDBQT with hydrogen coordinates left out.
+
+    Open Babel's pH protonation (-p) places rotatable polar hydrogens (Arg,
+    Lys, hydroxyl) at different positions on every run. Vina ignores hydrogen
+    coordinates (hydrogens only mark their heavy atom as a donor), so these
+    differences cannot change a result, but they would change a plain file
+    hash and make every resumed run discard its checkpoint.
+    """
+    if not path or not os.path.exists(path):
+        return ""
+    h = hashlib.sha256()
+    with open(path) as f:
+        for line in f:
+            if (line.startswith(("ATOM", "HETATM"))
+                    and line[77:79].strip() in ("H", "HD", "HS")):
+                line = line[:30] + line[54:]
+            h.update(line.encode())
+    return h.hexdigest()
+
+
 def _run_fingerprint(receptor: str, grid_file: str, flex_file: Optional[str],
                      vina_params: Dict) -> str:
     """Hash of everything that determines a ligand's docking result apart from
@@ -659,9 +680,9 @@ def _run_fingerprint(receptor: str, grid_file: str, flex_file: Optional[str],
     not depend on it."""
     params = {k: v for k, v in vina_params.items() if k != "threads"}
     payload = json.dumps({
-        "receptor": _file_sha256(receptor),
+        "receptor": _receptor_sha256(receptor),
         "grid": _file_sha256(grid_file),
-        "flex": _file_sha256(flex_file),
+        "flex": _receptor_sha256(flex_file),
         "params": params,
         "engines": [runner.VINA_PRIMARY, runner.VINA_FALLBACK],
     }, sort_keys=True, default=str)

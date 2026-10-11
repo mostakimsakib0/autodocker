@@ -73,6 +73,10 @@ screens that need comparable numbers.
   so the first 1.1.5 run on an old output directory docks every ligand again.
 - `scripts/patch.sh` stops the image build when a patch no longer applies.
 
+- The run fingerprint ignores receptor hydrogen coordinates: Open Babel's
+  pH protonation places rotatable polar hydrogens differently on every run,
+  which Vina ignores but which would otherwise invalidate every checkpoint.
+
 ### Added
 
 - `--ph` (receptor protonation pH, default 7.4) and `--grid-center-frame`.
