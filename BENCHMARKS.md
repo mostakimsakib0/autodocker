@@ -1,144 +1,219 @@
 # Benchmarks
 
-Scientific validation of the autodocker pipeline against known-good Vina
-results. All benchmarks are reproducible from committed scripts; the input
-datasets (PDBbind core set, DUD-E) are downloaded on demand.
+Validation of the AutoDocker pipeline: re-docking accuracy (J1), screening
+enrichment (J2), parity with the raw Vina binary (J3) and throughput (J4).
+All benchmarks are run by committed scripts in `scripts/`; the input
+datasets (CASF-2016 core-set entries from the RCSB PDB, DUD-E) are
+downloaded on demand. Each script writes its tables and a `summary.json`
+(protocol, tool versions, host) to its `--outdir`; the defaults below
+(`benchmarks/results/...`) are created by the run and are not part of the
+repository.
 
-Run the full suite:
+> **Status.** The protocols below were corrected after a review of the 1.1.x
+> benchmark scripts (EF definition, bootstrap resampling, failed-ligand
+> handling, top-1 RMSD alignment, success-rate denominators, timing
+> statistics). Numbers obtained with the 1.1.x scripts are withdrawn. Every
+> number on this page is a placeholder until the suite is rerun with
+> AutoDocker 1.2.0.
+
+Run the suite:
 
 ```bash
-python3 scripts/benchmark_redock.py --data-dir /tmp/opencode/bm/pdbbind_core_set_2016 \
-    --outdir benchmarks/results/redock --processes 8 --seed 42
-python3 scripts/benchmark_vina_parity.py --workdir benchmarks/results/redock \
-    --outdir benchmarks/results/parity
-python3 scripts/benchmark_enrichment.py --targets akt1,braf,aldr \
-    --workdir /tmp/opencode/dude --outdir benchmarks/results/enrichment \
-    --max-actives 50 --max-decoys 100 --exhaustiveness 4 \
-    --processes 8 --seed 42
+# J1 input: CASF-2016 core-set entries rebuilt from the RCSB PDB
+python3 scripts/fetch_casf_rcsb.py --outdir data/casf2016_rcsb \
+    --sample 40 --sample-seed 42
+python3 scripts/benchmark_redock.py --data-dir data/casf2016_rcsb \
+    --sample 40 --sample-seed 42 --outdir benchmarks/results/redock \
+    --processes 8 --threads 1 --seed 42
+# J3 re-runs the Vina commands logged by J1
+python3 scripts/benchmark_vina_parity.py \
+    --workdir benchmarks/results/redock/work --outdir benchmarks/results/parity
+python3 scripts/benchmark_enrichment.py \
+    --targets akt1,braf,cdk2,egfr,fa10,hivpr,andr,aldr,hmdh,aces \
+    --workdir data/dude --outdir benchmarks/results/enrichment \
+    --max-actives 50 --max-decoys 100 --exhaustiveness 4 --processes 8 --seed 42
 python3 scripts/benchmark_performance.py \
-    --receptor /tmp/opencode/dude/akt1/receptor.pdb \
-    --ligands /tmp/opencode/dude/akt1/ligands \
-    --sizes 10,25,50,100 --processes 1,2,4,8 \
+    --receptor data/dude/akt1/receptor.pdb --ligands data/dude/akt1/ligands \
+    --sizes 10,25,50,100 --processes 1,2,4,8 --repeats 3 \
     --exhaustiveness 2 --outdir benchmarks/results/performance
 ```
 
-## J1 — Re-docking (docking power) — PASS
+## J1 — Re-docking (docking power)
 
-**Protocol.** 40 PDBbind v2016 core-set complexes (crystal receptor + bound
-ligand) are re-docked with the autodocker pipeline. The grid is centered on
-the crystal-ligand heavy-atom centroid (size = max 22.5 Å, ligand extent +
-2×6 Å padding), exhaustiveness 8, up to 9 binding modes, energy range 3.0,
-fixed seed 42, `--no-fpocket`. Because the runner centers the receptor at the
-origin (`obabel -c`), both the grid center and the crystal-pose reference are
-translated into the centered frame. Success = predicted pose within 2 Å RMSD
-of the crystal pose (`obrms`). 14 complexes with >6000 receptor ATOM records
-(giant oligomeric assemblies) are skipped to keep the runtime reasonable.
+**Input.** `fetch_casf_rcsb.py` rebuilds core-set complexes from the
+deposited RCSB entries of the CASF-2016 core-set IDs
+(`benchmarks/data/casf2016_core_set.csv`). These are not the
+PDBbind-processed files, so results are not directly comparable with
+published CASF numbers. Per entry: first model; one alternate conformer per
+residue (blank/`A`, else highest occupancy); receptor = protein atoms plus
+metal ions (`--hetatm metals`); ligand = the crystal instance of the HET group
+whose heavy-atom formula matches the core-set SMILES and whose identity is
+confirmed by InChIKey connectivity block or heavy-atom graph isomorphism,
+with bond orders from the Chemical Component Dictionary (RCSB ModelServer).
+Peptide and multi-residue ligands cannot be built and are listed with the
+reason in `manifest.csv`.
 
-**Results** (26 docked, 0 failed):
+**Protocol.**
+
+| Item | Setting |
+|---|---|
+| Complexes | seeded random sample of the core set: `--sample 40 --sample-seed 42` (the same selection in both scripts); no receptor-size filter |
+| Start conformer | `--start-conformer rdkit` (default): one ETKDGv3 conformer from the CCD molecule (randomSeed 42, single thread, then MMFF94, at most 2000 iterations; deterministic for a given RDKit version), so ring conformations, bond lengths and angles do not come from the crystal pose. `--start-conformer crystal` reproduces the 1.1.x protocol for comparison |
+| Receptor | all chains; metal ions kept (runner `--detect-metals`) |
+| Box | cube centred on the crystal-ligand heavy-atom centroid, edge = max(22.5 Å, ligand extent + 2 × 6 Å), given in input-PDB coordinates |
+| Docking | Vina, seed 42, exhaustiveness 8, 9 modes, energy range 3 kcal/mol |
+| RMSD | `obrms`: heavy atoms, symmetry-corrected, no superposition, against the crystal pose moved into the docking frame with `frame_offset.txt` |
+| Top-1 | mode 1 (first MODEL). If its RMSD cannot be computed the complex is `rmsd_failed`; it is never replaced by mode 2 |
+| Success | RMSD ≤ 2.0 Å |
+
+A complex is reused on resume only if its stored `params.json` matches the
+current docking parameters.
+
+**Results** (AutoDocker 1.2.0, Vina version as recorded in `summary.json`):
 
 | Metric | Value |
 |---|---|
-| Success, top-1 pose (≤2 Å) | **76.9%** (20/26) |
-| Success, best-of-9 modes (≤2 Å) | **96.2%** (25/26) |
-| Median RMSD, top-1 | **0.79 Å** |
-| Median RMSD, best-of-9 | **0.79 Å** |
+| Complexes sampled / built / attempted / evaluated | TBD (rerun with 1.2.0) |
+| Excluded complexes (with reasons) | TBD (rerun with 1.2.0) |
+| Top-1 success, over evaluated complexes | TBD (rerun with 1.2.0) |
+| Top-1 success, over attempted complexes (failures count as misses) | TBD (rerun with 1.2.0) |
+| Best-of-9 success, over evaluated / attempted | TBD (rerun with 1.2.0) |
+| Median top-1 RMSD | TBD (rerun with 1.2.0) |
+| Median best-of-9 RMSD | TBD (rerun with 1.2.0) |
+| Top-1 success with `--start-conformer crystal` (comparison) | TBD (rerun with 1.2.0) |
 
-Both top-1 and best-mode success exceed the Vina baseline target of ≥60%,
-confirming that the pipeline does not degrade docking accuracy.
+Files: `results.csv` (per complex: status, ranking.csv affinity, mode-1
+affinity, top-1/best RMSD, RMSD of every mode, reason for any exclusion) and
+`summary.json` (counts with explicit denominators, medians, excluded
+complexes, protocol).
 
-Reproduce: `scripts/benchmark_redock.py`; per-complex data in
-`benchmarks/results/redock/{results.csv,summary.json}`.
+## J2 — DUD-E enrichment (screening power)
 
-## J2 — DUD-E enrichment (screening power) — PASS
+**Protocol.**
 
-**Protocol.** A curated, family-diverse set of DUD-E targets is screened:
-50 actives + 100 decoys per target (seeded sampling), prepared with Open
-Babel and docked through the autodocker pipeline at exhaustiveness 4,
-single mode, seeded, 8 processes. Receptor grid via fpocket with the
-bug-fixed frame alignment (`detect_pocket` grid center shifted into the
-centered receptor frame, see `runner.py::_receptor_centroid`). Metrics:
-AUC (tie-aware, P(active ranks above decoy)) with 95% bootstrap confidence
-intervals, enrichment factors EF1%/EF5%, and a one-sided Mann-Whitney U
-test (H1: actives rank better than decoys).
+| Item | Setting |
+|---|---|
+| Targets | akt1, braf, cdk2, egfr (kinases), fa10 (serine protease), hivpr (aspartic protease), andr (nuclear receptor), aldr, hmdh (reductases), aces (esterase) |
+| Ligands | per target a seeded sample of 50 actives and 100 decoys from DUD-E, converted to PDBQT with Open Babel; MOL2 intermediates kept out of the docked folder; conversion failures recorded (`convert_failures`) and replaced by the next ligand in the seeded order |
+| Receptor | DUD-E `receptor.pdb`, all chains (`--chain all`) |
+| Box | `--box-source crystal` (default): cube around DUD-E's `crystal_ligand.mol2`, same rule as J1 (max(22.5 Å, extent + 12 Å)), passed as `--grid-center/--grid-size`. `--box-source fpocket` reproduces the 1.1.x protocol (fpocket pocket; frame alignment in `protein.py::_receptor_centroid`) |
+| Docking | Vina, seed 42, exhaustiveness 4, 1 mode |
+| Failed ligands | every sampled ligand stays in N; a ligand without a usable score (docking failure, missing from `ranking.csv`) is ranked last, tied with the other failures; failures are counted per class |
 
-**Results** (150 ligands sampled per target; 4 outlier ligands in akt1
-scored as `FAILED` and excluded, i.e. 139/150 scored there; mean AUC
-0.740):
+**Metrics** (N ligands, n actives, n_top = ⌈xN⌉; lower score = better; ties
+resolved by their expected value under random tie-breaking, so no metric
+depends on input order):
 
-| Target | Family | AUC (95% CI) | EF1% | EF5% | p (M-W, one-sided) |
-|---|---|---|---|---|---|
-| akt1 | kinase | 0.764 (0.701–0.830) | 4.17 | 2.50 | 0.0 |
-| braf | kinase | 0.744 (0.681–0.800) | 4.00 | 2.00 | 1e-6 |
-| aldr | reductase | 0.712 (0.642–0.774) | 4.00 | 2.40 | 1.2e-5 |
+- ROC AUC (tie-aware; equals the Mann-Whitney U statistic / n·(N−n)).
+- EF at 1 % and 5 %: EF = (TP/n_top)/(n/N), reported with the maximum
+  achievable EF_max = (min(n_top, n)/n_top)/(n/N). With 150 ligands, n_top is
+  2 (1 %) and 8 (5 %); EF on fewer than 10 ligands is unstable and the script
+  says so.
+- BEDROC, α = 80.5 (Truchon & Bayly, *J. Chem. Inf. Model.* 2007, 47, 488).
+  With 50 actives in 150 ligands α·Rₐ ≈ 27 ≫ 1, so BEDROC saturates and is not
+  comparable with values from full DUD-E sets; the script warns.
+- ROC enrichment at 1 % and 5 % false-positive rate (TPR/FPR).
+- 95 % percentile-bootstrap CIs (`--ci`, `--bootstrap 1000`), stratified:
+  each replicate redraws the actives and the decoys separately, with
+  replacement, as (score, label) pairs.
+- One-sided Mann-Whitney U test (normal approximation, tie-corrected),
+  H1: actives score better than decoys. p-values are stored at full double
+  precision.
 
-All three comparisons are significant — clear separation of actives from
-decoys, in the range expected for Vina-based screening. This exercise also
-surfaced and fixed two runner bugs (blank chain-ID PDB handling in
-`prepare_receptor`, fpocket grid-frame mismatch) and, on the run itself,
-the resume fail-loud guard (`runner.py::dock_all`).
+**Results:**
 
-Note: the benchmark defaults to a 10-target curated set spanning kinases,
-a protease, a nuclear receptor, reductases and an esterase
-(`DEFAULT_TARGETS` in the script). Results above are from the subset that
-completed against the legacy DUD-E download server, which intermittently
-drops large file transfers. The full set is reproducible when the server
-is reachable.
+| Target | Family | N (failed act./dec.) | AUC (95 % CI) | EF1% (max) | EF5% (max) | BEDROC | p (M-W, one-sided) |
+|---|---|---|---|---|---|---|---|
+| akt1 | kinase | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
+| braf | kinase | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
+| cdk2 | kinase | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
+| egfr | kinase | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
+| fa10 | serine protease | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
+| hivpr | aspartic protease | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
+| andr | nuclear receptor | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
+| aldr | reductase | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
+| hmdh | reductase | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
+| aces | esterase | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
 
-Reproduce: `scripts/benchmark_enrichment.py`; results in
-`benchmarks/results/enrichment/{enrichment.csv,summary.json}`.
+Files: `enrichment.csv` (one row per target, all metrics and CIs),
+`<target>/metrics.csv` (ranked ligands incl. failures), `<target>/ranking.csv`
+(the pipeline's ranking) and `summary.json` (protocol and per-target records
+including warnings and conversion failures).
 
-## J3 — Raw Vina parity (no hidden corruption) — PASS
+`--ingest DIR` scores an external `ranking.csv` per target against the same
+prepared ligand set, so other docking pipelines can be compared on identical
+inputs.
 
-**Protocol.** For each of the 26 re-docked complexes, the exact `vina`
-command recorded in each `*_vina.log` header is re-executed against raw Vina
-1.2.5 (output to a temp file). The per-mode `REMARK VINA RESULT` affinities
-of the pipeline run and the raw run are compared mode-for-mode.
+## J3 — Parity with raw Vina
 
-**Result:** 26/26 complexes, all **222 modes** matched the raw Vina affinity
-exactly (`max_diff = 0.0 kcal/mol`). The pipeline passes Vina's own inputs
-through unchanged; every affinity number it reports is bit-for-bit the raw
-Vina score.
+**Protocol.** For every complex docked in J1, the Vina command recorded in
+`docked/*_vina.log` (the last `# Command:` line, i.e. the attempt that wrote
+the output) is re-executed with the raw binary, writing to a separate file.
+A complex passes when
 
-Reproduce: `scripts/benchmark_vina_parity.py`; per-complex data in
-`benchmarks/results/parity/parity.csv`.
+1. every mode's `REMARK VINA RESULT` affinity equals the pipeline output's,
+   and
+2. the affinity reported in `ranking.csv` equals the raw run's mode-1
+   `REMARK VINA RESULT` value, numerically and as a string at the precision
+   Vina printed.
 
-## J4 — Throughput & parallel scaling — PASS
+A complex that cannot be checked (missing log, binary failure, ligand absent
+from `ranking.csv`) counts as a failure, and a run that checks nothing fails.
+Whether the two output files are byte-identical is recorded as well. The
+binary's `--version` is stored in `summary.json`.
 
-**Protocol.** The pipeline is run on a fixed DUD-E receptor (akt1, fpocket
-grid, coherent ADMET + minimization preprocessing) against seeded,
-deterministic subsamples of 10/25/50/100 ligands, at exhaustiveness 2, 1
-binding mode, energy range 1.0, with 1/2/4/8 worker processes (8-core host,
-CPU-bound). Every docking call is seeded (`VS_SEED=42`), so results at a
-given size are comparisons of wall time, peak RSS, and throughput, not of
-docking accuracy.
+**Results:**
 
-**Results** (all 16 cells, 0 failures, 100% of ligands docked):
+| Metric | Value |
+|---|---|
+| Complexes checked / passed | TBD (rerun with 1.2.0) |
+| Modes compared / matched | TBD (rerun with 1.2.0) |
+| ranking.csv equals raw mode 1 | TBD (rerun with 1.2.0) |
+| Output files byte-identical | TBD (rerun with 1.2.0) |
+| Vina binary and version | TBD (rerun with 1.2.0) |
+
+Files: `parity.csv`, `summary.json`.
+
+## J4 — Throughput and parallel scaling
+
+**Protocol.** The pipeline is run on the akt1 DUD-E receptor (fpocket box)
+with seeded subsamples of 10/25/50/100 prepared ligands, exhaustiveness 2,
+one mode, at 1/2/4/8 worker processes; each cell is run 3 times
+(`--repeats 3`), interleaved across cells. Recorded per run: wall time,
+split into preparation (start to the runner's docking step), docking and
+post-processing from the time-stamped runner log; peak memory of the whole
+process tree (summed RSS and, where readable, summed PSS, sampled every
+0.5 s); the largest single process (`ru_maxrss`); Vina threads per process
+(the `--cpu` value in the logged command; by default the runner gives each
+of `-p N` processes cores/N threads). Per cell: median and range of the wall
+time, throughput from the median, speedup vs. `-p 1` at the same library
+size and parallel efficiency (speedup / p). `summary.json` records the
+logical and physical core counts, CPU model, Vina and AutoDocker versions.
+
+**Results:**
 
 | Size | p=1 | p=2 | p=4 | p=8 |
 |---|---|---|---|---|
-| 10  | 314.9 s · 1.91/min | 204.9 s · 2.93/min | 272.7 s · 2.20/min | 276.4 s · 2.17/min |
-| 25  | 750.7 s · 2.00/min | 399.6 s · 3.75/min | 341.4 s · 4.39/min | 343.4 s · 4.37/min |
-| 50  | 1284.0 s · 2.34/min | 733.4 s · 4.09/min | 694.4 s · 4.32/min | 667.5 s · 4.49/min |
-| 100 | 2440.1 s · 2.46/min | 1583.2 s · 3.79/min | 1320.5 s · 4.54/min | 1211.9 s · 4.95/min |
+| 10 | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
+| 25 | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
+| 50 | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
+| 100 | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) | TBD (rerun with 1.2.0) |
 
-**Interpretation.** Parallel scaling is real but plateaus at ~4×
-throughput on this 8-core host: moving from 1→2 processes typically doubles
-throughput (e.g. 1.91→2.93/min at 10 ligands), while 4→8 processes add
-~10%. The host is CPU-bound: these runs predate the `--cpu` fix, so every
-Vina process tried to use all eight cores and extra workers mostly competed
-for the same cores. From the next release, `-p N` gives each Vina process
-`cores / N` threads by default; seeded output is identical for any `--cpu`.
-Larger libraries amortize fixed receptor-prep costs, so per-ligand
-throughput rises with size (1.91→2.46/min single-core from 10→100 ligands).
-Peak RSS grows only modestly with size (588→741 MB), confirming the
-library is streamed per-process rather than held in memory in full.
+(each cell: median wall time [min–max], throughput, speedup vs. p=1)
 
-Reproduce: `scripts/benchmark_performance.py`; results in
-`benchmarks/results/performance/{performance.csv,summary.json}`.
+| Metric | Value |
+|---|---|
+| Fixed preparation time (median) | TBD (rerun with 1.2.0) |
+| Peak process-tree memory (RSS / PSS) | TBD (rerun with 1.2.0) |
+| Host (logical / physical cores, CPU model) | TBD (rerun with 1.2.0) |
 
----
+Files: `runs.csv` (every run), `performance.csv` (per cell), `summary.json`.
 
-**Environment:** host Vina 1.2.5 (multithreaded via `--cpu`, which AutoDocker
-did not yet pass; docking parallelism = up to 8 processes; perf runs used Vina ex2), Open Babel 3.x, `obrms`, Linux
-x86-64, 8 vCPU, 2 concurrent FPU-heavy runs not run back-to-back with the
-timing cells. Result files are deterministic for fixed seeds.
+## Environment
+
+Record the environment from the `summary.json` files of the rerun: AutoDocker
+version (`runner.py --version`), Vina version (`vina --version` of the binary
+used; the Docker image builds Vina 1.2.7), Open Babel version, RDKit version
+(J1 start conformers), host CPU and core counts. Benchmarks are deterministic
+for fixed seeds on a given software stack (see `docs/reproducibility.md`),
+except wall times.

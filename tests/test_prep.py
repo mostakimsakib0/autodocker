@@ -10,10 +10,40 @@ pytestmark = pytest.mark.skipif(
     obabel is None, reason="Open Babel not available on PATH")
 
 
+# Ethanol with fixed 3D coordinates (RDKit ETKDGv3, randomSeed 42, MMFF94).
+# A committed geometry keeps these tests fast and independent of the
+# unseeded ``obabel --gen3d``.
+ETHANOL_SDF = """ethanol
+     RDKit          3D
+
+  9  8  0  0  0  0  0  0  0  0999 V2000
+   -0.8871    0.1751   -0.0125 C   0  0  0  0  0  0  0  0  0  0  0  0
+    0.4605   -0.5155   -0.0465 C   0  0  0  0  0  0  0  0  0  0  0  0
+    1.4430    0.3073    0.5656 O   0  0  0  0  0  0  0  0  0  0  0  0
+   -0.8475    1.1278   -0.5508 H   0  0  0  0  0  0  0  0  0  0  0  0
+   -1.6588   -0.4533   -0.4658 H   0  0  0  0  0  0  0  0  0  0  0  0
+   -1.1769    0.4037    1.0183 H   0  0  0  0  0  0  0  0  0  0  0  0
+    0.7687   -0.7243   -1.0755 H   0  0  0  0  0  0  0  0  0  0  0  0
+    0.4195   -1.4621    0.5002 H   0  0  0  0  0  0  0  0  0  0  0  0
+    1.4786    1.1415    0.0671 H   0  0  0  0  0  0  0  0  0  0  0  0
+  1  2  1  0
+  2  3  1  0
+  1  4  1  0
+  1  5  1  0
+  1  6  1  0
+  2  7  1  0
+  2  8  1  0
+  3  9  1  0
+M  END
+$$$$
+"""
+
+
 def _make_ethanol_sdf(tmp_path):
-    """Build an ethanol SDF via obabel (has nonzero partial charges)."""
+    """Write a 3D ethanol SDF (gets nonzero Gasteiger charges)."""
     path = str(tmp_path / "ethanol.sdf")
-    runner.run([runner.OBABEL, "-:CCO", "-osdf", "-O", path, "--gen3d"])
+    with open(path, "w") as f:
+        f.write(ETHANOL_SDF)
     return path
 
 
@@ -29,7 +59,7 @@ def test_sdf_to_pdbqt_with_charges(tmp_path):
 
 def test_mol2_to_pdbqt_with_charges(tmp_path):
     mol2 = str(tmp_path / "ethanol.mol2")
-    runner.run([runner.OBABEL, "-:CCO", "-omol2", "-O", mol2, "--gen3d"])
+    runner.run([runner.OBABEL, "-isdf", _make_ethanol_sdf(tmp_path), "-omol2", "-O", mol2])
     out = str(tmp_path / "ligand.pdbqt")
     runner.run([runner.OBABEL, "-imol2", mol2, "-opdbqt", "-O", out,
                 "--partialcharge", "gasteiger"])
