@@ -3,7 +3,9 @@ reading of the command line (with a stub in place of runner.py)."""
 import os
 import re
 import shutil
+import signal
 import subprocess
+import time
 
 import pytest
 
@@ -113,16 +115,21 @@ def entry(tmp_path):
     (tmp_path / "other").mkdir()
     (tmp_path / "other" / "b.pdbqt").write_text("x\n")
 
-    def run(*args, env=None):
+    def environment(env=None):
         base = {k: v for k, v in os.environ.items()
                 if k not in ("INPUT", "LIGS", "PDB", "LIPINSKI", "ADMET")}
+        return {**base, **(env or {})}
+
+    def run(*args, env=None):
         proc = subprocess.run(["bash", str(bindir / "entry.sh"), *args],
-                              env={**base, **(env or {})}, capture_output=True,
+                              env=environment(env), capture_output=True,
                               text=True, timeout=60)
         return proc.returncode, proc.stdout + proc.stderr
 
     run.ws = ws
     run.tmp = tmp_path
+    run.bindir = bindir
+    run.environment = environment
     return run
 
 
@@ -217,3 +224,42 @@ def test_entry_passes_runner_exit_code(entry):
 def test_entry_lipinski_switch(entry):
     code, out = entry(env={"LIPINSKI": "0"})
     assert code == 0 and "--no-lipinski" in _stub_args(out)
+
+
+# A runner that reports when it is running and records the signal it gets.
+SIGNAL_STUB_RUNNER = """#!/bin/bash
+trap 'echo TERM > "$STUB_DIR/signal"; exit 143' TERM
+trap 'echo INT > "$STUB_DIR/signal"; exit 130' INT
+touch "$STUB_DIR/running"
+for _ in $(seq 600); do sleep 0.1; done
+exit 0
+"""
+
+
+@pytest.mark.parametrize("sig, code", [(signal.SIGTERM, 143), (signal.SIGINT, 130)])
+def test_entry_forwards_signals_to_the_runner(entry, sig, code):
+    """docker stop sends SIGTERM to entry.sh (through aclmgr); bash would not
+    pass it on to a foreground child, so the runner never saw it. entry.sh
+    forwards SIGTERM and SIGINT to the runner as SIGTERM (a background child
+    ignores SIGINT) and exits with 143 or 130."""
+    runner_stub = entry.bindir / "runner.py"
+    runner_stub.write_text(SIGNAL_STUB_RUNNER, encoding="utf-8")
+    stub_dir = entry.tmp / "stub"
+    stub_dir.mkdir()
+    proc = subprocess.Popen(["bash", str(entry.bindir / "entry.sh")],
+                            env=entry.environment({"STUB_DIR": str(stub_dir)}),
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        deadline = time.monotonic() + 30
+        while not (stub_dir / "running").exists():
+            assert proc.poll() is None and time.monotonic() < deadline, "runner did not start"
+            time.sleep(0.05)
+        proc.send_signal(sig)
+        out, _ = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    assert (stub_dir / "signal").read_text().strip() == "TERM"
+    assert proc.returncode == code, out
+    assert "Pipeline Completed" not in out

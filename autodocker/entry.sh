@@ -261,10 +261,31 @@ if [ "${NO_MINIMIZE:-0}" = "1" ]; then
 	CMD+=(--no-minimize)
 fi
 
+# The runner runs in the background so that SIGTERM (docker stop, forwarded
+# by aclmgr) and SIGINT reach it: bash runs a trap only after its foreground
+# child has exited, so a foreground runner would never see them. Both are
+# forwarded as SIGTERM, which the runner handles like Ctrl-C (checkpoint
+# kept, run_manifest.json status "interrupted", exit 143); a background
+# child of a non-interactive shell ignores SIGINT. "wait" returns early when
+# a trapped signal arrives, so it is repeated until the runner has exited.
+rc=0
+signal_name=""
+"${CMD[@]}" "$@" &
+pid=$!
+trap 'signal_name=TERM; kill -TERM "$pid" 2>/dev/null || true' TERM
+trap 'signal_name=INT; kill -TERM "$pid" 2>/dev/null || true' INT
+while kill -0 "$pid" 2>/dev/null; do
+	wait "$pid" || true
+done
+wait "$pid" || rc=$?
+trap - TERM INT
+# Exit codes as for a signal received directly: 143 (SIGTERM), 130 (SIGINT).
+if [ "$signal_name" = "INT" ] && [ "$rc" -eq 143 ]; then
+	rc=130
+fi
+
 # Exit code 3: outputs were written, but more ligands failed to dock than
 # --max-failure-fraction allows; report the outputs, then exit with 3.
-rc=0
-"${CMD[@]}" "$@" || rc=$?
 if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
 	exit "$rc"
 fi
