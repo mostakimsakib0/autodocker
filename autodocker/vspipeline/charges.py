@@ -176,7 +176,9 @@ def _fix_pdbqt_charges(pdbqt_file: str, source_file: str,
     already has 3D coordinates (rebuilt from itself); else ``source_file``.
     ``--gen3d`` is added when ``gen3d`` is True, or, when ``gen3d`` is None,
     when the chosen input has no 3D coordinates (2D SDF, flat PDB), so a 2D
-    source is never docked flat.
+    source is never docked flat. ``gen3d=False`` never adds it: the ligand
+    preparation passes False, because it gives every 2D input seeded RDKit
+    coordinates first and ``--gen3d`` is not reproducible.
 
     All-zero charges after the rebuild (pure hydrocarbons once nonpolar
     hydrogens are merged, e.g. benzene) are accepted with a warning: the

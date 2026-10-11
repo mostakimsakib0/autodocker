@@ -8,11 +8,16 @@ import logging
 import math
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from vspipeline import defaults  # noqa: E402
 from vspipeline import outputs  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# Chain ID a blank PDB chain column is read as (protein.BLANK_CHAIN_ID,
+# utils.DEFAULT_CHAIN); repeated here so this module imports nothing that
+# imports runner.
+BLANK_CHAIN = "A"
 
 # PDBQT hydrogen atom types; hydrogens do not count towards residue distances.
 _PDBQT_HYDROGEN_TYPES = ("H", "HD", "HS")
@@ -46,8 +51,7 @@ def detect_flexible_residues(pdbqt_file: str, binding_site_coords: Tuple[float, 
                 continue
             dist = math.sqrt((x - cx) ** 2 + (y - cy) ** 2 + (z - cz) ** 2)
             if dist <= radius:
-                res_key = (f"{line[21].strip()}{line[22:26].strip()}"
-                           f"{line[26:27].strip()}")
+                res_key = format_residue_key(line[21], line[22:26], line[26:27])
                 residues[res_key] = min(dist, residues.get(res_key, dist))
 
     sorted_residues = sorted(residues.items(), key=lambda x: (x[1], x[0]))
@@ -114,18 +118,92 @@ def _pdbqt_atom_element(atom_type: str) -> str:
     return "C"
 
 
+# Residue keys: [chain]resnum[icode] with a letter chain ('A45', 'a45',
+# 'A100B'), chain:resnum[icode] for any chain character ('1:45', 'A:45'), or
+# resnum[icode] alone for the blank chain ('45'). Chains are case-sensitive.
+_RESIDUE_KEY = re.compile(
+    r"^(?:(?P<sep_chain>[^\s:,]):(?P<sep_num>-?\d+)(?P<sep_icode>[A-Za-z]?)"
+    r"|(?P<chain>[A-Za-z]?)(?P<num>-?\d+)(?P<icode>[A-Za-z]?))$")
+
+
 def _parse_residue_key(key: str) -> Optional[Tuple[str, str]]:
-    """Parse a residue key like 'A45' (or 'A100B' with an insertion code, or
-    '45' for a blank chain) into (chain, resnum-with-icode)."""
-    match = re.match(r"^([A-Za-z]?)(-?\d+)([A-Za-z]?)$", key.strip())
+    """Parse a residue key into (chain, resnum-with-icode), or None.
+
+    'A45' -> ('A', '45'); 'a45' -> ('a', '45') (chain IDs are
+    case-sensitive, as for --chain); 'A100B' -> ('A', '100B'); '1:45' ->
+    ('1', '45') (the separator form addresses any chain, including digit
+    chains); '45' -> ('', '45'), the blank chain. A blank chain is read as
+    chain A everywhere (see ``chain_matches``), so 'A45' and '45' address
+    the same residue of a blank-chain receptor.
+    """
+    match = _RESIDUE_KEY.match(key.strip())
     if not match:
         return None
-    return match.group(1).upper(), match.group(2) + match.group(3).upper()
+    if match.group("sep_num") is not None:
+        return (match.group("sep_chain"),
+                match.group("sep_num") + match.group("sep_icode").upper())
+    return match.group("chain"), match.group("num") + match.group("icode").upper()
+
+
+def _record_chain(chain_column: str) -> str:
+    """A PDB/PDBQT chain column as AutoDocker reads it: as written, a blank
+    column as ``BLANK_CHAIN``."""
+    return chain_column.strip() or BLANK_CHAIN
+
+
+def chain_matches(chain_column: str, key_chain: str) -> bool:
+    """True if a record's chain column (PDB column 22) is the chain of a
+    parsed residue key. Exact and case-sensitive; a blank column and an
+    empty key chain both mean ``BLANK_CHAIN``, as in receptor preparation."""
+    return _record_chain(chain_column) == (key_chain or BLANK_CHAIN)
+
+
+def residue_identity(key: str) -> Optional[Tuple[str, str]]:
+    """(chain as read, resnum-with-icode) of a residue key, so that '45' and
+    'A45' (the blank chain read as A) are the same residue; None if invalid."""
+    parsed = _parse_residue_key(key)
+    if parsed is None:
+        return None
+    chain, resnum = parsed
+    return chain or BLANK_CHAIN, resnum
+
+
+def format_residue_key(chain_column: str, resnum: str, icode: str = "") -> str:
+    """Residue key of a record that ``_parse_residue_key`` reads back: chain
+    + resnum (+ icode) for a letter chain, resnum alone for a blank chain,
+    chain:resnum for any other chain character (e.g. a digit)."""
+    chain = chain_column.strip()
+    rest = f"{resnum.strip()}{icode.strip()}"
+    if not chain or chain.isalpha():
+        return f"{chain}{rest}"
+    return f"{chain}:{rest}"
+
+
+def missing_residues(lines: Iterable[str], selected_chains: Sequence[str],
+                     keys: Iterable[str]) -> List[str]:
+    """The residue keys among ``keys`` with no ATOM/HETATM record in
+    ``lines`` within ``selected_chains`` (chain IDs as reported by
+    ``get_chains``, a blank chain as ``BLANK_CHAIN``). Uses the same matching
+    as flexible-residue building; invalid keys count as missing."""
+    present = set()
+    for line in lines:
+        if line.startswith(("ATOM", "HETATM")) and len(line) > 26:
+            chain = _record_chain(line[21])
+            if chain in selected_chains:
+                present.add((chain, line[22:27].strip()))
+    missing = []
+    for key in keys:
+        identity = residue_identity(key)
+        if identity is None or not any(
+                c == identity[0] and _resnum_matches(r, identity[1]) for c, r in present):
+            missing.append(key)
+    return missing
 
 
 def _residue_atoms_from_pdbqt(pdbqt_file: str,
                               key: str) -> List[Dict]:
-    """Collect PDBQT atoms belonging to a residue identified by 'A45'."""
+    """Collect PDBQT atoms belonging to a residue identified by a key such
+    as 'A45' (see ``_parse_residue_key``; chains match exactly)."""
     parsed = _parse_residue_key(key)
     if parsed is None:
         logger.warning(f"[!] Invalid residue key '{key}' (expected e.g. A45)")
@@ -136,9 +214,8 @@ def _residue_atoms_from_pdbqt(pdbqt_file: str,
         for line in f:
             if not line.startswith(("ATOM", "HETATM")):
                 continue
-            atom_chain = line[21].strip().upper()
             atom_resnum = line[22:27].strip()
-            if atom_chain != chain:
+            if not chain_matches(line[21], chain):
                 continue
             if not _resnum_matches(atom_resnum, resnum):
                 continue
@@ -294,8 +371,9 @@ def build_flexible_residue_pdbqt(receptor_pdbqt: str, residues: List[str],
                                  built: Optional[List[str]] = None) -> Optional[str]:
     """Build a Vina flexible-receptor PDBQT for the given residue keys.
 
-    Residues are given as e.g. ``['A45', 'B102']``; a residue given twice
-    is built once. Returns the flex file path, or None (and no file) if no
+    Residues are given as e.g. ``['A45', 'B102', '1:45']`` (see
+    ``_parse_residue_key``); a residue given twice (also as '45' and 'A45'
+    for a blank chain) is built once and both keys count as built. Returns the flex file path, or None (and no file) if no
     residue could be converted. The file's REMARK lists the residues
     actually written. When ``built`` is given, the keys of those residues
     are appended to it, so only they are removed from the rigid receptor.
@@ -306,14 +384,19 @@ def build_flexible_residue_pdbqt(receptor_pdbqt: str, residues: List[str],
     flex_file = os.path.join(outdir, outputs.FLEX_PDBQT)
     blocks = []
     written_keys = []
-    seen = set()
+    aliases = []  # keys naming a residue given earlier under another key
+    seen = {}
     for key in residues:
         key = key.strip()
-        parsed_key = _parse_residue_key(key)
-        if parsed_key is not None and parsed_key in seen:
-            logger.warning(f"[!] Residue '{key}' given more than once; using it once")
+        identity = residue_identity(key)
+        if identity is not None and identity in seen:
+            logger.warning(f"[!] Residue '{key}' given more than once (as "
+                           f"'{seen[identity]}'); using it once")
+            if key != seen[identity]:
+                aliases.append((key, seen[identity]))
             continue
-        seen.add(parsed_key)
+        if identity is not None:
+            seen[identity] = key
         atoms = _residue_atoms_from_pdbqt(receptor_pdbqt, key)
         if not atoms:
             logger.warning(
@@ -333,6 +416,7 @@ def build_flexible_residue_pdbqt(receptor_pdbqt: str, residues: List[str],
             dst.writelines(blocks)
         if built is not None:
             built.extend(written_keys)
+            built.extend(alias for alias, first in aliases if first in written_keys)
 
     if written == 0:
         logger.warning("[!] No flexible residues could be built; flex docking disabled")
@@ -358,9 +442,9 @@ def _remove_residues_from_pdbqt(receptor_pdbqt: str, residues: List[str],
     """
     keys = []
     for key in residues:
-        parsed = _parse_residue_key(key)
-        if parsed is not None:
-            keys.append(parsed)
+        identity = residue_identity(key)
+        if identity is not None:
+            keys.append(identity)
 
     flex_atoms = None
     if flex_file and os.path.exists(flex_file):
@@ -368,7 +452,7 @@ def _remove_residues_from_pdbqt(receptor_pdbqt: str, residues: List[str],
         with open(flex_file, encoding="utf-8") as f:
             for line in f:
                 if line.startswith(("ATOM", "HETATM")):
-                    flex_atoms.add((line[6:11].strip(), line[21].strip().upper(),
+                    flex_atoms.add((line[6:11].strip(), _record_chain(line[21]),
                                     line[22:27].strip()))
 
     removed = 0
@@ -376,7 +460,7 @@ def _remove_residues_from_pdbqt(receptor_pdbqt: str, residues: List[str],
     with open(receptor_pdbqt, "r", encoding="utf-8") as src:
         for line in src:
             if line.startswith(("ATOM", "HETATM")):
-                chain = line[21].strip().upper()
+                chain = _record_chain(line[21])
                 resnum = line[22:27].strip()
                 if flex_atoms is not None:
                     drop = (line[6:11].strip(), chain, resnum) in flex_atoms

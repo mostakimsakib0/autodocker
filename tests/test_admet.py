@@ -38,11 +38,26 @@ def test_is_valid_sdf_missing(tmp_path):
     assert not ok
 
 
-def test_is_valid_sdf_too_small(tmp_path):
+def test_is_valid_sdf_garbage_and_empty(tmp_path):
     p = tmp_path / "a.sdf"
     p.write_text("x")
     ok, msg = admet._is_valid_sdf(str(p))
-    assert not ok and "too small" in msg
+    assert not ok and "M  END" in msg
+    p.write_text("")
+    ok, msg = admet._is_valid_sdf(str(p))
+    assert not ok and "empty" in msg
+
+
+def test_is_valid_sdf_accepts_tiny_molecule(tmp_path):
+    """L6: a complete molblock of under 100 bytes (methane) is valid; there
+    is no byte threshold, only the parse checks."""
+    p = tmp_path / "methane.sdf"
+    p.write_text("CH4\n\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n"
+                 "    0.0000    0.0000    0.0000 C   0  0\nM  END\n$$$$\n")
+    assert p.stat().st_size < 100
+    ok, msg = admet._is_valid_sdf(str(p))
+    assert ok, msg
+    assert not hasattr(admet, "MIN_SDF_BYTES")
 
 
 def test_is_valid_sdf_no_mend(tmp_path):
