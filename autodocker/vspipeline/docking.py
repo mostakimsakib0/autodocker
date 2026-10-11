@@ -1034,7 +1034,7 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
                 f"seed={vina_params['seed']}, "
                 f"cpu_per_process={vina_params.get('threads') or 'all'}, "
                 f"accepted window: {window_text(min_valid_affinity)}")
-    logger.info(f"[*] Engines: " + ", ".join(
+    logger.info("[*] Engines: " + ", ".join(
         f"{label}={path}" for path, label in engine.docking_engines())
         + f"; timeout={engine.timeout}s")
     if num_processes > 1:

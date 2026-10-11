@@ -184,7 +184,7 @@ def parse_vina_models(pdbqt_path):
     without flexible-residue blocks) and ``heavy_coords``. A file without
     MODEL records is treated as a single model.
     """
-    models, current, in_model, in_flex = [], None, False, False
+    models, current, in_flex = [], None, False
     seen_model = False
 
     def new_model():
@@ -200,13 +200,13 @@ def parse_vina_models(pdbqt_path):
         for raw in f:
             line = raw.rstrip("\n")
             if line.startswith("MODEL"):
-                current, in_model, in_flex = new_model(), True, False
+                current, in_flex = new_model(), False
                 seen_model = True
                 continue
             if line.startswith("ENDMDL"):
                 if current is not None:
                     close(current)
-                current, in_model = None, False
+                current = None
                 continue
             if current is None:
                 if seen_model or not line.strip():

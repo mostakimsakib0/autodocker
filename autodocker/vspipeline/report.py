@@ -610,7 +610,6 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
     failed_count = len(ligands) - len(valid_affinities) - out_of_window_count
     avg_affinity = statistics.mean(valid_affinities) if valid_affinities else 0.0
     best_affinity = min(valid_affinities) if valid_affinities else 0.0
-    worst_affinity = max(valid_affinities) if valid_affinities else 0.0
     strong_binders = sum(1 for a in valid_affinities if a < STRONG_BINDER_CUTOFF)
     success_rate = (len(valid_affinities) / len(ligands) * 100) if ligands else 0.0
 

@@ -1,5 +1,4 @@
 import os
-import shutil
 
 import pytest
 
@@ -141,49 +140,8 @@ def test_build_vina_command_no_threads_by_default():
     assert "--threads" not in cmd and "--cpu" not in cmd
 
 
-DATA = os.path.join(os.path.dirname(__file__), "data", "core")
-FIXTURE_LIGANDS = ("butanoic_acid", "phenylethanol", "ibuprofen")
-
-
-def test_parallel_equals_serial(tmp_path):
-    """Regression for C4: same inputs + seed give byte-identical poses and
-    scores with -p 1 and -p 2. Real 3D ligands with torsions (RDKit ETKDG,
-    randomSeed=42, MMFF; obabel -> PDBQT; committed under tests/data/core)."""
-    if shutil.which("vina") is None:
-        pytest.skip("vina not available")
-    receptor = os.path.join(DATA, "receptor.pdbqt")
-    grid = str(tmp_path / "grid.conf")
-    with open(grid, "w") as f:
-        f.write("center_x = 0.1\ncenter_y = 0.0\ncenter_z = 0.15\n"
-                "size_x = 18\nsize_y = 18\nsize_z = 18\n")
-    vina_params = {"exhaustiveness": 1, "binding_modes": 3, "energy_range": 2.0,
-                   "seed": 42, "min_valid_affinity": 0.0}
-    engine = docking.EngineConfig(vina_primary=shutil.which("vina"),
-                                  vina_fallback=shutil.which("vina"), timeout=300)
-
-    def run_dock(np_):
-        outdir = str(tmp_path / f"out_{np_}")
-        ligdir = tmp_path / f"ligs_{np_}"
-        ligdir.mkdir()
-        ligs = []
-        for n in FIXTURE_LIGANDS:
-            shutil.copy(os.path.join(DATA, n + ".pdbqt"), ligdir / (n + ".pdbqt"))
-            ligs.append(str(ligdir / (n + ".pdbqt")))
-        results, _, metrics = docking.dock_all(
-            receptor, ligs, grid, outdir, num_processes=np_, resume=False,
-            vina_params=vina_params, engine=engine)
-        assert len(results) == len(FIXTURE_LIGANDS)
-        assert all(score is not None for _, score in results), metrics
-        poses = {}
-        for n in FIXTURE_LIGANDS:
-            with open(os.path.join(outdir, "docked", n + "_out.pdbqt"), "rb") as f:
-                poses[n] = f.read()
-        return sorted(results), poses
-
-    serial, serial_poses = run_dock(1)
-    parallel, parallel_poses = run_dock(2)
-    assert serial == parallel
-    assert serial_poses == parallel_poses
+# Serial vs parallel docking of real ligands (byte-identical poses and
+# scores) is tested in test_e2e.py (test_process_count_does_not_change_results).
 
 
 # ---------------------------------------------------------------------------

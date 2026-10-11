@@ -22,7 +22,6 @@ The pipeline runs five stages:
 Run ``runner.py --help`` for the options.
 """
 import argparse
-import csv
 import hashlib
 import json
 import logging

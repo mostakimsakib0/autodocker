@@ -674,6 +674,7 @@ def _spread(path):
     return library._pdbqt_coordinate_spread(path)
 
 
+@pytest.mark.slow
 @needs_obabel
 def test_minimization_is_repeatable_with_real_obabel(tmp_path):
     sdf = tmp_path / "aspirin.sdf"
@@ -723,6 +724,7 @@ def test_prepared_ligands_have_3d_extent_with_real_obabel(tmp_path):
         assert min(_spread(path)) > 0.5, path
 
 
+@pytest.mark.slow
 @needs_obabel
 def test_pdb_ligand_gets_charged_polar_hydrogens_with_real_obabel(tmp_path):
     """A heavy-atom-only PDB ligand is docked with its polar hydrogens, which

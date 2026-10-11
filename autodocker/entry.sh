@@ -203,9 +203,13 @@ if [ -n "${CHAIN:-}" ]; then
 	CMD+=(--chain "$CHAIN")
 fi
 
-# ADMET filtering is ON by default (matches runner.py); set ADMET=0 to disable.
+# The Lipinski rule-of-five filter is ON by default (matches runner.py); set
+# LIPINSKI=0 to disable it. ADMET=0 is the deprecated name of the same switch.
 if [ "${ADMET:-1}" = "0" ]; then
-	CMD+=(--no-admet)
+	echo "[!] ADMET=0 is deprecated; use LIPINSKI=0"
+fi
+if [ "${LIPINSKI:-1}" = "0" ] || [ "${ADMET:-1}" = "0" ]; then
+	CMD+=(--no-lipinski)
 fi
 
 # Checkpoint resume is ON by default; set RESUME=0 to force a fresh run.
@@ -221,10 +225,20 @@ if [ "${NO_MINIMIZE:-0}" = "1" ]; then
 	CMD+=(--no-minimize)
 fi
 
-"${CMD[@]}" "$@"
+# Exit code 3: outputs were written, but more ligands failed to dock than
+# --max-failure-fraction allows; report the outputs, then exit with 3.
+rc=0
+"${CMD[@]}" "$@" || rc=$?
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
+	exit "$rc"
+fi
 
 echo "======================================"
-echo " Pipeline Completed Successfully"
+if [ "$rc" -eq 3 ]; then
+	echo " Pipeline completed, but too many ligands failed to dock (exit 3)"
+else
+	echo " Pipeline Completed Successfully"
+fi
 echo "======================================"
 echo ""
 echo "Results saved to: $OUT"
@@ -237,6 +251,9 @@ OUTPUTS=(
 	"metrics.txt|Pose metrics"
 	"pocket_summary.csv|fpocket pocket scores"
 	"ligand_metadata.json|ligand descriptors and source files"
+	"run_manifest.json|versions, settings and checksums of this run"
+	"consensus_ranking.csv|Vina and SMINA (Vinardo) scores"
+	"consensus_summary.json|Vina/SMINA Spearman rho"
 	"grid_box.pml|PyMOL grid visualization"
 	"results_report.html|Self-contained HTML report"
 	"docked/|Docked poses"
@@ -247,3 +264,4 @@ for entry in "${OUTPUTS[@]}"; do
 		echo "  - $name: ${entry#*|}"
 	fi
 done
+exit "$rc"

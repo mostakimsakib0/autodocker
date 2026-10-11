@@ -1,12 +1,11 @@
 import os
-import shutil
 import sys
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "autodocker"))
 
-import runner
+import runner  # noqa: F401  (imported first, so vspipeline binds this module)
 
 
 def _write(path, content):

@@ -62,10 +62,8 @@ jobs:
       - name: ruff (syntax errors, Python 3.9 target) - blocking
         run: ruff check --output-format=github --select E9 .
 
-      # Non-blocking until the unused-import cleanup lands; configuration in
-      # ruff.toml (rules F and E9). Remove continue-on-error once it passes.
-      - name: ruff (pyflakes) - non-blocking
-        continue-on-error: true
+      # Configuration in ruff.toml (rules F and E9).
+      - name: ruff (pyflakes) - blocking
         run: ruff check --output-format=github .
 
       - name: shellcheck
@@ -122,6 +120,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pytest
 
+      # Slow tests (real docking/minimization, marked "slow") run here too.
       - name: Run test suite
         run: python -m pytest tests/ -q -rs
         env:

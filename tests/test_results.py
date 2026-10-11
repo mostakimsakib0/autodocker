@@ -1,6 +1,5 @@
 import os
 
-import pytest
 
 import vspipeline.results as res
 

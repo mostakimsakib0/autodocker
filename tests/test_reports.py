@@ -1,7 +1,6 @@
 import csv
 import os
 
-import pytest
 
 import runner
 
