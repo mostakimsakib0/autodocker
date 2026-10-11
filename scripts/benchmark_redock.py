@@ -312,9 +312,9 @@ def main(argv=None):
                     help="Dir with one sub-dir per PDB ID (fetch_casf_rcsb.py output "
                          "or extracted PDBbind core set)")
     ap.add_argument("--pdbids", help="Comma-separated PDB IDs (overrides --sample)")
-    ap.add_argument("--sample", type=int, default=40,
-                    help="Seeded random sample size from --ids-csv (default 40; "
-                         "0 = the whole core set)")
+    ap.add_argument("--sample", type=int, default=_benchlib.BENCH_SAMPLE_SIZE,
+                    help="Seeded random sample size from --ids-csv (default "
+                         f"{_benchlib.BENCH_SAMPLE_SIZE}; 0 = the whole core set)")
     ap.add_argument("--sample-seed", type=int, default=_benchlib.BENCH_SEED,
                     help="Seed of the complex sample (default 42)")
     ap.add_argument("--ids-csv", default=DEFAULT_IDS,

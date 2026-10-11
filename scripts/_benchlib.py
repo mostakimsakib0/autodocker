@@ -463,6 +463,10 @@ PIPELINE_DEFAULTS = _pipeline_module("defaults")
 # Seed of the benchmarks' own random choices (which complexes, ligands and
 # start conformers are used); recorded in every summary.json.
 BENCH_SEED = 42
+# Re-docking set: a seeded sample of this many CASF-2016 core-set complexes.
+# fetch_casf_rcsb.py downloads it and benchmark_redock.py docks it; both use
+# this value so they select the same complexes.
+BENCH_SAMPLE_SIZE = 40
 # Timeouts (seconds) of whole benchmark steps.
 DOCKING_RUN_TIMEOUT = 1800        # one re-docked complex / one parity re-run
 ENRICHMENT_RUN_TIMEOUT = 7200     # docking one DUD-E target's ligand set

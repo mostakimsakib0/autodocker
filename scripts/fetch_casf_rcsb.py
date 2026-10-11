@@ -345,8 +345,9 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--ids", default=DEFAULT_IDS, help="CSV with pdbid,smiles columns")
-    ap.add_argument("--sample", type=int, default=40,
-                    help="Seeded random sample size (default 40; 0 = all IDs)")
+    ap.add_argument("--sample", type=int, default=_benchlib.BENCH_SAMPLE_SIZE,
+                    help=f"Seeded random sample size (default {_benchlib.BENCH_SAMPLE_SIZE}; "
+                    "0 = all IDs)")
     ap.add_argument("--sample-seed", type=int, default=_benchlib.BENCH_SEED)
     ap.add_argument("--first", "--max-complexes", dest="first", type=int, default=None,
                     help="Legacy 1.1.x selection: first N IDs in sorted order")

@@ -90,6 +90,8 @@ TARGET_FAMILY = {
     "aces": "esterase",
 }
 
+# Confidence level of the bootstrap intervals.
+BOOTSTRAP_CI = 0.95
 # Conventional significance marks for the Mann-Whitney p-values.
 SIGNIFICANCE_STARS = ((0.001, "***"), (0.01, "**"), (0.05, "*"))
 # Mixed into the target's seed so decoys are drawn from a different random
@@ -495,7 +497,7 @@ def metric_set(scores, labels):
 BOOTSTRAP_METRICS = ("auc", "bedroc", "ef1", "ef5", "roce1", "roce5")
 
 
-def bootstrap_ci(scores, labels, n_boot, seed, ci=0.95):
+def bootstrap_ci(scores, labels, n_boot, seed, ci=BOOTSTRAP_CI):
     """Stratified percentile-bootstrap confidence intervals.
 
     Each replicate draws ``n_actives`` (score, label) pairs with
@@ -533,7 +535,7 @@ def _sig(p):
     return ""
 
 
-def compute_stats(names, scores, seed, n_boot, ci=0.95):
+def compute_stats(names, scores, seed, n_boot, ci=BOOTSTRAP_CI):
     """Point metrics, bootstrap CIs and the Mann-Whitney test for a target.
 
     ``names`` carry the A_/D_ label; ``scores`` may contain None (failed)."""
@@ -734,7 +736,7 @@ def main(argv=None):
                     help="Decoys sampled per target (default 100)")
     ap.add_argument("--bootstrap", type=int, default=1000,
                     help="Bootstrap replicates for CIs (default 1000)")
-    ap.add_argument("--ci", type=float, default=0.95,
+    ap.add_argument("--ci", type=float, default=BOOTSTRAP_CI,
                     help="Confidence level of the bootstrap intervals (default 0.95)")
     ap.add_argument("--box-source", choices=["crystal", "fpocket"], default="crystal",
                     help="Docking box: DUD-E crystal ligand (default) or the "

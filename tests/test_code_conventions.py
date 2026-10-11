@@ -82,3 +82,19 @@ def test_benchmark_conformers_use_the_pipeline_recipe():
         src = fh.read()
     assert "conformers.embed_and_relax(" in src
     assert "AllChem.ETKDGv3()" not in src
+
+
+def test_redock_sample_examples_match_the_shared_constants():
+    """fetch_casf_rcsb.py and benchmark_redock.py must select the same
+    complexes; their usage examples state the shared sample size and seed."""
+    import re
+    import sys
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    import _benchlib
+    for name in ("fetch_casf_rcsb.py", "benchmark_redock.py"):
+        with open(os.path.join(ROOT, "scripts", name), encoding="utf-8") as fh:
+            src = fh.read()
+        assert "default=_benchlib.BENCH_SAMPLE_SIZE" in src, name
+        for size, seed in re.findall(r"--sample (\d+)\s+--sample-seed (\d+)", src):
+            assert int(size) == _benchlib.BENCH_SAMPLE_SIZE, name
+            assert int(seed) == _benchlib.BENCH_SEED, name
