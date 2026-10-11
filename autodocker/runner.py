@@ -142,10 +142,12 @@ def _env_command_timeout() -> int:
 # Tool paths (prefer modern Vina for consistency).
 OBABEL = find_tool("obabel", "OpenBabel", "OpenBabel.exe")
 VINA_PRIMARY = find_tool("vina", "vina.exe", "qvina02", "qvina2", "qvina")
-if os.environ.get("VS_ENABLE_QVINA_FALLBACK", "0") == "1":
-    VINA_FALLBACK = find_tool("qvina02", "qvina2") or VINA_PRIMARY
-else:
-    VINA_FALLBACK = VINA_PRIMARY
+# The fallback engine equals the primary (no fallback) unless --qvina-fallback
+# is given; main() then sets it to QuickVina 2.
+VINA_FALLBACK = VINA_PRIMARY
+QVINA = find_tool("qvina02", "qvina2")
+# Deprecated environment switch for --qvina-fallback (versions <= 1.1.x).
+_QVINA_FALLBACK_ENV = "VS_ENABLE_QVINA_FALLBACK"
 # Optional engines and helpers.
 SMINA = find_tool("smina", "smina.exe")
 FPOCKET = find_tool("fpocket")
@@ -264,6 +266,7 @@ from vspipeline.utils import (  # noqa: E402
     run_obabel,
 )
 from vspipeline.protein import ProteinPreparation  # noqa: E402
+from vspipeline import protein as protein_module  # noqa: E402
 from vspipeline.docking import (  # noqa: E402
     AFFINITY_FLOOR,
     DockJob,
@@ -389,7 +392,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     lib = parser.add_argument_group("ligand library")
     lib.add_argument("--library", choices=["fda", "custom", "local"], default="local",
-                     help="local: the files of -l; fda: a fixed list of 74 well-known "
+                     help="local: the files of -l; fda: a fixed list of "
+                     f"{len(LibraryManager.FDA_DRUG_NAMES)} well-known "
                      "approved drugs downloaded from PubChem (not the full FDA list); "
                      "custom: the same list filtered by --mw-min/--mw-max/--logp-max")
     lib.add_argument("--mw-min", type=float, default=defaults.CUSTOM_MW_MIN,
@@ -432,7 +436,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Box padding around the selected pocket(s), Angstrom")
     rec.add_argument("--no-fpocket", action="store_true",
                      help="Skip fpocket; dock in a box around the whole receptor (heavy-atom "
-                     "bounding box + padding, each edge at least 24 Angstrom)")
+                     f"bounding box + padding, each edge at least "
+                     f"{protein_module.MIN_RECEPTOR_BOX_SIZE:g} Angstrom)")
     rec.add_argument("--grid-center", default=None,
                      help="Explicit box center 'X,Y,Z' (Angstrom), e.g. 12.3,4.5,6.7; "
                      "overrides auto-detection (frame: see --grid-center-frame)")
@@ -484,6 +489,11 @@ def build_parser() -> argparse.ArgumentParser:
                       f">= this, or < {AFFINITY_FLOOR:g}, are reported as OUT_OF_WINDOW")
     dock.add_argument("--vina-bin",
                       help="Docking binary to use instead of the auto-detected Vina/QuickVina")
+    dock.add_argument("--qvina-fallback", action="store_true",
+                      help="Re-dock a ligand with QuickVina 2 when Vina fails on it (crash "
+                      "or timeout). The two engines' scores then share one ranking; "
+                      "ranking.csv's Engine column shows which engine scored each ligand. "
+                      f"Replaces the deprecated ${_QVINA_FALLBACK_ENV}=1")
     dock.add_argument("--vina-extra", action="append", default=[],
                       help="Extra argument string passed to the docking binary; repeat as needed")
     dock.add_argument("--timeout", type=int, default=COMMAND_TIMEOUT,
@@ -611,6 +621,14 @@ def _validate_args(args, explicit) -> None:
 
     if args.vina_bin and not shutil.which(args.vina_bin):
         raise ConfigError(f"--vina-bin {args.vina_bin!r} does not exist or is not executable")
+
+    if args.qvina_fallback:
+        if args.vina_bin:
+            raise ConfigError("--qvina-fallback cannot be combined with --vina-bin")
+        if args.smina_only:
+            raise ConfigError("--qvina-fallback cannot be combined with --smina-only")
+        if not QVINA:
+            raise ConfigError("--qvina-fallback needs QuickVina 2 (qvina02 or qvina2) on PATH")
 
     if args.smina_only:
         conflicts = []
@@ -1122,6 +1140,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     args, explicit = _parse_args(parser, argv)
     _configure_logging(args.verbose)
     _log_tool_availability()
+    if os.environ.get(_QVINA_FALLBACK_ENV, "0") == "1":
+        logger.warning(f"[!] ${_QVINA_FALLBACK_ENV}=1 is deprecated; use --qvina-fallback")
+        args.qvina_fallback = True
 
     try:
         _validate_args(args, explicit)
@@ -1131,6 +1152,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.vina_bin:
         VINA_PRIMARY = args.vina_bin
         VINA_FALLBACK = args.vina_bin
+    elif args.qvina_fallback:
+        VINA_FALLBACK = QVINA
     COMMAND_TIMEOUT = args.timeout
     try:
         _require_tools(smina_only=args.smina_only, consensus=args.consensus)

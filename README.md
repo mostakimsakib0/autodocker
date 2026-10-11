@@ -132,6 +132,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `--seed` | Random seed | `$VS_SEED` or `42` |
 | `--min-valid-affinity` | Scores ≥ this (or < −20) are reported as `OUT_OF_WINDOW` | `-1.0` |
 | `--vina-bin`, `--vina-extra` | Custom docking binary; extra engine arguments | auto, none |
+| `--qvina-fallback` | Re-dock a ligand with QuickVina 2 when Vina fails on it (the `Engine` column shows which engine scored each ligand) | off |
 | `--timeout` | Per-command timeout (s) | `$VS_COMMAND_TIMEOUT` or `900` |
 | `--max-failure-fraction` | Exit 3 if more than this fraction of ligands fail | `0.5` |
 | `--no-resume` | Ignore the checkpoint (it is also discarded when receptor, box, parameters or engine binaries change) | off |

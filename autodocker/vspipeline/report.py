@@ -26,6 +26,7 @@ from typing import List, Tuple, Optional, Dict
 # initial import of runner this binds the partially-initialized module
 # object, which is fine because attributes are only accessed at call time.
 from vspipeline import defaults  # noqa: E402
+from vspipeline import outputs  # noqa: E402
 from vspipeline.docking import Status  # noqa: E402
 import runner  # noqa: E402
 
@@ -368,11 +369,11 @@ def _valid_score(row: Dict) -> Optional[float]:
     Rows with Status OK/WEAK are in the window by construction; rows without
     a recognised status (older ranking files) count only for a negative
     finite affinity."""
-    status = str(row.get('Status', '') or '').strip().upper()
+    status = str(row.get(outputs.COL_STATUS, '') or '').strip().upper()
     if status.startswith(_UNSCORED_STATUS):
         return None
     try:
-        value = float(str(row.get('Binding_Affinity', '')).strip())
+        value = float(str(row.get(outputs.COL_AFFINITY, '')).strip())
     except ValueError:
         return None
     if not math.isfinite(value):
@@ -383,7 +384,7 @@ def _valid_score(row: Dict) -> Optional[float]:
 
 
 def _is_out_of_window(row: Dict) -> bool:
-    status = str(row.get('Status', '') or '').strip().upper()
+    status = str(row.get(outputs.COL_STATUS, '') or '').strip().upper()
     return status.startswith((Status.OUT_OF_WINDOW.value, _LEGACY_OUT_OF_WINDOW))
 
 
@@ -510,7 +511,7 @@ def _pose_file(lig, name: str, poses_dir: str,
     or relative to ``base_dir``, the directory of ranking.csv; default: the
     parent of ``poses_dir``), then ``docked/<basename>``, then
     ``<name>_out.pdbqt``."""
-    recorded = lig.get('Docked_File', '') if isinstance(lig, dict) else ''
+    recorded = lig.get(outputs.COL_DOCKED_FILE, '') if isinstance(lig, dict) else ''
     candidates = []
     if recorded:
         if os.path.isabs(recorded):
@@ -557,7 +558,7 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
     hits = []
     if os.path.isdir(poses_dir):
         for lig, affinity in top:
-            name = str(lig.get('Ligand', lig) if isinstance(lig, dict) else lig)
+            name = str(lig.get(outputs.COL_LIGAND, lig) if isinstance(lig, dict) else lig)
             path = _pose_file(lig, name, poses_dir, base_dir)
             pose_text = _pdbqt_to_pdb_string(path, first_model_only=True) if path else None
             if pose_text:
@@ -631,7 +632,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
     # Scored ligands, best first (name breaks ties).
     ranked_ligands = sorted(
         ((lig, v) for lig, v in zip(ligands, scores) if v is not None),
-        key=lambda item: (item[1], str(item[0].get('Ligand', ''))))
+        key=lambda item: (item[1], str(item[0].get(outputs.COL_LIGAND, ''))))
 
     # Docking grid box for the viewer
     grid_box = None
@@ -648,15 +649,15 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
     scatter_data = []
     for lig, av in zip(ligands, scores):
         try:
-            mw = float(str(lig.get('MW', '')).strip())
+            mw = float(str(lig.get(outputs.COL_MW, '')).strip())
         except ValueError:
             continue
         if av is not None and mw > 0:
-            scatter_data.append({"name": lig.get('Ligand', '?'),
+            scatter_data.append({"name": lig.get(outputs.COL_LIGAND, '?'),
                                  "mw": mw, "aff": av})
 
     clusters = (cluster_poses(poses_dir, rmsd_threshold=rmsd_threshold,
-                              ligands=[l.get('Ligand') for l in ligands])
+                              ligands=[l.get(outputs.COL_LIGAND) for l in ligands])
                 if os.path.isdir(poses_dir) else {})
 
     css = _REPORT_CSS(bool(ranked_ligands))
@@ -674,35 +675,35 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
     top_rows = ""
     top_names = set()
     for i, (lig, affinity) in enumerate(ranked_ligands[:top_n], 1):
-        top_names.add(str(lig.get('Ligand', 'Unknown')))
+        top_names.add(str(lig.get(outputs.COL_LIGAND, 'Unknown')))
         conf_class, conf_text = _confidence(affinity)
         top_rows += f"""
             <tr class="top-row">
                 <td>{i}</td>
-                <td><strong>{html.escape(str(lig.get('Ligand', 'Unknown')))}</strong></td>
+                <td><strong>{html.escape(str(lig.get(outputs.COL_LIGAND, 'Unknown')))}</strong></td>
                 <td class="{conf_class}"><strong>{affinity:.2f}</strong></td>
-                <td>{html.escape(str(lig.get('Binding_Modes', '0')))}</td>
+                <td>{html.escape(str(lig.get(outputs.COL_BINDING_MODES, '0')))}</td>
                 <td class="{conf_class}">{conf_text}</td>
             </tr>"""
 
     # All results rows
     all_rows = ""
     for lig, av in zip(ligands, scores):
-        raw = str(lig.get('Binding_Affinity', '')).strip()
+        raw = str(lig.get(outputs.COL_AFFINITY, '')).strip()
         if av is not None:
             conf_class, conf_text = _confidence(av)
         else:
             conf_class, conf_text = "bad", "N/A"
-        cls = "top-row" if str(lig.get('Ligand', '')) in top_names else ""
+        cls = "top-row" if str(lig.get(outputs.COL_LIGAND, '')) in top_names else ""
         all_rows += f"""
             <tr class="{cls}">
-                <td>{html.escape(str(lig.get('Ligand', 'Unknown')))}</td>
+                <td>{html.escape(str(lig.get(outputs.COL_LIGAND, 'Unknown')))}</td>
                 <td class="{conf_class}">{html.escape(raw)}</td>
-                <td>{html.escape(str(lig.get('Binding_Modes', '-')))}</td>
-                <td>{html.escape(str(lig.get('SimScore', '-')))}</td>
-                <td>{html.escape(str(lig.get('MW', '-')))}</td>
-                <td>{html.escape(str(lig.get('LogP', '-')))}</td>
-                <td>{html.escape(str(lig.get('Status', '-')))}</td>
+                <td>{html.escape(str(lig.get(outputs.COL_BINDING_MODES, '-')))}</td>
+                <td>{html.escape(str(lig.get(outputs.COL_SIMSCORE, '-')))}</td>
+                <td>{html.escape(str(lig.get(outputs.COL_MW, '-')))}</td>
+                <td>{html.escape(str(lig.get(outputs.COL_LOGP, '-')))}</td>
+                <td>{html.escape(str(lig.get(outputs.COL_STATUS, '-')))}</td>
             </tr>"""
 
     # Scorer concordance over the screen (consensus_summary.json).

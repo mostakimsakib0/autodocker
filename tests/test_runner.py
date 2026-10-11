@@ -135,6 +135,8 @@ def test_bad_command_timeout_env_is_a_clean_usage_error(monkeypatch, capsys, cli
     (["--smina-only", "--energy-range", "4"], "--energy-range"),
     (["--smina-only", "--vina-extra=--local_only"], "--vina-extra"),
     (["--smina-only", "--vina-bin", sys.executable], "--vina-bin"),
+    (["--qvina-fallback", "--vina-bin", sys.executable], "--qvina-fallback cannot be combined with --vina-bin"),
+    (["--qvina-fallback", "--smina-only"], "--qvina-fallback cannot be combined with --smina-only"),
 ])
 def test_invalid_options_exit_2(cli, fake_tools, capsys, extra, message):
     argv, out = cli
@@ -377,3 +379,25 @@ def test_cli_defaults_come_from_the_defaults_module():
     assert {k: got[k] for k in expected} == expected
     assert runner.DEFAULT_SEED == defaults.SEED
     assert runner.AUTO_FLEX_RADIUS == defaults.AUTO_FLEX_RADIUS
+
+
+def test_qvina_fallback_needs_quickvina(cli, fake_tools, monkeypatch, capsys):
+    monkeypatch.setattr(runner, "QVINA", None)
+    argv, out = cli
+    assert _exit_code(argv + ["--qvina-fallback"]) == runner.EXIT_USAGE
+    assert "needs QuickVina 2" in capsys.readouterr().err
+
+
+def test_qvina_fallback_is_off_without_the_option():
+    """No hidden switch: the fallback equals the primary engine unless
+    --qvina-fallback (or the deprecated variable) asks for QuickVina."""
+    assert runner.VINA_FALLBACK == runner.VINA_PRIMARY
+
+
+def test_deprecated_qvina_env_enables_the_option(cli, fake_tools, monkeypatch, caplog):
+    monkeypatch.setattr(runner, "QVINA", None)
+    monkeypatch.setenv("VS_ENABLE_QVINA_FALLBACK", "1")
+    argv, out = cli
+    # With QuickVina missing, the (deprecated) request is validated like the option.
+    assert _exit_code(argv) == runner.EXIT_USAGE
+    assert "deprecated; use --qvina-fallback" in caplog.text

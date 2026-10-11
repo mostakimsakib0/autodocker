@@ -165,7 +165,7 @@ class LibraryManager:
     MAX_COMPOUNDS = DEFAULT_MAX_COMPOUNDS
     MAX_NETWORK_FAILURES = 3
 
-    # A fixed, hand-picked list of 74 well-known approved drugs, resolved by
+    # A fixed, hand-picked list of well-known approved drugs, resolved by
     # name through PubChem PUG REST (the first CID PubChem returns for the
     # name is used). It is NOT the FDA approved-drug list and not a
     # representative sample of it; screens take the first --max-compounds

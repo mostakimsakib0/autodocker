@@ -592,7 +592,7 @@ def write_consensus_outputs(outdir: str, results: List[Tuple[str, Optional[float
     consensus_file = os.path.join(outdir, outputs.CONSENSUS_RANKING_CSV)
     with open(consensus_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["Ligand", "Vina_Affinity", "SMINA_Affinity", "Consensus"])
+        writer.writerow([outputs.COL_LIGAND, "Vina_Affinity", "SMINA_Affinity", "Consensus"])
         for name, v, s, c in sorted(paired, key=lambda r: (r[3], r[0])):
             writer.writerow([name, v, s, c])
         for name, v, s in sorted(unpaired, key=lambda r: r[0]):

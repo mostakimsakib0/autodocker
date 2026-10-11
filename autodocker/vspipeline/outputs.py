@@ -32,3 +32,26 @@ FRAME_OFFSET_TXT = "frame_offset.txt"
 
 # Docking
 DOCKED_DIR = "docked"   # <name>_out.pdbqt poses and <name>_vina.log per ligand
+
+# ranking.csv columns, in file order
+COL_LIGAND = "Ligand"
+COL_AFFINITY = "Binding_Affinity"
+COL_SIMSCORE = "SimScore"
+COL_BINDING_MODES = "Binding_Modes"
+COL_MODE_COVERAGE = "Mode_Coverage"
+COL_MW = "MW"
+COL_LOGP = "LogP"
+COL_HBA = "HBA"
+COL_HBD = "HBD"
+COL_TPSA = "TPSA"
+COL_ROTORS = "Rotors"
+COL_SOURCE_URL = "ZINC_URL"   # historical name; holds the PubChem URL when known
+COL_DOCKED_FILE = "Docked_File"
+COL_STATUS = "Status"
+COL_ENGINE = "Engine"
+COL_MINIMIZED = "Minimized"
+RANKING_COLUMNS = (
+    COL_LIGAND, COL_AFFINITY, COL_SIMSCORE, COL_BINDING_MODES, COL_MODE_COVERAGE,
+    COL_MW, COL_LOGP, COL_HBA, COL_HBD, COL_TPSA, COL_ROTORS, COL_SOURCE_URL,
+    COL_DOCKED_FILE, COL_STATUS, COL_ENGINE, COL_MINIMIZED,
+)

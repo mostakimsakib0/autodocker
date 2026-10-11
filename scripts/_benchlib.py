@@ -30,6 +30,11 @@ import subprocess
 RANKING_CSV = "ranking.csv"
 DOCKED_DIR = "docked"
 FRAME_OFFSET_TXT = "frame_offset.txt"
+COL_LIGAND = "Ligand"
+COL_AFFINITY = "Binding_Affinity"
+COL_STATUS = "Status"
+COL_DOCKED_FILE = "Docked_File"
+COL_ENGINE = "Engine"
 
 # Timeouts (seconds) for the external helpers and downloads used by the
 # benchmark scripts.
@@ -290,7 +295,7 @@ def write_model(model, path):
 # ranking.csv
 # ---------------------------------------------------------------------------
 
-AFFINITY_COLUMNS = ("Binding_Affinity", "Affinity")
+AFFINITY_COLUMNS = (COL_AFFINITY, "Affinity")  # "Affinity": other tools' CSVs
 # Statuses that mean "no usable score", whatever the affinity column holds.
 FAILED_STATUS_PREFIXES = ("FAILED", "REJECTED", "ERROR")
 
@@ -321,23 +326,23 @@ def read_ranking(ranking_csv):
         reader = csv.DictReader(f)
         fields = reader.fieldnames or []
         key = next((k for k in AFFINITY_COLUMNS if k in fields), None)
-        if key is None or "Ligand" not in fields:
+        if key is None or COL_LIGAND not in fields:
             raise ValueError(
                 f"{ranking_csv}: need a Ligand column and one of "
                 f"{', '.join(AFFINITY_COLUMNS)} (found {fields})")
         for row in reader:
             text = (row.get(key) or "").strip()
-            status = (row.get("Status") or "").strip().upper()
+            status = (row.get(COL_STATUS) or "").strip().upper()
             affinity = _float_or_none(text)
             if status.startswith(FAILED_STATUS_PREFIXES):
                 affinity = None
             rows.append({
-                "name": ligand_key(row.get("Ligand")),
+                "name": ligand_key(row.get(COL_LIGAND)),
                 "affinity_str": text,
                 "affinity": affinity,
                 "status": status,
-                "docked_file": (row.get("Docked_File") or "").strip(),
-                "engine": (row.get("Engine") or "").strip(),
+                "docked_file": (row.get(COL_DOCKED_FILE) or "").strip(),
+                "engine": (row.get(COL_ENGINE) or "").strip(),
             })
     return rows
 

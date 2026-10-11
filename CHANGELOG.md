@@ -105,6 +105,11 @@ changes (below) are part of 2.0.0.
 - `Top_hits.txt`, `metrics.txt` and `Results_full.txt` contain no timestamps;
   `receptor.pdbqt` contains no output path.
 - Chain IDs are case-sensitive.
+- QuickVina fallback is the visible option `--qvina-fallback` (the hidden
+  `VS_ENABLE_QVINA_FALLBACK=1` still works, with a deprecation warning).
+  The undocumented `VS_EXHAUSTIVENESS`, `VS_BINDING_MODES`,
+  `VS_ENERGY_RANGE`, `VS_MIN_VALID_AFFINITY` and `VS_THREADS` fallbacks are
+  removed; `VS_SEED` and `VS_COMMAND_TIMEOUT` remain.
 - The HTML report highlights `--top-n` ligands (default 20) in its top-hits
   table and 3D viewer, like `Top_hits.txt`; it always showed 10.
 - Open Babel always runs single-threaded.

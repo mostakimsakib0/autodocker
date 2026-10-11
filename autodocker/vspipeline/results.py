@@ -145,12 +145,7 @@ class ResultsAnalyzer:
             with open(self.csv_file, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 if metrics_dict:
-                    writer.writerow([
-                        "Ligand", "Binding_Affinity", "SimScore", "Binding_Modes",
-                        "Mode_Coverage", "MW", "LogP", "HBA", "HBD", "TPSA",
-                        "Rotors", "ZINC_URL", "Docked_File", "Status", "Engine",
-                        "Minimized"
-                    ])
+                    writer.writerow(outputs.RANKING_COLUMNS)
                     for lig, status, affinity in rows:
                         metrics = metrics_dict.get(lig, {})
                         meta = self.metadata.get(lig, {})
@@ -169,7 +164,7 @@ class ResultsAnalyzer:
                             _minimized_text(meta),
                         ])
                 else:
-                    writer.writerow(["Ligand", "Binding_Affinity", "Status"])
+                    writer.writerow([outputs.COL_LIGAND, outputs.COL_AFFINITY, outputs.COL_STATUS])
                     for lig, status, affinity in rows:
                         writer.writerow([lig, self._affinity_csv(status, affinity),
                                          status.value])

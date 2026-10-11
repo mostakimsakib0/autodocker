@@ -73,6 +73,10 @@ logger = logging.getLogger(__name__)
 AFFINITY_FLOOR = -20.0
 DEFAULT_MIN_VALID_AFFINITY = defaults.MIN_VALID_AFFINITY
 
+# Engine families recognised by _detect_vina_type (they share Vina's CLI).
+ENGINE_VINA = "vina"
+ENGINE_QUICKVINA = "quickvina"
+
 # In-window scores at or above this value get status WEAK instead of OK.
 WEAK_AFFINITY_THRESHOLD = -4.0
 
@@ -160,7 +164,7 @@ class EngineConfig:
     def docking_engines(self) -> List[Tuple[str, str]]:
         """[(path, label)] in the order they are tried. The fallback is only
         present when it differs from the primary (runner enables it with
-        VS_ENABLE_QVINA_FALLBACK=1)."""
+        --qvina-fallback)."""
         engines = []
         if self.vina_primary:
             engines.append((self.vina_primary,
@@ -546,18 +550,18 @@ def _vina_cpu_flag(vina_path: str) -> Optional[str]:
 
 def _detect_vina_type(vina_path: str) -> str:
     """Detect if Vina is QuickVina or standard Vina by checking --help output.
-    Returns: 'quickvina' or 'vina'. Cached per binary path.
+    Returns: ENGINE_QUICKVINA or ENGINE_VINA. Cached per binary path.
     """
     if vina_path in _VINA_TYPE_CACHE:
         return _VINA_TYPE_CACHE[vina_path]
     help_text = (_help_text(vina_path) or "").lower()
     if 'quickvina' in help_text or 'quick vina' in help_text:
-        result = 'quickvina'
+        result = ENGINE_QUICKVINA
     elif 'autodock vina' in help_text:
-        result = 'vina'
+        result = ENGINE_VINA
     else:
         basename = os.path.basename(vina_path).lower()
-        result = 'quickvina' if ('qvina' in basename or 'quickvina' in basename) else 'vina'
+        result = ENGINE_QUICKVINA if ('qvina' in basename or 'quickvina' in basename) else ENGINE_VINA
     _VINA_TYPE_CACHE[vina_path] = result
     return result
 
@@ -568,7 +572,7 @@ def _engine_supports_flex(vina_path: str) -> bool:
     detected engine type decides. Cached per binary."""
     if vina_path in _FLEX_SUPPORT_CACHE:
         return _FLEX_SUPPORT_CACHE[vina_path]
-    supported = runner._detect_vina_type(vina_path) in ("vina", "quickvina")
+    supported = runner._detect_vina_type(vina_path) in (ENGINE_VINA, ENGINE_QUICKVINA)
     help_text = _help_text(vina_path)
     if supported and help_text and "--" in help_text:
         supported = re.search(r"--flex\b", help_text) is not None
@@ -644,7 +648,7 @@ def _build_vina_command(vina_path: str, receptor: str, ligand: str, out: str,
                 f"[!] Vina binary {vina_path} has no --cpu/--threads option; "
                 "ignoring requested thread limit")
 
-    if vina_type == 'quickvina':
+    if vina_type == ENGINE_QUICKVINA:
         if grid_file:
             cmd.extend(["--config", grid_file])
     else:
@@ -818,7 +822,7 @@ def dock_ligand(job: Union[DockJob, Sequence]) -> Tuple[str, Optional[float], Di
     the current runner globals).
 
     The primary engine (Vina by default) is tried first. The fallback engine
-    (QuickVina, only when runner was started with VS_ENABLE_QVINA_FALLBACK=1)
+    (QuickVina, only when runner was started with --qvina-fallback)
     is tried only if the primary crashes, times out or writes unusable
     output; that is logged at WARNING and recorded in ``metrics["engine"]``
     so a ranking that mixes engines is visible. A valid result is never
@@ -954,16 +958,15 @@ def _run_fingerprint(receptor: str, grid_file: str, flex_file: Optional[str],
 # ---------------------------------------------------------------------------
 
 def _default_vina_params() -> Dict:
-    """Defaults for keys a caller leaves out ($VS_* environment, else built-in)."""
+    """Defaults for keys a caller leaves out: vspipeline/defaults.py, and the
+    documented $VS_SEED for the seed (as on the command line)."""
     return {
-        'exhaustiveness': int(os.environ.get('VS_EXHAUSTIVENESS', defaults.EXHAUSTIVENESS)),
-        'binding_modes': int(os.environ.get('VS_BINDING_MODES', defaults.BINDING_MODES)),
-        'energy_range': float(os.environ.get('VS_ENERGY_RANGE', defaults.ENERGY_RANGE)),
+        'exhaustiveness': defaults.EXHAUSTIVENESS,
+        'binding_modes': defaults.BINDING_MODES,
+        'energy_range': defaults.ENERGY_RANGE,
         'seed': int(os.environ.get('VS_SEED', defaults.SEED)),
-        'min_valid_affinity': float(os.environ.get('VS_MIN_VALID_AFFINITY',
-                                                   DEFAULT_MIN_VALID_AFFINITY)),
-        'threads': (int(os.environ['VS_THREADS'])
-                    if os.environ.get('VS_THREADS') else None),
+        'min_valid_affinity': DEFAULT_MIN_VALID_AFFINITY,
+        'threads': None,
     }
 
 

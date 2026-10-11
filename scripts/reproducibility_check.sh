@@ -13,7 +13,8 @@
 #
 # Usage:
 #   scripts/reproducibility_check.sh <protein.pdb> <ligand_dir> [output_dir] [-- runner args...]
-# Environment: VS_SEED (42), PROCESSES (4), EXHAUSTIVENESS (4), PYTHON (python3)
+# Environment: VS_SEED (read by runner.py; its default otherwise), PROCESSES (4),
+#              EXHAUSTIVENESS (4), PYTHON (python3)
 #
 # Runner arguments after "--" are passed to every run, e.g. a fixed box
 # (--grid-center X,Y,Z --grid-size S,S,S) to keep pocket detection out of
@@ -44,7 +45,6 @@ if [ "$#" -gt 0 ]; then
 fi
 [ -n "$ROOT" ] || ROOT="$(mktemp -d)"
 
-SEED="${VS_SEED:-42}"
 PROCS="${PROCESSES:-4}"
 EXH="${EXHAUSTIVENESS:-4}"
 
@@ -64,7 +64,7 @@ run_pipeline() {  # run_pipeline <outdir> <processes>
     mkdir -p "$out"
     echo "[*] $(basename "$out"): -p $procs -> $out"
     if ! "$PYTHON" "$RUNNER" -r "$PDB" -l "$LIGS" -o "$out" \
-            --seed "$SEED" --exhaustiveness "$EXH" \
+            --exhaustiveness "$EXH" \
             --binding-modes 1 --energy-range 1.0 --processes "$procs" \
             --no-resume --no-html-report ${EXTRA[@]+"${EXTRA[@]}"} \
             >"$out.log" 2>&1; then

@@ -371,6 +371,7 @@ def test_receptor_cache_keyed_by_content_stamp(tmp_path):
 
 
 def test_explicit_params_beat_environment(tmp_path, monkeypatch):
+    # Only $VS_SEED is read; other undocumented VS_* variables are ignored.
     monkeypatch.setenv("VS_EXHAUSTIVENESS", "32")
     monkeypatch.setenv("VS_SEED", "7")
     seen = {}
