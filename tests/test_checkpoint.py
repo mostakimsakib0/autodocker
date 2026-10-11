@@ -75,7 +75,7 @@ def test_resume_with_only_failing_ligands_is_partial_not_fatal(
     good = runner.ligand_name(charged_pdbqt)
 
     def first_run(args):
-        name = runner.ligand_name(args[1])
+        name = runner.ligand_name(args.ligand)
         if name == good:
             return name, -8.4, {"status": "OK"}
         return name, None, {"status": "FAILED"}
@@ -88,8 +88,8 @@ def test_resume_with_only_failing_ligands_is_partial_not_fatal(
     docked = []
 
     def second_run(args):
-        docked.append(runner.ligand_name(args[1]))
-        return runner.ligand_name(args[1]), None, {"status": "FAILED"}
+        docked.append(runner.ligand_name(args.ligand))
+        return runner.ligand_name(args.ligand), None, {"status": "FAILED"}
 
     monkeypatch.setattr(docking, "dock_ligand", second_run)
     result, checkpoint, metrics = runner.dock_all(
@@ -102,7 +102,7 @@ def test_resume_with_only_failing_ligands_is_partial_not_fatal(
 
 
 def _ok_run(args):
-    return runner.ligand_name(args[1]), -7.0, {"status": "OK"}
+    return runner.ligand_name(args.ligand), -7.0, {"status": "OK"}
 
 
 def test_checkpoint_invalidated_when_parameters_change(
@@ -117,7 +117,7 @@ def test_checkpoint_invalidated_when_parameters_change(
     docked = []
 
     def tracking(args):
-        docked.append(args[1])
+        docked.append(args.ligand)
         return _ok_run(args)
 
     monkeypatch.setattr(docking, "dock_ligand", tracking)
@@ -147,7 +147,7 @@ def test_checkpoint_rechecks_edited_ligand_and_drops_removed_ones(
     docked = []
 
     def tracking(args):
-        docked.append(args[1])
+        docked.append(args.ligand)
         return _ok_run(args)
 
     monkeypatch.setattr(docking, "dock_ligand", tracking)
@@ -171,7 +171,7 @@ def test_results_are_checkpointed_as_they_arrive(
         shutil.copy(charged_pdbqt, ligs[-1])
 
     def interrupted(args):
-        if args[1].endswith("c.pdbqt"):
+        if args.ligand.endswith("c.pdbqt"):
             raise KeyboardInterrupt
         return _ok_run(args)
 
@@ -203,7 +203,7 @@ def test_failed_redock_of_edited_ligand_drops_stale_score(
     assert sorted(result, key=lambda r: r[0]) == [("x", None), ("y", -7.0)]
 
 
-def test_rejected_score_is_cached(tmp_path, charged_pdbqt, monkeypatch, outdir):
+def test_out_of_window_score_is_cached(tmp_path, charged_pdbqt, monkeypatch, outdir):
     import shutil
     from vspipeline import docking
     grid = tmp_path / "grid.txt"
@@ -216,9 +216,9 @@ def test_rejected_score_is_cached(tmp_path, charged_pdbqt, monkeypatch, outdir):
     calls = []
 
     def dock(args):
-        calls.append(runner.ligand_name(args[1]))
-        if args[1] == weak:
-            return "weak", None, {"status": "REJECTED (-0.50)", "raw_score": -0.5}
+        calls.append(runner.ligand_name(args.ligand))
+        if args.ligand == weak:
+            return "weak", None, {"status": "OUT_OF_WINDOW", "raw_score": -0.5}
         return _ok_run(args)
 
     monkeypatch.setattr(docking, "dock_ligand", dock)
@@ -226,14 +226,26 @@ def test_rejected_score_is_cached(tmp_path, charged_pdbqt, monkeypatch, outdir):
         result, _, metrics = runner.dock_all(charged_pdbqt, [weak, good], str(grid),
                                              outdir, vina_params={"seed": 42})
         assert sorted(result, key=lambda r: r[0]) == [("good", -7.0), ("weak", None)]
-        assert metrics["weak"]["status"].startswith("REJECTED")
+        assert metrics["weak"]["status"] == "OUT_OF_WINDOW"
+        assert metrics["weak"]["raw_score"] == -0.5
     assert sorted(calls) == ["good", "weak"]  # the second run docked nothing
 
 
-def test_fingerprint_ignores_hydrogen_coordinates(tmp_path):
-    """obabel -p places rotatable polar H differently on every run; Vina ignores
-    H coordinates, so the run fingerprint (and the checkpoint) must too."""
+def test_all_out_of_window_is_not_fatal(tmp_path, charged_pdbqt, monkeypatch, outdir):
     from vspipeline import docking
+    grid = tmp_path / "grid.txt"
+    grid.write_text("center_x=1.0\ncenter_y=2.0\ncenter_z=3.0\n"
+                    "size_x=20.0\nsize_y=20.0\nsize_z=20.0\n")
+    monkeypatch.setattr(docking, "dock_ligand", lambda a: (
+        runner.ligand_name(a.ligand), None,
+        {"status": "OUT_OF_WINDOW", "raw_score": -0.4}))
+    result, _, metrics = runner.dock_all(charged_pdbqt, [charged_pdbqt], str(grid),
+                                         outdir, vina_params={"seed": 42})
+    assert result == [("charged", None)]
+    assert metrics["charged"]["raw_score"] == -0.4
+
+
+def _fp_files(tmp_path):
     grid = tmp_path / "grid.txt"
     grid.write_text("center_x=0\ncenter_y=0\ncenter_z=0\nsize_x=20\nsize_y=20\nsize_z=20\n")
     heavy = "ATOM      1  N   LYS A   1       1.000   2.000   3.000  0.00  0.00    -0.300 N \n"
@@ -242,6 +254,91 @@ def test_fingerprint_ignores_hydrogen_coordinates(tmp_path):
     a.write_text(heavy + h_at(1.5))
     b.write_text(heavy + h_at(0.4))                      # hydrogen moved
     c.write_text(heavy.replace("1.000", "1.200") + h_at(1.5))  # heavy atom moved
-    fp = lambda r: docking._run_fingerprint(str(r), str(grid), None, {"seed": 42})
-    assert fp(a) == fp(b)
+    return grid, a, b, c
+
+
+def test_fingerprint_includes_hydrogen_coordinates(tmp_path):
+    """Vina perceives donor hydrogens by bond distance, so moving a polar H can
+    change the result: the fingerprint must cover H coordinates (receptor and
+    flex file)."""
+    from vspipeline import docking
+    grid, a, b, c = _fp_files(tmp_path)
+    fp = lambda r, flex=None: docking._run_fingerprint(str(r), str(grid), flex, {"seed": 42})
+    assert fp(a) != fp(b)
     assert fp(a) != fp(c)
+    assert fp(a) == fp(a)
+    assert fp(a, str(a)) != fp(a, str(b))  # flex file hashed in full too
+
+
+def test_fingerprint_covers_engine_binary(tmp_path):
+    from vspipeline import docking
+    grid, a, _, _ = _fp_files(tmp_path)
+    exe1 = tmp_path / "vina1"
+    exe2 = tmp_path / "vina2"
+    exe1.write_text("#!/bin/sh\necho 'AutoDock Vina v1.2.5'\n")
+    exe2.write_text("#!/bin/sh\necho 'AutoDock Vina v1.2.6'\n")
+    os.chmod(exe1, 0o755)
+    os.chmod(exe2, 0o755)
+    ident = docking._engine_identity(str(exe1))
+    assert ident["version"] == "AutoDock Vina v1.2.5"
+    assert ident["sha256"] == docking._file_sha256(str(exe1))
+    fp = lambda exe: docking._run_fingerprint(
+        str(a), str(grid), None, {"seed": 42},
+        docking.EngineConfig(vina_primary=str(exe), vina_fallback=str(exe)))
+    assert fp(exe1) != fp(exe2)       # different binary (same path layout)
+    first = fp(exe1)
+    exe1.write_text("#!/bin/sh\necho 'AutoDock Vina v1.2.5' # rebuilt\n")
+    assert fp(exe1) != first          # same path, binary replaced
+
+
+def test_checkpoint_flush_is_atomic_and_truncates_journal(outdir, monkeypatch):
+    cp = runner.DockingCheckpoint(outdir)
+    cp.save_result("a", -7.0, {"status": "OK"})
+    cp.save_result("b", -6.0, {"status": "OK"})
+    assert os.path.getsize(cp.journal_file) > 0
+    cp.flush()
+    assert os.path.getsize(cp.journal_file) == 0
+    with open(cp.checkpoint_file) as f:
+        assert set(json.load(f)) == {"a", "b"}
+    assert not [p for p in os.listdir(outdir) if ".tmp." in p]
+    # A crash during the write leaves the previous checkpoint intact.
+    from vspipeline import checkpoint as ckpt
+    cp.save_result("c", -5.0, {"status": "OK"})
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ckpt.json, "dump", boom)
+    cp.flush()
+    monkeypatch.undo()
+    with open(cp.checkpoint_file) as f:
+        assert set(json.load(f)) == {"a", "b"}
+    assert os.path.getsize(cp.journal_file) > 0  # not truncated after a failed write
+    assert set(runner.DockingCheckpoint(outdir).completed) == {"a", "b", "c"}
+
+
+def test_checkpoint_lock_rejects_second_process(outdir):
+    import subprocess
+    import sys
+    from vspipeline import checkpoint as ckpt
+    code = (
+        "import sys; sys.path.insert(0, sys.argv[2]);"
+        "from vspipeline import checkpoint as c;"
+        "c.acquire_lock(sys.argv[1]); print('locked', flush=True); sys.stdin.read()")
+    pkg = os.path.join(os.path.dirname(__file__), "..", "autodocker")
+    holder = subprocess.Popen([sys.executable, "-c", code, outdir, pkg],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        with pytest.raises(ckpt.OutputDirLockedError, match="in use by another"):
+            runner.DockingCheckpoint(outdir)
+    finally:
+        holder.communicate("")
+    runner.DockingCheckpoint(outdir)  # free again once the other run exits
+    ckpt.release_lock(outdir)
+
+
+def test_checkpoint_timestamp_not_in_metrics(outdir):
+    cp = runner.DockingCheckpoint(outdir)
+    cp.save_result("a", -7.0, {"status": "OK"})
+    assert "timestamp" not in cp.get_metrics()["a"]

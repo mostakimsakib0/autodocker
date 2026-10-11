@@ -58,13 +58,15 @@ def test_dock_ligand_missing_receptor(tmp_path, charged_pdbqt):
     assert metrics["status"] == "FAILED"
 
 
-def test_dock_ligand_rejects_zero_charge_receptor(tmp_path, charged_pdbqt, zero_charge_pdbqt):
-    name, score, metrics = runner.dock_ligand((
-        zero_charge_pdbqt, charged_pdbqt,
-        charged_pdbqt, str(tmp_path), {}, None))
-    assert score is None
-    assert metrics["status"] == "FAILED"
-    assert "charges" in metrics["error"].lower()
+def test_zero_charge_receptor_and_ligand_only_warn(tmp_path, zero_charge_pdbqt, caplog):
+    """Vina ignores partial charges: all-zero charges are a warning, not FAILED."""
+    eng = _fake_engine(tmp_path)
+    lig = _ligand(tmp_path, charge="0.000")
+    with caplog.at_level("WARNING"):
+        name, score, metrics = docking.dock_ligand(_job(tmp_path, eng, receptor=zero_charge_pdbqt,
+                                                        ligand=lig))
+    assert metrics["status"] == "OK", metrics
+    assert "partial charges are zero" in caplog.text
 
 
 def test_build_vina_command_standard():
@@ -89,7 +91,9 @@ def test_build_vina_command_quickvina_uses_config():
         grid_file="grid.conf", flex_file="flex.pdbqt")
     assert "--config" in cmd
     assert "--center_x" not in cmd
-    assert "--flex" not in cmd
+    # QuickVina 2 accepts --flex; omitting it would dock against a receptor
+    # whose flexible side chains were removed.
+    assert cmd[cmd.index("--flex") + 1] == "flex.pdbqt"
 
 
 def test_build_vina_command_threads(monkeypatch):
@@ -137,41 +141,347 @@ def test_build_vina_command_no_threads_by_default():
     assert "--threads" not in cmd and "--cpu" not in cmd
 
 
-def test_parallel_equals_serial(tmp_path, protein_pdb):
-    """Regression for C4: same inputs + same seed must give same result
-    regardless of process count. Uses a full docking when vina exists."""
-    vina = shutil.which("vina")
-    obabel = shutil.which("obabel")
-    if vina is None or obabel is None:
-        pytest.skip("vina/obabel not available")
+DATA = os.path.join(os.path.dirname(__file__), "data", "core")
+FIXTURE_LIGANDS = ("butanoic_acid", "phenylethanol", "ibuprofen")
 
-    receptor = str(tmp_path / "rec.pdbqt")
-    runner.run([runner.OBABEL, "-ipdb", protein_pdb, "-opdbqt",
-                "-O", receptor, "-xr", "-c",
-                "--partialcharge", "gasteiger"])
+
+def test_parallel_equals_serial(tmp_path):
+    """Regression for C4: same inputs + seed give byte-identical poses and
+    scores with -p 1 and -p 2. Real 3D ligands with torsions (RDKit ETKDG,
+    randomSeed=42, MMFF; obabel -> PDBQT; committed under tests/data/core)."""
+    if shutil.which("vina") is None:
+        pytest.skip("vina not available")
+    receptor = os.path.join(DATA, "receptor.pdbqt")
+    grid = str(tmp_path / "grid.conf")
+    with open(grid, "w") as f:
+        f.write("center_x = 0.1\ncenter_y = 0.0\ncenter_z = 0.15\n"
+                "size_x = 18\nsize_y = 18\nsize_z = 18\n")
+    vina_params = {"exhaustiveness": 1, "binding_modes": 3, "energy_range": 2.0,
+                   "seed": 42, "min_valid_affinity": 0.0}
+    engine = docking.EngineConfig(vina_primary=shutil.which("vina"),
+                                  vina_fallback=shutil.which("vina"), timeout=300)
 
     def run_dock(np_):
         outdir = str(tmp_path / f"out_{np_}")
-        os.makedirs(outdir, exist_ok=True)
-        ligdir = str(tmp_path / f"ligs_{np_}")
-        os.makedirs(ligdir, exist_ok=True)
-        lig = os.path.join(ligdir, "lig.pdbqt")
-        runner.run([runner.OBABEL, "-:CCO", "-opdbqt", "-O", lig,
-                    "--partialcharge", "gasteiger"])
-        grid = str(tmp_path / f"grid_{np_}.conf")
-        with open(grid, "w") as f:
-            f.write("center_x = 4.5\ncenter_y = 6.5\ncenter_z = 5.0\n"
-                    "size_x = 24\nsize_y = 24\nsize_z = 24\n")
-        vina_params = {
-            "exhaustiveness": 2, "binding_modes": 1, "energy_range": 1.0,
-            "seed": 42, "min_valid_affinity": -1.0}
-        results, _, metrics = runner.dock_all(
-            receptor, [lig], grid, outdir, num_processes=np_,
-            resume=False, vina_params=vina_params)
-        assert len(results) == 1
-        assert results[0][1] is not None
-        return results[0][1]
+        ligdir = tmp_path / f"ligs_{np_}"
+        ligdir.mkdir()
+        ligs = []
+        for n in FIXTURE_LIGANDS:
+            shutil.copy(os.path.join(DATA, n + ".pdbqt"), ligdir / (n + ".pdbqt"))
+            ligs.append(str(ligdir / (n + ".pdbqt")))
+        results, _, metrics = docking.dock_all(
+            receptor, ligs, grid, outdir, num_processes=np_, resume=False,
+            vina_params=vina_params, engine=engine)
+        assert len(results) == len(FIXTURE_LIGANDS)
+        assert all(score is not None for _, score in results), metrics
+        poses = {}
+        for n in FIXTURE_LIGANDS:
+            with open(os.path.join(outdir, "docked", n + "_out.pdbqt"), "rb") as f:
+                poses[n] = f.read()
+        return sorted(results), poses
 
-    score_serial = run_dock(1)
-    score_parallel = run_dock(2)
-    assert score_serial == score_parallel
+    serial, serial_poses = run_dock(1)
+    parallel, parallel_poses = run_dock(2)
+    assert serial == parallel
+    assert serial_poses == parallel_poses
+
+
+# ---------------------------------------------------------------------------
+# Fake engine helpers (no real docking)
+# ---------------------------------------------------------------------------
+
+FAKE_ENGINE = r"""#!/usr/bin/env python3
+import os, sys, time
+args = sys.argv[1:]
+if "--help" in args or "--help_advanced" in args:
+    print(os.environ.get("FAKE_HELP", "AutoDock Vina fake\n  --flex arg\n  --cpu arg"))
+    sys.exit(0)
+if "--version" in args:
+    print("AutoDock Vina vFAKE"); sys.exit(0)
+with open(os.path.join(os.path.dirname(sys.argv[0]), "calls.log"), "a") as f:
+    f.write(" ".join(args) + "\n")
+mode = os.environ.get("FAKE_MODE_" + os.path.basename(sys.argv[0]), "ok")
+if mode == "crash":
+    sys.stderr.write("simulated crash\n"); sys.exit(3)
+if mode == "sleep":
+    time.sleep(30)
+out = args[args.index("--out") + 1]
+aff = os.environ.get("FAKE_AFF", "-11.521")
+table = os.environ.get("FAKE_TABLE", "-11.52")
+with open(out, "w") as f:
+    f.write("MODEL 1\nREMARK VINA RESULT:   %s      0.000      0.000\n"
+            "ATOM      1  C   LIG A   1       0.000   0.000   0.000  0.00  0.00    +0.000 C\n"
+            "ENDMDL\nMODEL 2\nREMARK VINA RESULT:   -9.000      1.000      2.000\n"
+            "ATOM      1  C   LIG A   1       1.000   0.000   0.000  0.00  0.00    +0.000 C\n"
+            "ENDMDL\n" % aff)
+print("mode |   affinity | dist from best mode")
+print("     | (kcal/mol) | rmsd l.b.| rmsd u.b.")
+print("-----+------------+----------+----------")
+print("   1     %s          0          0" % table)
+print("   2       -9          1          2")
+sys.stderr.write("WARNING: fake engine warning\n")
+"""
+
+
+def _fake_engine(tmp_path, name="vina"):
+    d = tmp_path / "bin"
+    d.mkdir(exist_ok=True)
+    exe = d / name
+    exe.write_text(FAKE_ENGINE)
+    exe.chmod(0o755)
+    docking._VINA_TYPE_CACHE.pop(str(exe), None)
+    docking._FLEX_SUPPORT_CACHE.pop(str(exe), None)
+    return str(exe)
+
+
+def _ligand(tmp_path, charge="+0.120", name="lig"):
+    p = tmp_path / f"{name}.pdbqt"
+    p.write_text(
+        "REMARK  test ligand padded to pass the minimum size check.............\n"
+        "ROOT\n"
+        f"ATOM      1  C   LIG A   1       0.000   0.000   0.000  0.00  0.00    {charge} C \n"
+        f"ATOM      2  O   LIG A   1       1.400   0.000   0.000  0.00  0.00    {charge} OA\n"
+        "ENDROOT\nTORSDOF 0\n")
+    return str(p)
+
+
+def _job(tmp_path, primary, fallback=None, receptor=None, ligand=None, flex=None,
+         params=None, timeout=60):
+    grid = tmp_path / "grid.conf"
+    grid.write_text("center_x=0\ncenter_y=0\ncenter_z=0\nsize_x=20\nsize_y=20\nsize_z=20\n")
+    if receptor is None:
+        receptor = str(tmp_path / "rec.pdbqt")
+        with open(receptor, "w") as f:
+            f.write("ATOM      1  N   LYS A   1       5.000   0.000   0.000  0.00  0.00    -0.300 N \n")
+    dock_dir = tmp_path / "docked"
+    dock_dir.mkdir(exist_ok=True)
+    return docking.DockJob(
+        receptor, ligand or _ligand(tmp_path), str(grid), str(dock_dir),
+        params or {"seed": 42, "binding_modes": 2, "min_valid_affinity": -1.0},
+        flex, docking.EngineConfig(primary, fallback or primary, None, timeout))
+
+
+def test_score_read_from_pdbqt_not_rounded_stdout(tmp_path):
+    eng = _fake_engine(tmp_path)
+    name, score, metrics = docking.dock_ligand(_job(tmp_path, eng))
+    assert score == -11.521          # stdout table says -11.52
+    assert metrics["status"] == "OK"
+    assert metrics["engine"] == "Vina"
+    assert metrics["binding_modes"] == 2
+    assert metrics["simscore"] == pytest.approx(1.0)
+
+
+def test_stdout_disagreement_is_logged(tmp_path, monkeypatch, caplog):
+    eng = _fake_engine(tmp_path)
+    monkeypatch.setenv("FAKE_TABLE", "-10.9")
+    with caplog.at_level("WARNING"):
+        _, score, _ = docking.dock_ligand(_job(tmp_path, eng))
+    assert score == -11.521
+    assert "disagrees with the stdout" in caplog.text
+
+
+def test_parse_pdbqt_results(tmp_path):
+    p = tmp_path / "o.pdbqt"
+    p.write_text("MODEL 1\nREMARK VINA RESULT:   -11.521      0.000      0.000\nENDMDL\n"
+                 "MODEL 2\nREMARK VINA RESULT:   -10.004      1.234      2.345\nENDMDL\n")
+    assert docking.parse_pdbqt_results(str(p)) == [(-11.521, 0.0, 0.0),
+                                                   (-10.004, 1.234, 2.345)]
+    s = tmp_path / "s.pdbqt"   # smina --score_only keeps the input's Vina remark
+    s.write_text("MODEL 1\nREMARK minimizedAffinity -3.53028774\nREMARK minimizedRMSD -1\n"
+                 "REMARK VINA RESULT:    -2.717      0.000      0.000\nENDMDL\n")
+    assert docking.parse_pdbqt_results(str(s)) == [(-3.53028774, None, None)]
+    q = tmp_path / "q.pdbqt"   # QuickVina prints one decimal
+    q.write_text("MODEL 1\nREMARK VINA RESULT:      -2.7      0.000      0.000\nENDMDL\n")
+    assert docking.parse_pdbqt_results(str(q)) == [(-2.7, 0.0, 0.0)]
+
+
+def test_scores_agree_uses_print_precision():
+    assert docking._scores_agree("-11.521", "-11.52")
+    assert docking._scores_agree("-2.7", "-2.7")
+    assert not docking._scores_agree("-11.521", "-11.4")
+
+
+def test_out_of_window_result_is_reported_not_failed(tmp_path, monkeypatch):
+    eng = _fake_engine(tmp_path)
+    monkeypatch.setenv("FAKE_AFF", "-0.512")
+    monkeypatch.setenv("FAKE_TABLE", "-0.512")
+    name, score, metrics = docking.dock_ligand(_job(tmp_path, eng))
+    assert score is None
+    assert metrics["status"] == "OUT_OF_WINDOW"
+    assert metrics["raw_score"] == -0.512
+    assert "outside the accepted window" in metrics["error"]
+    log = open(metrics["log_file"]).read()
+    assert "# Result: OUT_OF_WINDOW" in log
+
+
+@pytest.mark.parametrize("score,inside", [
+    (-1.0, False), (-1.001, True), (-20.0, True), (-20.001, False), (0.0, False)])
+def test_affinity_window_bounds(score, inside):
+    assert docking.affinity_in_window(score, docking.DEFAULT_MIN_VALID_AFFINITY) is inside
+
+
+def test_command_logged_before_running_and_stderr_kept(tmp_path, monkeypatch):
+    eng = _fake_engine(tmp_path)
+    _, _, metrics = docking.dock_ligand(_job(tmp_path, eng))
+    log = open(metrics["log_file"]).read().splitlines()
+    assert log[0] == "# Attempt: Vina (primary)"
+    assert log[1].startswith("# Command: " + eng + " --receptor ")
+    # plain paths: identical to the old ' '.join() text the parity script splits
+    assert log[1].split(":", 1)[1].strip().split()[0] == eng
+    assert "WARNING: fake engine warning" in "\n".join(log)
+
+    monkeypatch.setenv("FAKE_MODE_vina", "crash")
+    _, score, metrics = docking.dock_ligand(_job(tmp_path, eng))
+    assert score is None and metrics["status"] == "FAILED"
+    text = open(metrics["log_file"]).read()
+    assert "# Command: " in text and "simulated crash" in text
+
+
+def test_traceback_is_real(tmp_path, monkeypatch):
+    eng = _fake_engine(tmp_path)
+
+    def boom(*a, **k):
+        raise KeyError("unexpected")
+
+    monkeypatch.setattr(docking, "_build_metrics", boom)
+    _, score, metrics = docking.dock_ligand(_job(tmp_path, eng))
+    assert metrics["status"] == "FAILED"
+    text = open(metrics["log_file"]).read()
+    assert "# Traceback:\nTraceback (most recent call last):" in text
+    assert "KeyError" in text
+
+
+def test_fallback_engine_is_recorded_and_warned(tmp_path, monkeypatch, caplog):
+    primary = _fake_engine(tmp_path, "vina")
+    fallback = _fake_engine(tmp_path, "qvina2")
+    monkeypatch.setenv("FAKE_MODE_vina", "crash")
+    with caplog.at_level("WARNING"):
+        _, score, metrics = docking.dock_ligand(_job(tmp_path, primary, fallback))
+    assert score == -11.521
+    assert metrics["engine"] == "QuickVina"
+    assert metrics["fallback_used"] is True
+    assert "fallback engine" in caplog.text
+
+
+def test_timeout_comes_from_job_config(tmp_path, monkeypatch):
+    eng = _fake_engine(tmp_path)
+    monkeypatch.setenv("FAKE_MODE_vina", "sleep")
+    monkeypatch.setattr(runner, "COMMAND_TIMEOUT", 999)
+    t0 = __import__("time").time()
+    _, score, metrics = docking.dock_ligand(_job(tmp_path, eng, timeout=1))
+    assert __import__("time").time() - t0 < 20
+    assert "timeout after 1s" in metrics["error"]
+
+
+def test_qvina_flexible_docking_passes_flex(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_HELP", "QuickVina 2.1\n  --flex arg\n  --config arg")
+    eng = _fake_engine(tmp_path, "qvina2")
+    assert docking._detect_vina_type(eng) == "quickvina"
+    flex = tmp_path / "flex.pdbqt"
+    flex.write_text("BEGIN_RES LYS A   1\nEND_RES LYS A   1\n")
+    _, score, metrics = docking.dock_ligand(_job(tmp_path, eng, flex=str(flex)))
+    assert score is not None, metrics
+    calls = open(os.path.join(os.path.dirname(eng), "calls.log")).read()
+    assert "--flex " + str(flex) in calls
+
+
+def test_engine_without_flex_support_fails_clearly(tmp_path, monkeypatch):
+    eng = _fake_engine(tmp_path, "vina")
+    monkeypatch.setenv("FAKE_HELP", "AutoDock Vina fake\n  --cpu arg\n  --seed arg")
+    flex = tmp_path / "flex.pdbqt"
+    flex.write_text("BEGIN_RES LYS A   1\nEND_RES LYS A   1\n")
+    _, score, metrics = docking.dock_ligand(_job(tmp_path, eng, flex=str(flex)))
+    assert metrics["status"] == "FAILED"
+    assert "do not accept --flex" in metrics["error"]
+
+
+def test_simscore_undefined_is_none(tmp_path):
+    p = tmp_path / "o.pdbqt"
+    p.write_text("MODEL 1\nREMARK VINA RESULT:   -7.000      0.000      0.000\nENDMDL\n")
+    m = docking._calculate_metrics(str(p), expected_modes=9)
+    assert m["simscore"] is None and m["binding_modes"] == 1
+    assert docking._calculate_protocol_simscore([]) == (None, None, None)
+
+
+def test_receptor_cache_keyed_by_content_stamp(tmp_path):
+    rec = tmp_path / "r.pdbqt"
+    rec.write_text("ATOM      1  N   LYS A   1       5.000   0.000   0.000  0.00  0.00    +0.000 N \n")
+    assert docking._cached_receptor_check(str(rec)) == (True, False)
+    rec.write_text("ATOM      1  N   LYS A   1       5.000   0.000   0.000  0.00  0.00    -0.300 N \n"
+                   "REMARK rewritten\n")
+    assert docking._cached_receptor_check(str(rec)) == (True, True)
+
+
+def test_explicit_params_beat_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("VS_EXHAUSTIVENESS", "32")
+    monkeypatch.setenv("VS_SEED", "7")
+    seen = {}
+
+    def fake(job):
+        seen.update(job.vina_params)
+        return runner.ligand_name(job.ligand), -7.0, {"status": "OK"}
+
+    monkeypatch.setattr(docking, "dock_ligand", fake)
+    lig = _ligand(tmp_path)
+    grid = tmp_path / "g.conf"
+    grid.write_text("center_x=0\ncenter_y=0\ncenter_z=0\nsize_x=20\nsize_y=20\nsize_z=20\n")
+    docking.dock_all(lig, [lig], str(grid), str(tmp_path / "o"), resume=False,
+                     vina_params={"exhaustiveness": 4})
+    assert seen["exhaustiveness"] == 4      # explicit wins
+    assert seen["seed"] == 7                # missing key filled from $VS_SEED
+
+
+def test_engine_config_reaches_worker_explicitly(tmp_path, monkeypatch):
+    """dock_all passes its EngineConfig inside each job (spawn-safe)."""
+    seen = []
+
+    def fake(job):
+        seen.append(job.engine)
+        return runner.ligand_name(job.ligand), -7.0, {"status": "OK"}
+
+    monkeypatch.setattr(docking, "dock_ligand", fake)
+    lig = _ligand(tmp_path)
+    grid = tmp_path / "g.conf"
+    grid.write_text("center_x=0\ncenter_y=0\ncenter_z=0\nsize_x=20\nsize_y=20\nsize_z=20\n")
+    cfg = docking.EngineConfig("/opt/x/vina", "/opt/x/vina", None, 33)
+    docking.dock_all(lig, [lig], str(grid), str(tmp_path / "o"), resume=False,
+                     vina_params={}, engine=cfg)
+    assert seen == [cfg]
+
+
+SPAWN_SCRIPT = r"""
+import json, multiprocessing, sys
+sys.path.insert(0, sys.argv[1])
+multiprocessing.set_start_method("spawn", force=True)
+from vspipeline import docking          # imported before runner on purpose
+if __name__ == "__main__":
+    engine, rec, lig1, lig2, grid, out = sys.argv[2:8]
+    cfg = docking.EngineConfig(engine, engine, None, 60)
+    results, cp, metrics = docking.dock_all(
+        rec, [lig1, lig2], grid, out, num_processes=2, resume=False,
+        vina_params={"seed": 42, "binding_modes": 2}, engine=cfg)
+    print(json.dumps({"results": sorted(results),
+                      "engines": sorted(m["engine_path"] for m in metrics.values())}))
+"""
+
+
+def test_dock_all_under_spawn_uses_explicit_engine(tmp_path):
+    """Workers started with 'spawn' re-import runner (whose globals would
+    point at the system vina); the EngineConfig passed in each job must win."""
+    import json
+    import subprocess
+    import sys
+    eng = _fake_engine(tmp_path)
+    job = _job(tmp_path, eng)
+    lig2 = _ligand(tmp_path, name="lig2")
+    script = tmp_path / "spawn_run.py"
+    script.write_text(SPAWN_SCRIPT)
+    pkg = os.path.join(os.path.dirname(__file__), "..", "autodocker")
+    proc = subprocess.run(
+        [sys.executable, str(script), pkg, eng, job.receptor, job.ligand, lig2,
+         job.grid_file, str(tmp_path / "spawn_out")],
+        capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    data = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert data["results"] == [["lig", -11.521], ["lig2", -11.521]]
+    assert data["engines"] == [eng, eng]

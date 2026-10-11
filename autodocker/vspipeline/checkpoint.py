@@ -1,49 +1,101 @@
 #!/usr/bin/env python3
-"""CHECKPOINT/RESUME SYSTEM.
+"""Checkpoint/resume store for docking results.
 
-Split out of runner.py (behavior-preserving refactor). All cross-module
-references go through the ``runner`` namespace at call time so the public
-entry point and its monkeypatch surface stay unchanged.
+Results are appended to a JSON-lines journal as they arrive and consolidated
+into ``.docking_checkpoint.json`` by :meth:`DockingCheckpoint.flush`, which
+writes atomically (temporary file + ``os.replace``) and then truncates the
+journal. An advisory lock (``fcntl``) on ``.docking.lock`` keeps two runs
+from sharing one output directory.
+
+The stored timestamp is bookkeeping only: it never reaches ranking.csv or any
+other result file.
 """
-import os
-import re
-import csv
+import fcntl
 import json
-import math
-import time
-import shlex
-import uuid
-import shutil
-import fnmatch
-import glob
-import html
-import statistics
-import subprocess
 import logging
-from collections import defaultdict
+import os
 from datetime import datetime
-from pathlib import Path
-from typing import List, Tuple, Optional, Dict
-from urllib.parse import quote
-from multiprocessing import Pool, cpu_count as mp_cpu_count
-
-# The runner module owns the tool-path globals (OBABEL, VINA*, SMINA,
-# COMMAND_TIMEOUT) and every public name; import it lazily-safe: during the
-# initial import of runner this binds the partially-initialized module
-# object, which is fine because attributes are only accessed at call time.
-import runner  # noqa: E402
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+LOCK_FILENAME = ".docking.lock"
+
+# Lock file descriptors held by this process, keyed by real path of the
+# output directory. POSIX record locks belong to the process and are dropped
+# when *any* descriptor of the file is closed, so each directory is opened
+# exactly once per process and kept open until release_lock().
+_HELD_LOCKS: Dict[str, int] = {}
+
+
+class OutputDirLockedError(RuntimeError):
+    """Another process holds the output directory's docking lock."""
+
+
+def acquire_lock(outdir: str) -> None:
+    """Take the advisory lock of ``outdir`` (re-entrant within a process).
+
+    Raises OutputDirLockedError when another process holds it.
+    """
+    key = os.path.realpath(outdir)
+    if key in _HELD_LOCKS:
+        return
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, LOCK_FILENAME)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise OutputDirLockedError(
+            f"Output directory {outdir} is in use by another AutoDocker run "
+            f"(lock held on {path}). Wait for it to finish or use a different "
+            "--output directory.")
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    _HELD_LOCKS[key] = fd
+
+
+def release_lock(outdir: str) -> None:
+    """Release the lock taken by acquire_lock (no-op when not held)."""
+    fd = _HELD_LOCKS.pop(os.path.realpath(outdir), None)
+    if fd is not None:
+        try:
+            fcntl.lockf(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _atomic_write_json(path: str, data) -> None:
+    """Write JSON to ``path`` so readers see either the old or the new file
+    (insertion order is kept)."""
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
 
 class DockingCheckpoint:
     """Manages docking progress and resume capability."""
 
-    def __init__(self, outdir: str, fingerprint: Optional[str] = None):
+    def __init__(self, outdir: str, fingerprint: Optional[str] = None,
+                 resume: bool = True):
         self.outdir = outdir
         self.checkpoint_file = os.path.join(outdir, ".docking_checkpoint.json")
         self.journal_file = os.path.join(outdir, ".docking_checkpoint.jsonl")
         self.meta_file = os.path.join(outdir, ".docking_checkpoint.meta.json")
-        self.completed = self._load_checkpoint()
+        acquire_lock(outdir)
+        if not resume:
+            self.completed = {}
+            self.clear()
+        else:
+            self.completed = self._load_checkpoint()
         if fingerprint is not None:
             self._check_fingerprint(fingerprint)
 
@@ -66,8 +118,7 @@ class DockingCheckpoint:
                 "result(s) and docking every ligand again")
             self.clear()
         try:
-            with open(self.meta_file, "w") as f:
-                json.dump({"fingerprint": fingerprint}, f)
+            _atomic_write_json(self.meta_file, {"fingerprint": fingerprint})
         except Exception as e:
             logger.warning(f"Could not write checkpoint fingerprint: {e}")
 
@@ -115,7 +166,7 @@ class DockingCheckpoint:
                 logger.warning(f"Could not replay checkpoint journal: {e}")
         if data:
             logger.info(
-                f"[✔] Loaded checkpoint: {len(data)} ligands already docked")
+                f"[*] Loaded checkpoint: {len(data)} ligands already docked")
         return data
 
     def is_completed(self, ligand_name: str, ligand_hash: Optional[str] = None) -> bool:
@@ -128,13 +179,11 @@ class DockingCheckpoint:
     def save_result(self, ligand_name: str, score: Optional[float],
                     metrics: Optional[Dict] = None,
                     ligand_hash: Optional[str] = None):
-        """Save docking result to checkpoint (``score`` is None for a cached
-        rejection: a valid run whose score was outside the accepted window).
+        """Save one docking result (``score`` is None for an OUT_OF_WINDOW
+        result, whose affinity is kept in ``metrics["raw_score"]``).
 
-        Updates the in-memory record and appends one O(1) line to the journal
-        (instead of rewriting the whole JSON each call), eliminating the
-        O(N**2) write amplification for large libraries. Call :meth:`flush`
-        at the end of a run to consolidate the journal into the JSON file.
+        Updates the in-memory record and appends one line to the journal;
+        :meth:`flush` consolidates the journal into the JSON file at run end.
         """
         self.completed[ligand_name] = {
             "score": score,
@@ -151,31 +200,40 @@ class DockingCheckpoint:
                     "metrics": metrics or {},
                     "ligand_hash": ligand_hash,
                 }) + "\n")
+                f.flush()
         except Exception as e:
             logger.warning(f"Failed to journal checkpoint: {e}")
             self._persist()
 
         # Keep the consolidated .json present immediately (so external checks
-        # see the file right away) but only rewrite it on the first save;
-        # subsequent saves rely on the O(1) journal append and the final
-        # flush(), avoiding a full-dict rewrite per ligand (was O(N**2) I/O).
+        # see the file right away) but only write it on the first save;
+        # later saves rely on the journal and the final flush().
         if not os.path.exists(self.checkpoint_file):
-            try:
-                self._persist()
-            except Exception as e:
-                logger.warning(f"Failed to seed checkpoint file: {e}")
+            self._persist()
 
-    def _persist(self):
-        """Consolidate the in-memory state into the JSON checkpoint file."""
+    def _persist(self) -> bool:
+        """Atomically write the in-memory state to the JSON checkpoint."""
         try:
-            with open(self.checkpoint_file, "w") as f:
-                json.dump(self.completed, f, indent=2)
+            _atomic_write_json(self.checkpoint_file, self.completed)
+            return True
         except Exception as e:
             logger.warning(f"Failed to save checkpoint: {e}")
+            return False
 
     def flush(self):
-        """Write the consolidated JSON checkpoint (call once at run end)."""
-        self._persist()
+        """Write the consolidated JSON checkpoint and, once it is safely on
+        disk, truncate the journal it now contains (call at run end)."""
+        if self._persist() and os.path.exists(self.journal_file):
+            try:
+                with open(self.journal_file, "w"):
+                    pass
+            except Exception as e:
+                logger.warning(f"Could not truncate checkpoint journal: {e}")
+
+    def close(self):
+        """Flush and release the output-directory lock."""
+        self.flush()
+        release_lock(self.outdir)
 
     def get_results(self, names: Optional[List[str]] = None) -> List[Tuple[str, float]]:
         """Return completed results as (ligand_name, score) tuples, limited to
