@@ -319,6 +319,9 @@ AFFINITY_BANDS = (
     (-4.0, "warning", "Weak"),
     (None, "bad", "Poor"),
 )
+# Verbal labels for |Spearman rho| between the Vina and SMINA scores in the
+# report (a common rule of thumb; the number itself is always shown).
+RHO_STRENGTH_BANDS = ((0.7, "strong"), (0.4, "moderate"), (0.2, "weak"))
 STRONG_BINDER_CUTOFF = -6.0  # "Good" or better
 
 # Status values of ranking.csv rows that carry no usable score
@@ -696,14 +699,8 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
         _rho = float(scorer_agreement["rho"])
         _n = int(scorer_agreement.get("n", 0))
         _abs = abs(_rho)
-        if _abs >= 0.7:
-            _strength = "strong"
-        elif _abs >= 0.4:
-            _strength = "moderate"
-        elif _abs >= 0.2:
-            _strength = "weak"
-        else:
-            _strength = "negligible"
+        _strength = next((label for cutoff, label in RHO_STRENGTH_BANDS
+                          if _abs >= cutoff), "negligible")
         _direction = ("concordant" if _rho > 0 else
                       "discordant" if _rho < 0 else "uncorrelated")
         _scoring = html.escape(str(scorer_agreement.get("scoring") or "vinardo"))

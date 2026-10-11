@@ -174,7 +174,10 @@ def test_qvina_docking_real(tmp_path):
 _PARAM_SOURCES = [
     os.path.expanduser("~/.local/share/autodock/AD4.1_bound.dat"),
     "/usr/share/autogrid/Tests/AD4.1_bound.dat",
-    "/home/mostakim_sakib/Projects/autodocker/autodocker/tools/autodock-vina/repo/data/AD4_parameters.dat",
+    # The Vina submodule ships the AD4 parameters (present when submodules
+    # are checked out, as in CI and the image build).
+    os.path.join(os.path.dirname(__file__), "..", "tools", "autodock-vina",
+                 "repo", "data", "AD4_parameters.dat"),
 ]
 
 

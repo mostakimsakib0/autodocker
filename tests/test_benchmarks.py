@@ -13,8 +13,9 @@ import random
 import pytest
 
 SCRIPTS = os.path.join(os.path.dirname(__file__), "..", "scripts")
-AKT1_RANKING = os.path.expanduser(
-    "~/Downloads/Research/benchmark_data/results_v115/enrichment/akt1/ranking.csv")
+# Optional real-data check: point AUTODOCKER_AKT1_RANKING at an archived DUD-E
+# akt1 ranking.csv (150 ligands, some failed) to run it; skipped otherwise.
+AKT1_RANKING = os.environ.get("AUTODOCKER_AKT1_RANKING", "")
 
 
 def _load(name):
@@ -306,7 +307,7 @@ class TestRankingInput:
             bl.read_ranking(path)
 
     @pytest.mark.skipif(not os.path.exists(AKT1_RANKING),
-                        reason="benchmark_data akt1 ranking not available")
+                        reason="set AUTODOCKER_AKT1_RANKING to run")
     def test_real_akt1_ranking_keeps_failures(self):
         names, scores, _ = be.collect_scores(AKT1_RANKING)
         row = be.compute_stats(names, scores, 1, 0)

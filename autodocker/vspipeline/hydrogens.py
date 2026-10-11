@@ -35,6 +35,12 @@ import runner  # noqa: E402  (tool paths and run helpers, resolved at call time)
 
 logger = logging.getLogger(__name__)
 
+# Hybridisation from the mean bond angle at the parent atom: roughly the
+# midpoints between the ideal angles of sp3 (109.47), sp2 (120) and sp (180)
+# centres. Kept at the exact values the hydrogen placement was validated with.
+SP2_SP3_ANGLE_CUTOFF = 114.7  # degrees
+SP_SP2_ANGLE_CUTOFF = 150.0   # degrees
+
 PDBQT_HYDROGEN_TYPES = frozenset({"H", "HD", "HS"})
 
 # Open Babel covalent radii (src/elementtable.h) and the bond tolerance of
@@ -339,9 +345,9 @@ def _hybridisation(xyz, nbr_xyz, h_xyz) -> int:
     if not angles:
         return 3
     mean = sum(angles) / len(angles)
-    if mean > 150.0:
+    if mean > SP_SP2_ANGLE_CUTOFF:
         return 1
-    return 2 if mean > 114.7 else 3
+    return 2 if mean > SP2_SP3_ANGLE_CUTOFF else 3
 
 
 def _ligand_candidates(xyz, q_xyz, ref_xyz, hyb, n_h):
