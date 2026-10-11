@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
+from vspipeline import defaults  # noqa: E402
 import runner  # noqa: E402  (tool paths and shared helpers, resolved at call time)
 from vspipeline import conformers, net  # noqa: E402
 from vspipeline.admet import (  # noqa: E402
@@ -46,8 +47,8 @@ Z_EPSILON = 1e-4
 # some axis (PDBQT coordinates have 3 decimals) is planar-degenerate.
 PLANAR_SPREAD_EPSILON = 1e-3
 
-DEFAULT_MINIMIZE_STEPS = 250
-DEFAULT_MAX_COMPOUNDS = 20
+DEFAULT_MINIMIZE_STEPS = defaults.MINIMIZE_STEPS
+DEFAULT_MAX_COMPOUNDS = defaults.MAX_COMPOUNDS
 # Seed of the 3D embedding of 2D inputs when the caller gives none (the
 # runner passes --seed).
 DEFAULT_EMBED_SEED = conformers.EMBED_SEED
@@ -246,8 +247,10 @@ class LibraryManager:
         return self._build_pubchem_library("fda", self.FDA_DRUG_NAMES, limits,
                                            max_compounds)
 
-    def create_custom_library(self, mw_min: float = 200, mw_max: float = 500,
-                              logp_max: float = 5, apply_lipinski: bool = True, *,
+    def create_custom_library(self, mw_min: float = defaults.CUSTOM_MW_MIN,
+                              mw_max: float = defaults.CUSTOM_MW_MAX,
+                              logp_max: float = defaults.CUSTOM_LOGP_MAX,
+                              apply_lipinski: bool = True, *,
                               apply_admet: Optional[bool] = None,
                               max_compounds: Optional[int] = None) -> List[str]:
         """Download ``FALLBACK_LIBRARY_NAMES`` from PubChem and keep the

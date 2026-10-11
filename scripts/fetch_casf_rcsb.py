@@ -74,7 +74,7 @@ def fetch(url, retries=4):
     for attempt in range(retries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "autodocker-bench"})
-            with urllib.request.urlopen(req, timeout=120) as r:
+            with urllib.request.urlopen(req, timeout=_benchlib.DOWNLOAD_TIMEOUT) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
             if e.code == 404:
@@ -211,7 +211,7 @@ def inchikey(source, is_smiles=False):
     """Standard InChIKey via Open Babel (None when it cannot be computed)."""
     args = ["obabel", f"-:{source}"] if is_smiles else ["obabel", source]
     proc = subprocess.run(args + ["-oinchikey"], capture_output=True, text=True,
-                          timeout=120)
+                          timeout=_benchlib.TOOL_TIMEOUT)
     key = proc.stdout.strip().split()
     return key[0] if key and len(key[0]) == 27 else None
 
@@ -263,7 +263,7 @@ def skeleton_hash(elements, edges, iterations=6):
 def smiles_sdf(smiles):
     """Connection table of a SMILES string (Open Babel, no coordinates)."""
     return subprocess.run(["obabel", f"-:{smiles}", "-osdf"], capture_output=True,
-                          text=True, timeout=120).stdout
+                          text=True, timeout=_benchlib.TOOL_TIMEOUT).stdout
 
 
 def normalize_sdf_elements(sdf):

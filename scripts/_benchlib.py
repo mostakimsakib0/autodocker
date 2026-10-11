@@ -23,6 +23,23 @@ import re
 import shutil
 import subprocess
 
+# Timeouts (seconds) for the external helpers and downloads used by the
+# benchmark scripts.
+TOOL_TIMEOUT = 120          # obrms, obabel conversions
+VERSION_TIMEOUT = 30        # `<tool> --version`
+RUNNER_VERSION_TIMEOUT = 60  # `runner.py --version` (imports the pipeline)
+DOWNLOAD_TIMEOUT = 120      # one HTTP download (RCSB)
+
+
+def available_cpus():
+    """CPUs this process may use (respects affinity/cgroup pinning); the
+    default number of parallel workers of the benchmark scripts."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
+
+
 # ---------------------------------------------------------------------------
 # Docking frame
 # ---------------------------------------------------------------------------
@@ -337,7 +354,7 @@ def resolve_docked_file(ranking_csv, docked_file):
 # ---------------------------------------------------------------------------
 
 
-def obrms(ref, query, timeout=120):
+def obrms(ref, query, timeout=TOOL_TIMEOUT):
     """Heavy-atom, symmetry-aware RMSD (Open Babel ``obrms``) without
     superposition. Raises RuntimeError when obrms fails or prints no value."""
     proc = subprocess.run(["obrms", ref, query], capture_output=True,
@@ -352,7 +369,7 @@ def obrms(ref, query, timeout=120):
     raise RuntimeError(f"no RMSD in obrms output: {proc.stdout[-300:]!r}")
 
 
-def tool_version(binary, args=("--version",), timeout=30):
+def tool_version(binary, args=("--version",), timeout=VERSION_TIMEOUT):
     """First non-empty output line of ``binary --version`` (or None)."""
     path = shutil.which(binary) if binary and not os.path.isabs(binary) else binary
     if not path or not os.path.exists(path):
@@ -368,7 +385,7 @@ def tool_version(binary, args=("--version",), timeout=30):
     return None
 
 
-def runner_version(runner_script, timeout=60):
+def runner_version(runner_script, timeout=RUNNER_VERSION_TIMEOUT):
     """``AutoDocker x.y.z`` as printed by ``runner.py --version``."""
     import sys
     try:
@@ -426,7 +443,7 @@ def rdkit_start_conformer(src, out_mol2, seed, mmff_iters=ETKDG_MMFF_ITERS):
     if not src.lower().endswith(".sdf"):
         sdf = os.path.join(tmp_dir, os.path.basename(src) + ".tmp.sdf")
         subprocess.run(["obabel", src, "-osdf", "-O", sdf], check=True,
-                       capture_output=True, timeout=120)
+                       capture_output=True, timeout=TOOL_TIMEOUT)
     mol = Chem.MolFromMolFile(sdf, removeHs=False, sanitize=True)
     if mol is None:
         raise RuntimeError(f"RDKit could not read {sdf}")
@@ -454,7 +471,7 @@ def rdkit_start_conformer(src, out_mol2, seed, mmff_iters=ETKDG_MMFF_ITERS):
         f.write("$$$$\n")
     try:
         subprocess.run(["obabel", "-isdf", tmp_sdf, "-omol2", "-O", out_mol2],
-                       check=True, capture_output=True, timeout=120)
+                       check=True, capture_output=True, timeout=TOOL_TIMEOUT)
     finally:
         os.remove(tmp_sdf)
         if sdf != src and os.path.exists(sdf):

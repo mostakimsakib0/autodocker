@@ -323,8 +323,8 @@ def main(argv=None):
                     help="Legacy 1.1.x selection: first N sorted IDs in --data-dir")
     ap.add_argument("--outdir", default="benchmarks/results/redock")
     ap.add_argument("--runner", default="autodocker/runner.py")
-    ap.add_argument("--processes", type=int, default=8,
-                    help="Complexes docked in parallel")
+    ap.add_argument("--processes", type=int, default=_benchlib.available_cpus(),
+                    help="Complexes docked in parallel (default: available CPUs)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--exhaustiveness", type=int, default=8)
     ap.add_argument("--binding-modes", type=int, default=9)

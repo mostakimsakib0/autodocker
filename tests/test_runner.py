@@ -349,3 +349,31 @@ def test_sources_are_ascii(module):
     path = os.path.join(os.path.dirname(runner.__file__), module)
     text = open(path, encoding="utf-8").read()
     assert all(ord(c) < 128 for c in text), module
+
+
+def test_cli_defaults_come_from_the_defaults_module():
+    """Every scientific default is defined once, in vspipeline/defaults.py."""
+    from vspipeline import defaults
+    p = runner.build_parser()
+    got = {a.dest: a.default for a in p._actions}
+    expected = {
+        "exhaustiveness": defaults.EXHAUSTIVENESS,
+        "binding_modes": defaults.BINDING_MODES,
+        "energy_range": defaults.ENERGY_RANGE,
+        "processes": defaults.PROCESSES,
+        "min_valid_affinity": defaults.MIN_VALID_AFFINITY,
+        "max_failure_fraction": defaults.MAX_FAILURE_FRACTION,
+        "ph": defaults.PH,
+        "padding": defaults.PADDING,
+        "water_distance": defaults.WATER_DISTANCE,
+        "minimize_steps": defaults.MINIMIZE_STEPS,
+        "max_compounds": defaults.MAX_COMPOUNDS,
+        "mw_min": defaults.CUSTOM_MW_MIN,
+        "mw_max": defaults.CUSTOM_MW_MAX,
+        "logp_max": defaults.CUSTOM_LOGP_MAX,
+        "top_n": defaults.TOP_N,
+        "rmsd_threshold": defaults.RMSD_THRESHOLD,
+    }
+    assert {k: got[k] for k in expected} == expected
+    assert runner.DEFAULT_SEED == defaults.SEED
+    assert runner.AUTO_FLEX_RADIUS == defaults.AUTO_FLEX_RADIUS

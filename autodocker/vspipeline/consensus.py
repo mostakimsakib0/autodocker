@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from multiprocessing import Pool
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from vspipeline import defaults  # noqa: E402
 from vspipeline.docking import (
     runner,  # lazily imported runner module (see docking._LazyRunner)
     DEFAULT_MIN_VALID_AFFINITY,
@@ -155,7 +156,7 @@ def run_smina_docking(
     output_pdbqt: str,
     cx: float, cy: float, cz: float,
     sx: float, sy: float, sz: float,
-    exhaustiveness: int = 8,
+    exhaustiveness: int = defaults.EXHAUSTIVENESS,
     seed: Optional[int] = None,
     cpu: Optional[int] = None,
     flex_file: Optional[str] = None,

@@ -12,11 +12,12 @@ logs a warning that the coordinates are not reproducible.
 """
 import logging
 from typing import Callable, Optional
+from vspipeline import defaults  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 # Seed for ETKDG embedding; fixed so identical input gives identical output.
-EMBED_SEED = 42
+EMBED_SEED = defaults.SEED
 # Force-field iterations after embedding (a fixed count, not a convergence
 # criterion that could depend on timing).
 FORCE_FIELD_MAX_ITERS = 2000

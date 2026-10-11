@@ -110,6 +110,9 @@ changes (below) are part of 2.0.0.
   more ligands fail than `--max-failure-fraction` (default 0.5) allows;
   130 when interrupted.
 - The druggability label uses fpocket's documented threshold of 0.5.
+- Default settings are defined once (`autodocker/vspipeline/defaults.py`);
+  the container passes an option only when its environment variable is set,
+  and the benchmark scripts default to the available CPUs instead of 8.
 
 ### Added
 

@@ -9,6 +9,7 @@ import math
 import os
 import re
 from typing import Dict, List, Optional, Tuple
+from vspipeline import defaults  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,8 @@ _PDBQT_HYDROGEN_TYPES = ("H", "HD", "HS")
 
 
 def detect_flexible_residues(pdbqt_file: str, binding_site_coords: Tuple[float, float, float],
-                             radius: float = 8.0, max_residues: int = 10) -> List[str]:
+                             radius: float = defaults.AUTO_FLEX_RADIUS,
+                             max_residues: int = defaults.AUTO_FLEX_MAX_RESIDUES) -> List[str]:
     """Auto-detect residues near the binding site that can be made flexible.
 
     Residues are ranked by their closest heavy atom to the site (ties: by

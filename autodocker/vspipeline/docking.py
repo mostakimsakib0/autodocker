@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing import Pool
 from typing import Dict, List, Optional, Sequence, Tuple, Union
+from vspipeline import defaults  # noqa: E402
 
 
 
@@ -69,7 +70,7 @@ logger = logging.getLogger(__name__)
 # valid engine results: they are reported with status OUT_OF_WINDOW, never
 # re-docked and never counted as failures.
 AFFINITY_FLOOR = -20.0
-DEFAULT_MIN_VALID_AFFINITY = -1.0
+DEFAULT_MIN_VALID_AFFINITY = defaults.MIN_VALID_AFFINITY
 
 # In-window scores at or above this value get status WEAK instead of OK.
 WEAK_AFFINITY_THRESHOLD = -4.0
@@ -954,10 +955,10 @@ def _run_fingerprint(receptor: str, grid_file: str, flex_file: Optional[str],
 def _default_vina_params() -> Dict:
     """Defaults for keys a caller leaves out ($VS_* environment, else built-in)."""
     return {
-        'exhaustiveness': int(os.environ.get('VS_EXHAUSTIVENESS', 8)),
-        'binding_modes': int(os.environ.get('VS_BINDING_MODES', 9)),
-        'energy_range': float(os.environ.get('VS_ENERGY_RANGE', 3.0)),
-        'seed': int(os.environ.get('VS_SEED', 42)),
+        'exhaustiveness': int(os.environ.get('VS_EXHAUSTIVENESS', defaults.EXHAUSTIVENESS)),
+        'binding_modes': int(os.environ.get('VS_BINDING_MODES', defaults.BINDING_MODES)),
+        'energy_range': float(os.environ.get('VS_ENERGY_RANGE', defaults.ENERGY_RANGE)),
+        'seed': int(os.environ.get('VS_SEED', defaults.SEED)),
         'min_valid_affinity': float(os.environ.get('VS_MIN_VALID_AFFINITY',
                                                    DEFAULT_MIN_VALID_AFFINITY)),
         'threads': (int(os.environ['VS_THREADS'])

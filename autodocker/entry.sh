@@ -170,25 +170,31 @@ fi
 echo "[*] Protein loaded: $(basename "$PDB")"
 
 # Run the pipeline
+# The container docks on all available CPUs unless PROCESSES (or MAX_WORKERS)
+# says otherwise; runner.py itself defaults to one process.
 PROCESSES="${PROCESSES:-${MAX_WORKERS:--1}}"
-EXHAUSTIVENESS="${EXHAUSTIVENESS:-${EXHAUST:-8}}"
-BINDING_MODES="${BINDING_MODES:-9}"
-ENERGY_RANGE="${ENERGY_RANGE:-3.0}"
-PADDING="${PADDING:-6}"
-TOP_N="${TOP_N:-20}"
+EXHAUSTIVENESS="${EXHAUSTIVENESS:-${EXHAUST:-}}"
 
 CMD=(
 	"$SCRIPT"
 	-r "$PDB"
 	-l "$LIGS"
 	-o "$OUT"
-	--padding "$PADDING"
-	--exhaustiveness "$EXHAUSTIVENESS"
-	--binding-modes "$BINDING_MODES"
-	--energy-range "$ENERGY_RANGE"
-	--top-n "$TOP_N"
 	-p "$PROCESSES"
 )
+
+# Other settings are passed only when their variable is set, so the defaults
+# live in one place (autodocker/vspipeline/defaults.py, see runner.py --help).
+add_opt() {  # add_opt VALUE OPTION
+	if [ -n "$1" ]; then
+		CMD+=("$2" "$1")
+	fi
+}
+add_opt "$EXHAUSTIVENESS" --exhaustiveness
+add_opt "${BINDING_MODES:-}" --binding-modes
+add_opt "${ENERGY_RANGE:-}" --energy-range
+add_opt "${PADDING:-}" --padding
+add_opt "${TOP_N:-}" --top-n
 
 # Per-command timeout: only pass --timeout when TIMEOUT is set, so that
 # runner.py's own default (VS_COMMAND_TIMEOUT, else 900 s) applies otherwise.

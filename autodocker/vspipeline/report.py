@@ -25,6 +25,7 @@ from typing import List, Tuple, Optional, Dict
 # COMMAND_TIMEOUT) and every public name; import it lazily-safe: during the
 # initial import of runner this binds the partially-initialized module
 # object, which is fine because attributes are only accessed at call time.
+from vspipeline import defaults  # noqa: E402
 import runner  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ def extract_coordinates_from_pdbqt(pdbqt_file: str) -> Tuple[str, List[Tuple[flo
 _cluster_cache: Dict[Tuple, Dict] = {}
 
 
-def cluster_poses(poses_dir: str, rmsd_threshold: float = 2.0,
+def cluster_poses(poses_dir: str, rmsd_threshold: float = defaults.RMSD_THRESHOLD,
                   ligands: Optional[List[str]] = None) -> Dict[str, List[Dict]]:
     """Greedy clustering of each ligand's docked modes.
 
@@ -291,7 +292,7 @@ def _fetch_ngljs() -> Optional[bytes]:
 
     for attempt in (1, 2):
         try:
-            data = runner._http_get_bytes(NGL_CDN_URL, timeout=60)
+            data = runner._http_get_bytes(NGL_CDN_URL, timeout=NGL_DOWNLOAD_TIMEOUT)
         except Exception as e:
             logger.debug(f"NGL download attempt {attempt} failed: {e}")
             time.sleep(1)
@@ -321,6 +322,8 @@ AFFINITY_BANDS = (
 )
 # Verbal labels for |Spearman rho| between the Vina and SMINA scores in the
 # report (a common rule of thumb; the number itself is always shown).
+# Seconds allowed for downloading the NGL viewer when no local copy exists.
+NGL_DOWNLOAD_TIMEOUT = 60
 RHO_STRENGTH_BANDS = ((0.7, "strong"), (0.4, "moderate"), (0.2, "weak"))
 STRONG_BINDER_CUTOFF = -6.0  # "Good" or better
 
@@ -575,7 +578,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                           meta: Optional[Dict] = None,
                           grid_file: Optional[str] = None,
                           scorer_agreement: Optional[Dict] = None,
-                          rmsd_threshold: float = 2.0) -> bool:
+                          rmsd_threshold: float = defaults.RMSD_THRESHOLD) -> bool:
     """Write a single-file HTML screening report.
 
     Includes a table of contents, run metadata, summary statistics, an

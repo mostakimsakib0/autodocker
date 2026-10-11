@@ -16,6 +16,7 @@ import logging
 import os
 from typing import Dict, List, Optional, Tuple
 
+from vspipeline import defaults  # noqa: E402
 from vspipeline.docking import (SIMSCORE_RMSD_LB_CUTOFF, SIMSCORE_RMSD_UB_CUTOFF,
                                  Status)
 
@@ -59,7 +60,7 @@ def _minimized_text(meta: Dict) -> str:
 class ResultsAnalyzer:
     """Writes the ranking and the text reports of one screen."""
 
-    def __init__(self, outdir: str, top_n: int = 20):
+    def __init__(self, outdir: str, top_n: int = defaults.TOP_N):
         self.outdir = outdir
         self.top_n = top_n
         self.results_file = os.path.join(outdir, "Results_full.txt")

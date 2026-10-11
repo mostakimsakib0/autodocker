@@ -28,6 +28,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # every public name; during the initial import of runner this binds the
 # partially-initialized module object, which is fine because attributes are
 # only accessed at call time.
+from vspipeline import defaults  # noqa: E402
 import runner  # noqa: E402
 from vspipeline.hydrogens import (  # noqa: E402,F401  (some re-exported)
     H_PARENT_MAX_DISTANCE,
@@ -57,7 +58,7 @@ MODIFIED_RESIDUES = {
 # A receptor with fewer ATOM records than this is rejected as truncated.
 MIN_PROTEIN_ATOM_LINES = 100
 # Default padding (A) added on each side of the pocket atoms' bounding box.
-DEFAULT_PADDING = 6.0
+DEFAULT_PADDING = defaults.PADDING
 # Minimum edge (A) of the whole-receptor box used with --no-fpocket.
 MIN_RECEPTOR_BOX_SIZE = 24.0
 # Chain ID given to ATOM/HETATM records whose chain column is blank.
@@ -573,7 +574,7 @@ class ProteinPreparation:
         _strip_remark_name_paths(self.receptor_pdbqt)
 
     def prepare_receptor(self, chain: str = BLANK_CHAIN_ID, keep_hetero: bool = False,
-                         ph: float = 7.4) -> List[str]:
+                         ph: float = defaults.PH) -> List[str]:
         """Clean protein and convert to PDBQT."""
         available_chains = runner.get_chains(self.pdb_file)
         selected_chains = runner._parse_chain_selection(chain, available_chains)

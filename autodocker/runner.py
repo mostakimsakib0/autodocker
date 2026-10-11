@@ -34,6 +34,8 @@ import sys
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+from vspipeline import defaults
+
 _FALLBACK_VERSION = "2.0.0"
 
 
@@ -73,11 +75,11 @@ EXIT_USAGE = 2              # invalid options/environment or missing tools
 EXIT_TOO_MANY_FAILURES = 3  # outputs written, but too many ligands failed to dock
 EXIT_INTERRUPTED = 130      # Ctrl-C (128 + SIGINT)
 
-DEFAULT_SEED = 42
-DEFAULT_COMMAND_TIMEOUT = 900  # seconds
+DEFAULT_SEED = defaults.SEED
+DEFAULT_COMMAND_TIMEOUT = defaults.COMMAND_TIMEOUT  # seconds
 # Residues within this distance (Angstrom) of the box center are candidates
 # for --auto-flexible.
-AUTO_FLEX_RADIUS = 8.0
+AUTO_FLEX_RADIUS = defaults.AUTO_FLEX_RADIUS
 # Box edge lengths (Angstrom) outside this range get a warning.
 TYPICAL_GRID_SIZE_RANGE = (15.0, 40.0)
 # Timeout (seconds) for the "--version" probes of the external tools.
@@ -336,9 +338,9 @@ __all__ = [
 # COMMAND LINE
 # =============================
 
-DEFAULT_BINDING_MODES = 9
-DEFAULT_ENERGY_RANGE = 3.0
-DEFAULT_MAX_FAILURE_FRACTION = 0.5
+DEFAULT_BINDING_MODES = defaults.BINDING_MODES
+DEFAULT_ENERGY_RANGE = defaults.ENERGY_RANGE
+DEFAULT_MAX_FAILURE_FRACTION = defaults.MAX_FAILURE_FRACTION
 
 # Options that only apply to --library custom (or fda for --max-compounds);
 # main() detects whether they were given explicitly.
@@ -389,12 +391,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="local: the files of -l; fda: a fixed list of 74 well-known "
                      "approved drugs downloaded from PubChem (not the full FDA list); "
                      "custom: the same list filtered by --mw-min/--mw-max/--logp-max")
-    lib.add_argument("--mw-min", type=float, default=200.0,
+    lib.add_argument("--mw-min", type=float, default=defaults.CUSTOM_MW_MIN,
                      help="--library custom only: minimum molecular weight (Da)")
-    lib.add_argument("--mw-max", type=float, default=500.0,
+    lib.add_argument("--mw-max", type=float, default=defaults.CUSTOM_MW_MAX,
                      help="--library custom only: maximum molecular weight (Da); "
                      "replaces Lipinski's MW <= 500")
-    lib.add_argument("--logp-max", type=float, default=5.0,
+    lib.add_argument("--logp-max", type=float, default=defaults.CUSTOM_LOGP_MAX,
                      help="--library custom only: maximum logP (Open Babel's "
                      "Wildman-Crippen logP, the model used everywhere); replaces "
                      "Lipinski's logP <= 5")
@@ -411,21 +413,21 @@ def build_parser() -> argparse.ArgumentParser:
     lib.add_argument("--no-minimize", action="store_true",
                      help="Skip MMFF94 ligand minimization (applies to SDF and PubChem "
                      "ligands only; MOL2/PDB/PDBQT keep their input coordinates)")
-    lib.add_argument("--minimize-steps", type=int, default=250,
+    lib.add_argument("--minimize-steps", type=int, default=defaults.MINIMIZE_STEPS,
                      help="MMFF94 minimization steps (SDF and PubChem ligands only)")
 
     rec = parser.add_argument_group("receptor and docking box")
     rec.add_argument("--chain", default=None,
                      help="Protein chain(s), e.g. A, A,B, or all (IDs are case-sensitive). "
                      "Default: the first chain in sorted order (a warning lists the others)")
-    rec.add_argument("--ph", type=float, default=7.4,
+    rec.add_argument("--ph", type=float, default=defaults.PH,
                      help="pH at which receptor hydrogens are added (Open Babel -p)")
     rec.add_argument("--keep-hetero", action="store_true",
                      help="Keep matching HETATM records during receptor cleaning")
     rec.add_argument("--pockets",
                      help="fpocket pocket number(s), e.g. 1 or 2,3. Default: best fpocket "
                      "score (druggability breaks ties)")
-    rec.add_argument("--padding", type=float, default=6.0,
+    rec.add_argument("--padding", type=float, default=defaults.PADDING,
                      help="Box padding around the selected pocket(s), Angstrom")
     rec.add_argument("--no-fpocket", action="store_true",
                      help="Skip fpocket; dock in a box around the whole receptor (heavy-atom "
@@ -442,7 +444,7 @@ def build_parser() -> argparse.ArgumentParser:
                      "overrides auto-detection")
     rec.add_argument("--keep-waters", action="store_true",
                      help="Keep water molecules near the binding site in the receptor")
-    rec.add_argument("--water-distance", type=float, default=4.0,
+    rec.add_argument("--water-distance", type=float, default=defaults.WATER_DISTANCE,
                      help="Distance from the box center within which waters are kept (Angstrom)")
     rec.add_argument("--detect-metals", action="store_true",
                      help="Keep metal ions in the receptor (Vina metal atom types)")
@@ -461,10 +463,10 @@ def build_parser() -> argparse.ArgumentParser:
                       f"{AUTO_FLEX_RADIUS:g} A) flexible")
 
     dock = parser.add_argument_group("docking")
-    dock.add_argument("-p", "--processes", type=int, default=1,
+    dock.add_argument("-p", "--processes", type=int, default=defaults.PROCESSES,
                       help="Parallel docking processes: N > 0 uses N; 0 or -1 uses all "
                       "available CPUs; -N (N > 1) uses available CPUs / N")
-    dock.add_argument("--exhaustiveness", type=int, default=8,
+    dock.add_argument("--exhaustiveness", type=int, default=defaults.EXHAUSTIVENESS,
                       help="Vina exhaustiveness (>= 1; 8 is Vina's default, higher is "
                       "more thorough and slower)")
     dock.add_argument("--binding-modes", type=int, default=DEFAULT_BINDING_MODES,
@@ -476,7 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
     dock.add_argument("--threads", type=int, default=None,
                       help="CPU threads per Vina process, passed as --cpu (default: all "
                       "cores, or cores divided by -p when -p > 1)")
-    dock.add_argument("--min-valid-affinity", type=float, default=-1.0,
+    dock.add_argument("--min-valid-affinity", type=float, default=defaults.MIN_VALID_AFFINITY,
                       help="Upper bound of the accepted affinity window (kcal/mol): scores "
                       f">= this, or < {AFFINITY_FLOOR:g}, are reported as OUT_OF_WINDOW")
     dock.add_argument("--vina-bin",
@@ -503,7 +505,7 @@ def build_parser() -> argparse.ArgumentParser:
                       "--vina-bin, --vina-extra or non-default --binding-modes/--energy-range)")
 
     out = parser.add_argument_group("analysis and reports")
-    out.add_argument("--top-n", type=int, default=20,
+    out.add_argument("--top-n", type=int, default=defaults.TOP_N,
                      help="Number of compounds in Top_hits.txt")
     out.add_argument("--html-report", dest="html_report", action="store_true",
                      default=True,
@@ -515,7 +517,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Write pose_clusters.json (greedy RMSD clustering of each "
                      "ligand's poses). The HTML report clusters poses with "
                      "--rmsd-threshold whether or not this is given")
-    out.add_argument("--rmsd-threshold", type=float, default=2.0,
+    out.add_argument("--rmsd-threshold", type=float, default=defaults.RMSD_THRESHOLD,
                      help="RMSD clustering threshold (Angstrom)")
 
     parser.add_argument("-v", "--verbose", action="store_true",

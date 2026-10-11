@@ -115,6 +115,10 @@ def _gzip_ok(path):
         return False
 
 
+# DUD-E downloads are large (decoy files of tens of MB) and the server is slow.
+DOWNLOAD_TIMEOUT = 180  # seconds per attempt
+
+
 def download(url, dest, retries=5, backoff=10.0):
     if os.path.exists(dest) and os.path.getsize(dest) > 0 and _gzip_ok(dest):
         return
@@ -129,7 +133,7 @@ def download(url, dest, retries=5, backoff=10.0):
     last_err = None
     for attempt in range(1, retries + 1):
         try:
-            with urllib.request.urlopen(req, timeout=180) as r, open(dest, "wb") as out:
+            with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT) as r, open(dest, "wb") as out:
                 shutil.copyfileobj(r, out)
             if not _gzip_ok(dest):
                 raise RuntimeError("gzip integrity check failed (truncated body)")
@@ -749,7 +753,8 @@ def main(argv=None):
     ap.add_argument("--runner", default="autodocker/runner.py")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--exhaustiveness", type=int, default=4)
-    ap.add_argument("--processes", type=int, default=8)
+    ap.add_argument("--processes", type=int, default=_benchlib.available_cpus(),
+                    help="Ligands docked in parallel (default: available CPUs)")
     ap.add_argument("--timeout", type=int, default=7200)
     args = ap.parse_args(argv)
     if not 0.0 < args.ci < 1.0:

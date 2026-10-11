@@ -11,6 +11,7 @@ import math
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 
+from vspipeline import defaults  # noqa: E402
 from vspipeline.protein import (
     BLANK_CHAIN_ID,
     OB_BOND_TOLERANCE,
@@ -129,7 +130,7 @@ def _iter_hetatm_residues(pdb_file: str, predicate) -> List[Dict]:
 
 
 def detect_water_molecules(pdb_file: str, binding_site_coords: Tuple[float, float, float],
-                           distance_threshold: float = 4.0) -> List[Dict]:
+                           distance_threshold: float = defaults.WATER_DISTANCE) -> List[Dict]:
     """Detect water molecules near the binding site.
 
     Returns a list of residue dicts (chain/resnum/resname/coords) for waters
