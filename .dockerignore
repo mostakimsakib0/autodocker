@@ -1,0 +1,42 @@
+# Build context for the Dockerfile. The image only needs: Dockerfile, deps,
+# requirements.txt, autodocker/, scripts/{apt,shlib,patch}.sh and
+# tools/{aclmgr.c,autodock-vina,fpocket,ngl,qvina,smina}. Patterns without a
+# leading **/ match at the context root only.
+
+# VCS metadata (submodule .git files point outside the context anyway)
+.git
+**/.git
+.github
+.gitignore
+.gitmodules
+
+# Python caches and tooling state
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+.coverage
+.coverage.*
+htmlcov
+.venv
+venv
+*.egg-info
+
+# Not used by the image
+tests
+benchmarks
+docs
+paper
+tools/openbabel
+**/node_modules
+
+# Local docking runs and their outputs
+works
+output
+*_out
+*.pdbqt
+*.sdf
+*.mol2
+*.pdb
+*.log

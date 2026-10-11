@@ -1,0 +1,9 @@
+# Ruff lint configuration (lint only; the code is not auto-formatted).
+# Start with pyflakes (F) and syntax/IO errors (E9); widen once clean.
+# target-version also makes ruff flag syntax newer than the oldest
+# supported interpreter (Python 3.9).
+target-version = "py39"
+extend-exclude = ["tools", "paper"]
+
+[lint]
+select = ["F", "E9"]

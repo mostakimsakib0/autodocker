@@ -1,0 +1,29 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+overrides:
+  ngl>three: '-'
+  ngl>molstar: '-'
+  ngl>signals: '-'
+  ngl>chroma-js: '-'
+  ngl>sprintf-js: '-'
+
+importers:
+
+  .:
+    dependencies:
+      ngl:
+        specifier: 2.5.0
+        version: 2.5.0
+
+packages:
+
+  ngl@2.5.0:
+    resolution: {integrity: sha512-7pvmhCxBTBb9dxMVrqDMR4Lb2ijrXFckokM0z16vZ0pO36x+j5wV8fGJJQSAK4hpQEzpawk+BHu0bJAFSkXOCA==}
+
+snapshots:
+
+  ngl@2.5.0: {}

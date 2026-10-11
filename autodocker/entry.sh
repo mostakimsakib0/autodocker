@@ -1,14 +1,20 @@
 #!/bin/bash
+# Container entrypoint (started by /autodocker/aclmgr as the unprivileged
+# user): resolves receptor/ligand inputs from the workspace and the
+# environment, then runs runner.py. All other arguments are passed through to
+# runner.py unchanged.
 
-for arg in "$@"; do
-	case "$arg" in
-		-s | --shell | --debug) exec bash -i ;;
-	esac
-done
+# An interactive shell (as the unprivileged user) is opened only when the
+# FIRST argument is -s, --shell or --debug, so these words can still appear as
+# values later on the command line. (A root shell is aclmgr's --root-shell.)
+case "${1:-}" in
+	-s | --shell | --debug) exec bash -i ;;
+esac
 
 set -euo pipefail
 
-DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
+SELF="$(realpath "${BASH_SOURCE[0]}")"
+DIR="$(dirname "$SELF")"
 WORK="/workspace"
 OUT="$WORK/output"
 SCRIPT="$DIR/runner.py"
@@ -30,7 +36,7 @@ for ((i = 1; i <= $#; i++)); do
 		--output=*) USER_OUT="${!i#*=}" ;;
 	esac
 done
-[ -n "$USER_OUT" ] && OUT="$USER_OUT"
+if [ -n "$USER_OUT" ]; then OUT="$USER_OUT"; fi
 
 mkdir -p "$OUT"
 
@@ -155,12 +161,11 @@ if [ "$PUBCHEM_LIBRARY" != "1" ]; then
 		exit  1
 	fi
 
-	echo "[*] Found $TOTAL_LIGS ligands"
+	echo "[*] Found $TOTAL_LIGS ligand(s)"
 	echo "    - SDF: $SDF_COUNT"
 	echo "    - PDBQT: $PDBQT_COUNT"
 	echo "    - MOL2: $MOL2_COUNT"
 	echo "    - PDB: $PDB_COUNT"
-	echo "[*] Found $TOTAL_LIGS ligand(s)"
 fi
 echo "[*] Protein loaded: $(basename "$PDB")"
 
@@ -171,7 +176,6 @@ BINDING_MODES="${BINDING_MODES:-9}"
 ENERGY_RANGE="${ENERGY_RANGE:-3.0}"
 PADDING="${PADDING:-6}"
 TOP_N="${TOP_N:-20}"
-TIMEOUT="${TIMEOUT:-900}"
 
 CMD=(
 	"$SCRIPT"
@@ -182,10 +186,15 @@ CMD=(
 	--exhaustiveness "$EXHAUSTIVENESS"
 	--binding-modes "$BINDING_MODES"
 	--energy-range "$ENERGY_RANGE"
-	--timeout "$TIMEOUT"
 	--top-n "$TOP_N"
 	-p "$PROCESSES"
 )
+
+# Per-command timeout: only pass --timeout when TIMEOUT is set, so that
+# runner.py's own default (VS_COMMAND_TIMEOUT, else 900 s) applies otherwise.
+if [ -n "${TIMEOUT:-}" ]; then
+	CMD+=(--timeout "$TIMEOUT")
+fi
 
 # Chain selection: only pass --chain when explicitly set, so runner.py's
 # auto-detection (first chain) is the default. Set CHAIN=A (or A,B/all) to
@@ -219,12 +228,22 @@ echo " Pipeline Completed Successfully"
 echo "======================================"
 echo ""
 echo "Results saved to: $OUT"
-echo "  - ranking.csv: Docking scores"
-echo "  - Top_hits.txt: Top-ranked hits"
-echo "  - Results_full.txt: Full text report"
-echo "  - metrics.txt: Pose metrics"
-echo "  - pocket_summary.csv: fpocket pocket scores"
-echo "  - ligand_metadata.json: ligand descriptors and source files"
-echo "  - grid_box.pml: PyMOL grid visualization"
-echo "  - results_report.html: Self-contained HTML report"
-echo "  - docked/: Docked poses"
+# List only what this run actually produced (e.g. pocket_summary.csv needs
+# fpocket pockets, results_report.html is skipped by --no-html-report).
+OUTPUTS=(
+	"ranking.csv|Docking scores"
+	"Top_hits.txt|Top-ranked hits"
+	"Results_full.txt|Full text report"
+	"metrics.txt|Pose metrics"
+	"pocket_summary.csv|fpocket pocket scores"
+	"ligand_metadata.json|ligand descriptors and source files"
+	"grid_box.pml|PyMOL grid visualization"
+	"results_report.html|Self-contained HTML report"
+	"docked/|Docked poses"
+)
+for entry in "${OUTPUTS[@]}"; do
+	name="${entry%%|*}"
+	if [ -e "$OUT/$name" ]; then
+		echo "  - $name: ${entry#*|}"
+	fi
+done
