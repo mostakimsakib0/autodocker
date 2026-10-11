@@ -17,16 +17,13 @@ import argparse
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _benchlib import read_frame_offset  # noqa: E402
+
 
 def read_offset(output_dir):
-    path = os.path.join(output_dir, "frame_offset.txt")
-    values = {}
-    with open(path) as f:
-        for line in f:
-            if "=" in line and not line.lstrip().startswith("#"):
-                key, value = line.split("=", 1)
-                values[key.strip()] = float(value)
-    return values["offset_x"], values["offset_y"], values["offset_z"]
+    """(x, y, z) offset recorded in ``<output_dir>/frame_offset.txt``."""
+    return read_frame_offset(os.path.join(output_dir, "frame_offset.txt"))
 
 
 def shift_file(src, dst, offset):

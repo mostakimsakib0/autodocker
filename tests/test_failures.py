@@ -1,14 +1,11 @@
 """Failure-mode and edge-case tests for the autodocker pipeline."""
 
-import argparse
 import os
 import sys
 
 import pytest
 
 import runner
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
 
 # ---------------------------------------------------------------------------
@@ -122,15 +119,12 @@ def _load_benchmark(name):
 def test_enrichment_auc_degenerates_to_none():
     be = _load_benchmark("benchmark_enrichment")
     # no actives -> None
-    scores = {f"D_{i}": -5.0 + i for i in range(10)}
-    labels = {n: n.startswith("A_") for n in scores}
-    assert be.auc_and_ef(scores, labels) == (None, None, None)
-    # perfect separation still works
-    scores = {f"A_{i}": -8.0 - i for i in range(5)}
-    scores.update({f"D_{i}": -2.0 for i in range(5)})
-    auc, ef1, _ = be.auc_and_ef(scores, labels={n: n.startswith("A_")
-                                                for n in scores})
-    assert auc == 1.0
+    assert be.roc_auc([-5.0 + i for i in range(10)], [False] * 10) is None
+    assert be.enrichment_factor([-5.0 + i for i in range(10)], [False] * 10, 0.01) is None
+    # perfect separation
+    scores = [-8.0 - i for i in range(5)] + [-2.0] * 5
+    labels = [True] * 5 + [False] * 5
+    assert be.roc_auc(scores, labels) == 1.0
 
 
 def test_enrichment_mannwhitney_ties():

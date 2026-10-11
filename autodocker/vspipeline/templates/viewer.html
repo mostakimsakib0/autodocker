@@ -1,0 +1,145 @@
+    <div class="section" id="viewer">
+        <h2>3D Structure Viewer</h2>
+        <p class="viewer-help">Receptor (cartoon) with the best docked pose of each top hit, plus the docking grid box when available. The viewer library and structures are embedded in this file, so it opens without a server or network access. Click a point in the scatter plot to jump to that ligand.</p>
+        <div class="viewer-controls no-print">
+            <label for="viewer-select"><strong>View hit:</strong></label>
+            <select id="viewer-select" onchange="vsShowHit()"></select>
+            <button type="button" onclick="vsSpin()">Spin</button>
+            <button type="button" onclick="vsReset()">Reset</button>
+            <button type="button" onclick="vsOverlayAll()">Overlay all top hits</button>
+            <button type="button" onclick="vsSnapshot()">Snapshot</button>
+            <label><input type="checkbox" id="vs-receptor" checked onchange="vsToggle('receptor')"> Receptor</label>
+            <label><input type="checkbox" id="vs-ligand" checked onchange="vsToggle('ligand')"> Ligand</label>
+            <label><input type="checkbox" id="vs-box" __VS_BOX_CHECKED__ onchange="vsToggle('box')"> Grid box</label>
+            <label><input type="checkbox" id="vs-labels" onchange="vsToggle('labels')"> Labels</label>
+            <select id="vs-style" onchange="vsStyle()">
+                <option value="ball+stick">Ball &amp; Stick</option>
+                <option value="licorice">Licorice</option>
+                <option value="hyperball">Hyperball</option>
+                <option value="surface">Surface</option>
+            </select>
+        </div>
+        <div id="viewer-message"></div>
+        <div id="viewer-container" class="viewer-canvas"></div>
+    </div>
+
+    <div class="section" id="viewer-log" style="display:none;">
+        <h2>Viewer Diagnostics</h2>
+        <pre id="viewer-error"></pre>
+    </div>
+
+    <script>__VS_NGL_SCRIPT__</script>
+    <script>
+    (function () {
+        var data = __VS_DATA_JSON__;
+        var receptorText = data.receptor || "";
+        var hits = data.hits || [];
+        var gridBox = data.gridBox || null;
+        var stage = null;
+        var components = { receptor: null, ligand: null, box: null };
+        var currentStyle = "ball+stick";
+
+        function vsShowHit() {
+            var sel = document.getElementById("viewer-select");
+            var name = sel.value;
+            var msg = document.getElementById("viewer-message");
+            var selected = null;
+            for (var i = 0; i < hits.length; i++) { if (hits[i].name === name) selected = hits[i]; }
+            if (!selected) return;
+            if (typeof NGL === "undefined") { msg.textContent = "NGL viewer failed to load."; return; }
+            if (stage) { stage.dispose(); stage = null; components = { receptor:null, ligand:null, box:null }; }
+            var holder = document.getElementById("viewer-container");
+            stage = new NGL.Stage("viewer-container", { backgroundColor: "#0b1622" });
+            msg.textContent = "Loading " + name + "…";
+            var jobs = [];
+            if (receptorText) {
+                jobs.push(stage.loadFile(new Blob([receptorText], { type: "text/plain" }), { ext: "pdb" }).then(function (o) {
+                    components.receptor = o;
+                    o.addRepresentation("cartoon", { colorScheme: "chainid", name: "receptor" });
+                }));
+            }
+            jobs.push(stage.loadFile(new Blob([selected.pose], { type: "text/plain" }), { ext: "pdb" }).then(function (o) {
+                components.ligand = o;
+                o.addRepresentation(currentStyle, { colorScheme: "element", aspectRatio: 2.2, multipleBond: "symmetric", name: "ligand" });
+            }));
+            if (gridBox && gridBox.center && gridBox.size && document.getElementById("vs-box").checked) {
+                try {
+                    var c = gridBox.center, s = gridBox.size, hx=s[0]/2, hy=s[1]/2, hz=s[2]/2;
+                    var shape = new NGL.Shape("Grid Box");
+                    shape.addBox([c[0]-hx,c[1]-hy,c[2]-hz], [c[0]+hx,c[1]+hy,c[2]+hz], [0.18,0.8,0.44]);
+                    components.box = stage.addComponentFromObject(shape);
+                } catch (e) { /* box is optional */ }
+            }
+            Promise.all(jobs).then(function () {
+                stage.autoView();
+                msg.textContent = "";
+                requestAnimationFrame(function () { if (stage && stage.viewer) stage.viewer.requestResize(); });
+            }).catch(function (err) {
+                msg.textContent = "Viewer error: " + err.message;
+                document.getElementById("viewer-log").style.display = "";
+                document.getElementById("viewer-error").textContent = err.stack || String(err);
+            });
+        }
+
+        window.vsShowHit = vsShowHit;
+        window.vsSpin = function () { if (stage) stage.toggleSpin(); };
+        window.vsReset = function () { if (stage) stage.autoView(); };
+        window.vsSnapshot = function () {
+            if (!stage) return;
+            stage.viewer.render(function () {
+                var a = document.createElement("a");
+                a.href = stage.viewer.canvas.toDataURL("image/png");
+                a.download = "docking_view.png"; a.click();
+            });
+        };
+        window.vsToggle = function (which) {
+            if (!stage) return;
+            var show = document.getElementById("vs-" + which).checked;
+            if (which === "labels") {
+                if (components.ligand) { show ? components.ligand.addRepresentation("label", { labelType:"atomname", name:"lbl" }) : components.ligand.removeRepresentation("lbl"); }
+                return;
+            }
+            if (which === "receptor" && components.receptor) components.receptor.setVisibility(show);
+            if (which === "ligand" && components.ligand) components.ligand.setVisibility(show);
+            if (which === "box" && components.box) components.box.setVisibility(show);
+        };
+        window.vsStyle = function () {
+            currentStyle = document.getElementById("vs-style").value;
+            if (components.ligand) {
+                components.ligand.removeRepresentation("ligand");
+                components.ligand.addRepresentation(currentStyle, { colorScheme:"element", aspectRatio:2.2, multipleBond:"symmetric", name:"ligand" });
+            }
+        };
+        window.vsOverlayAll = function () {
+            if (!stage || !hits.length) return;
+            for (var i = 0; i < hits.length; i++) {
+                (function (h, idx) {
+                    stage.loadFile(new Blob([h.pose], { type: "text/plain" }), { ext: "pdb" }).then(function (o) {
+                        o.addRepresentation(currentStyle, { colorScheme: "chainname", aspectRatio: 2.2, name: "ov" + idx });
+                    });
+                })(hits[i], i);
+            }
+            stage.autoView();
+        };
+        window.selectHit = function (name) {
+            var sel = document.getElementById("viewer-select");
+            if (!sel) return;
+            for (var i = 0; i < sel.options.length; i++) { if (sel.options[i].value === name) { sel.selectedIndex = i; break; } }
+            vsShowHit();
+            document.getElementById("viewer-container").scrollIntoView({ behavior: "smooth", block: "center" });
+        };
+
+        window.addEventListener("resize", function () { if (stage && stage.viewer) stage.viewer.requestResize(); });
+        document.getElementById("viewer-container").addEventListener("click", function () { if (stage && stage.viewer) stage.viewer.requestResize(); });
+        window.addEventListener("load", function () {
+            var sel = document.getElementById("viewer-select");
+            hits.forEach(function (h) {
+                var opt = document.createElement("option");
+                opt.value = h.name;
+                opt.textContent = h.name + " (" + (h.affinity != null ? h.affinity.toFixed(2) : "?") + " kcal/mol)";
+                sel.appendChild(opt);
+            });
+            if (hits.length) { sel.value = hits[0].name; vsShowHit(); }
+        });
+    })();
+    </script>

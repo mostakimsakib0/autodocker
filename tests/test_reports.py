@@ -218,3 +218,122 @@ def test_cluster_poses_reads_vina_output_and_skips_other_ligands(tmp_path):
     assert list(clusters) == ["lig"]
     # Models 1 and 2 are 0.5 A apart (flex atoms ignored); model 3 is separate.
     assert [len(c["poses"]) for c in clusters["lig"]] == [2, 1]
+
+
+def test_cluster_rmsd_uses_heavy_atoms_only(tmp_path):
+    from vspipeline import report
+    docked = tmp_path / "docked"
+    docked.mkdir()
+
+    def model(i, h_x):
+        return (f"MODEL {i}\nREMARK VINA RESULT:    -7.0      0.000      0.000\n"
+                "ATOM      1  C1  UNL     1       0.000   0.000   0.000  0.00  0.00    +0.000 C \n"
+                "ATOM      2  C2  UNL     1       1.500   0.000   0.000  0.00  0.00    +0.000 C \n"
+                f"ATOM      3  H1  UNL     1    {h_x:8.3f}   0.000   0.000  0.00  0.00    +0.000 HD\n"
+                "ENDMDL\n")
+
+    # Only the polar hydrogen moves (by 9 A): same heavy-atom pose.
+    (docked / "lig_out.pdbqt").write_text(model(1, -1.0) + model(2, 8.0))
+    report._cluster_cache.clear()
+    clusters = report.cluster_poses(str(docked), rmsd_threshold=0.5, ligands=["lig"])
+    assert [len(c["poses"]) for c in clusters["lig"]] == [2]
+
+
+class TestReportContent:
+    @staticmethod
+    def _render(tmp_path, monkeypatch, rows, ngl=b"/* fake ngl */", poses=None):
+        monkeypatch.setattr(runner, "_fetch_ngljs", lambda: ngl)
+        outdir = str(tmp_path / "out")
+        docked = os.path.join(outdir, "docked")
+        os.makedirs(docked, exist_ok=True)
+        for name, text in (poses or {}).items():
+            _write(os.path.join(docked, name), text)
+        csv_path = _ranking_csv(outdir, rows)
+        html_path = os.path.join(outdir, "results_report.html")
+        assert runner.generate_html_report(csv_path, docked, html_path)
+        with open(html_path) as f:
+            return f.read()
+
+    ROWS = [
+        {"Ligand": "ligA", "Binding_Affinity": "-9.1", "Binding_Modes": "9",
+         "Docked_File": "docked/ligA_out.pdbqt", "Status": "OK"},
+        {"Ligand": "ligB", "Binding_Affinity": "-5.0", "Binding_Modes": "9", "Status": "OK"},
+        {"Ligand": "ligOOW", "Binding_Affinity": "-25.0", "Binding_Modes": "1",
+         "Status": "OUT_OF_WINDOW"},
+        {"Ligand": "ligF", "Binding_Affinity": "FAILED", "Status": "FAILED"},
+    ]
+
+    def test_tables_have_thead_and_tbody(self, tmp_path, monkeypatch):
+        html = self._render(tmp_path, monkeypatch, self.ROWS)
+        table = html[html.index('<table id="all-results">'):]
+        table = table[:table.index("</table>")]
+        assert table.index("<thead>") < table.index("<th class") < table.index("</thead>")
+        assert table.index("</thead>") < table.index("<tbody>") < table.index("ligA")
+        assert html.count("<thead>") == 2
+
+    def test_out_of_window_is_not_a_hit(self, tmp_path, monkeypatch):
+        html = self._render(tmp_path, monkeypatch, self.ROWS)
+        top = html[html.index('id="top"'):html.index('id="dist"')]
+        assert "ligA" in top and "ligOOW" not in top
+        assert "-25.00" not in html  # never shown as a best score
+
+    def test_relative_docked_file_feeds_viewer(self, tmp_path, monkeypatch):
+        html = self._render(tmp_path, monkeypatch, self.ROWS,
+                            poses={"ligA_out.pdbqt": _pose_pdbqt("ligA")})
+        assert "viewer-container" in html and '"name": "ligA"' in html
+
+    def test_overlay_closure_captures_index(self, tmp_path, monkeypatch):
+        html = self._render(tmp_path, monkeypatch, self.ROWS,
+                            poses={"ligA_out.pdbqt": _pose_pdbqt("ligA")})
+        assert '"ov" + idx' in html and '"ov" + i ' not in html
+
+    def test_guide_matches_score_bands(self, tmp_path, monkeypatch):
+        from vspipeline import report
+        html = self._render(tmp_path, monkeypatch, self.ROWS)
+        guide = html[html.index('id="guide"'):]
+        for upper, _css, label in report.AFFINITY_BANDS:
+            assert label in guide
+        assert "&lt; -8 kcal/mol:</strong> Excellent" in guide
+        assert report._confidence(-8.5)[1] == "Excellent"
+        assert report._confidence(-7.9)[1] == "Good"
+        assert report._confidence(-4.0)[1] == "Poor"
+        assert "-10" not in guide
+
+    def test_product_name_and_version(self, tmp_path, monkeypatch):
+        html = self._render(tmp_path, monkeypatch, self.ROWS)
+        assert f"AutoDocker {runner.__version__}" in html
+        assert "Toolkit" not in html and "professional" not in html.lower()
+
+    def test_no_emoji(self, tmp_path, monkeypatch):
+        import re
+        html = self._render(tmp_path, monkeypatch, self.ROWS,
+                            poses={"ligA_out.pdbqt": _pose_pdbqt("ligA")})
+        html = html.replace("/* fake ngl */", "")
+        assert not re.search("[\U0001F300-\U0001FAFF☀-⛿✀-➿]", html)
+
+
+class TestNglIntegrity:
+    def test_download_hash_mismatch_fails_closed(self, monkeypatch, caplog):
+        from vspipeline import report
+        monkeypatch.setattr(report, "_ngl_local_candidates", lambda: [])
+        monkeypatch.setattr(runner, "_http_get_bytes", lambda url, timeout=60: b"evil()")
+        assert report._fetch_ngljs() is None
+
+    def test_download_with_pinned_hash_accepted(self, monkeypatch):
+        import hashlib
+        from vspipeline import report
+        payload = b"/* pinned */"
+        monkeypatch.setattr(report, "_ngl_local_candidates", lambda: [])
+        monkeypatch.setattr(report, "NGL_SHA256", hashlib.sha256(payload).hexdigest())
+        monkeypatch.setattr(runner, "_http_get_bytes", lambda url, timeout=60: payload)
+        assert report._fetch_ngljs() == payload
+
+    def test_pinned_url_is_exact_version(self):
+        from vspipeline import report
+        assert f"ngl@{report.NGL_VERSION}/dist/ngl.js" in report.NGL_CDN_URL
+        assert len(report.NGL_SHA256) == 64
+
+    def test_templates_ship_with_package(self):
+        from vspipeline import report
+        for name in ("report.css", "report.js", "viewer.html"):
+            assert os.path.isfile(os.path.join(report.TEMPLATE_DIR, name))
