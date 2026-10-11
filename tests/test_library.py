@@ -15,6 +15,16 @@ HAVE_OBABEL = shutil.which("obabel") is not None
 needs_obabel = pytest.mark.skipif(not HAVE_OBABEL, reason="obabel not installed")
 
 
+@pytest.fixture(autouse=True)
+def _obabel_3d_unless_real(request, monkeypatch):
+    """Unit tests fake Open Babel with placeholder files RDKit cannot read, so
+    2D inputs take the Open Babel --gen3d path of conformers.generate_3d
+    (through the faked runner.run). Tests with real tools keep RDKit."""
+    if "real" not in request.node.name:
+        from vspipeline import conformers
+        monkeypatch.setattr(conformers, "rdkit_available", lambda: False)
+
+
 def _fake_http(url):
     if "cids/JSON" in url or "cids" in url:
         return b'{"IdentifierList":{"CID":[12345]}}'
@@ -493,7 +503,13 @@ def test_minimize_keeps_3d_input_and_runs_single_threaded(tmp_path, monkeypatch)
         obabel_calls = [(c, env) for c, env in calls if c[0] == runner.OBABEL]
         minimize = [c for c, _ in obabel_calls if "--minimize" in c]
         assert len(minimize) == 1
-        assert ("--gen3d" in minimize[0]) == expect_gen3d
+        # 3D coordinates of a 2D input are generated first (separate call);
+        # the minimization then starts from that 3D file.
+        assert "--gen3d" not in minimize[0]
+        gen3d = [c for c, _ in obabel_calls if "--gen3d" in c]
+        assert bool(gen3d) == expect_gen3d
+        if expect_gen3d:
+            assert minimize[0][minimize[0].index("-isdf") + 1].endswith(f"{name}_gen3d.sdf")
         # Every Open Babel call (descriptors, minimization, conversion) is
         # single-threaded.
         assert obabel_calls and all(env == {"OMP_NUM_THREADS": "1"} for _, env in obabel_calls)
@@ -506,8 +522,10 @@ def test_sdf_conversion_requests_gasteiger_charges(tmp_path, monkeypatch):
     sdf.write_text(_molblock(0.8))
     lm = library.LibraryManager(str(tmp_path / "out"), str(tmp_path), minimize=False)
     lm._prepare_sdf_to_pdbqt(str(sdf), str(tmp_path / "a.pdbqt"), "a")
-    (convert,) = [c for c, _ in calls if "-opdbqt" in c]
-    assert convert[-3:] == ["-h", "--partialcharge", "gasteiger"]
+    # The conversion runs twice (deterministic hydrogen check), identically.
+    converts = [c for c, _ in calls if "-opdbqt" in c]
+    assert len(converts) == 2
+    assert all(c[-3:] == ["-h", "--partialcharge", "gasteiger"] for c in converts)
 
 
 def test_failed_minimization_falls_back_to_input(tmp_path, monkeypatch, caplog):
@@ -568,12 +586,14 @@ def test_unminimized_2d_sdf_gets_3d_intermediate(tmp_path, monkeypatch):
     lm = library.LibraryManager(str(tmp_path / "out"), str(tmp_path), minimize=False)
     lm._prepare_sdf_to_pdbqt(str(sdf), str(tmp_path / "flat.pdbqt"), "flat")
     obabel_cmds = [c for c, _ in calls if "--append" not in c]
-    gen3d, convert = obabel_cmds
+    gen3d, convert, probe = obabel_cmds  # conversion + its determinism probe
     assert "--gen3d" in gen3d and gen3d[gen3d.index("-O") + 1].endswith("flat_gen3d.sdf")
     src = convert[convert.index("-isdf") + 1]
     assert src.endswith("flat_gen3d.sdf") and "-h" in convert
     assert fixes == [src]
     assert lm.metadata["flat"]["coordinates"] == "gen3d"
+    assert lm.metadata["flat"]["coordinates_method"] == "obabel-gen3d"
+    assert "h-probe" in probe[probe.index("-O") + 1]
 
 
 def test_failed_minimization_of_2d_input_still_gets_3d(tmp_path, monkeypatch):
@@ -628,8 +648,10 @@ def test_every_obabel_call_is_single_threaded(tmp_path, monkeypatch):
     lm = library.LibraryManager(str(tmp_path / "out"), str(indir))
     lm.prepare_local(apply_lipinski=False)
     obabel_calls = [(c, env) for c, env in calls if c[0] == runner.OBABEL]
-    # descriptors, gen3d+MMFF94 and conversion (SDF), MOL2, 2 steps for PDB
-    assert len(obabel_calls) == 6
+    # SDF: descriptors, gen3d, MMFF94, conversion; MOL2: conversion; PDB:
+    # protonation and conversion. Conversions that add hydrogens run twice
+    # (run_obabel_deterministic), so 3 + 2 + 2 + 2 + 2 = 11.
+    assert len(obabel_calls) == 11
     assert all(env == {"OMP_NUM_THREADS": "1"} for _, env in obabel_calls)
 
 

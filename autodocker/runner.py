@@ -721,6 +721,20 @@ def _environment_snapshot() -> Dict[str, str]:
                                             "PUBCHEM_REST")}
 
 
+def _python_packages() -> Dict[str, Optional[str]]:
+    """Versions of the optional Python packages that change results (None =
+    not installed). Without RDKit, 2D ligands get 3D coordinates from obabel
+    --gen3d, which is not reproducible."""
+    packages: Dict[str, Optional[str]] = {}
+    for name in ("rdkit", "numpy"):
+        try:
+            module = __import__(name)
+            packages[name] = str(getattr(module, "__version__", "unknown"))
+        except ImportError:
+            packages[name] = None
+    return packages
+
+
 def write_run_manifest(path: str, manifest: Dict) -> None:
     """Write run_manifest.json with sorted keys (deterministic layout)."""
     with open(path, "w") as f:
@@ -746,6 +760,7 @@ def _build_manifest(args, argv: List[str], tools: Dict, started_at: str,
         "platform": platform.platform(),
         "cpu_count": {"os": os.cpu_count(), "available": available_cpus()},
         "tools": tools,
+        "python_packages": _python_packages(),
         "environment": _environment_snapshot(),
         "command_timeout_s": COMMAND_TIMEOUT,
         "started_at": started_at,
@@ -801,6 +816,7 @@ def _run_pipeline(args, state: Dict) -> int:
         args.ligands if args.library == "local" else None,
         minimize=not args.no_minimize,
         minimize_steps=args.minimize_steps,
+        seed=args.seed,
     )
     state["library"] = lib_manager
     apply_lipinski = not args.no_lipinski

@@ -208,7 +208,14 @@ def _fix_pdbqt_charges(pdbqt_file: str, source_file: str,
         os.remove(pdbqt_file)  # rebuilt from the source; never keep the old file
     try:
         # Single-threaded; a partial output is deleted when Open Babel fails.
-        runner.run_obabel(args, outputs=[target])
+        # Without --gen3d the conversion is run through the deterministic
+        # hydrogen wrapper (-h places some hydrogens at random); --gen3d
+        # output differs in its heavy atoms on every run, so it runs once.
+        if gen3d:
+            runner.run_obabel(args, outputs=[target])
+        else:
+            from vspipeline.hydrogens import run_obabel_deterministic
+            run_obabel_deterministic(args, target, kind="ligand")
         if rebuild_in_place:
             os.replace(target, pdbqt_file)
     except Exception as e:

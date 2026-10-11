@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import runner  # noqa: E402  (tool paths and shared helpers, resolved at call time)
-from vspipeline import net  # noqa: E402
+from vspipeline import conformers, net  # noqa: E402
 from vspipeline.admet import (  # noqa: E402
     LIPINSKI_HBA_MAX,
     LIPINSKI_HBD_MAX,
@@ -29,6 +29,7 @@ from vspipeline.admet import (  # noqa: E402
     LIPINSKI_MW_MAX,
     sdf_coordinates,
 )
+from vspipeline.hydrogens import run_obabel_deterministic  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,9 @@ PLANAR_SPREAD_EPSILON = 1e-3
 
 DEFAULT_MINIMIZE_STEPS = 250
 DEFAULT_MAX_COMPOUNDS = 20
+# Seed of the 3D embedding of 2D inputs when the caller gives none (the
+# runner passes --seed).
+DEFAULT_EMBED_SEED = conformers.EMBED_SEED
 
 
 class LigandRejected(Exception):
@@ -188,8 +192,10 @@ class LibraryManager:
     FALLBACK_LIBRARY_NAMES = list(FDA_DRUG_NAMES)
 
     def __init__(self, outdir: str, ligands_input_dir: Optional[str],
-                 minimize: bool = True, minimize_steps: int = DEFAULT_MINIMIZE_STEPS):
+                 minimize: bool = True, minimize_steps: int = DEFAULT_MINIMIZE_STEPS,
+                 seed: int = DEFAULT_EMBED_SEED):
         self.outdir = outdir
+        self.seed = seed
         self.ligands_input_dir = ligands_input_dir
         self.lib_dir = os.path.join(outdir, "ligands")
         self.minimized_dir = os.path.join(outdir, "ligands_minimized")
@@ -423,14 +429,17 @@ class LibraryManager:
                           extra_args: Tuple[str, ...] = ()) -> str:
         """Convert ``src`` (format ``fmt``) to a ligand PDBQT with Open Babel.
 
-        A missing or empty output raises RuntimeError (and is removed). If
-        every atom of the result carries a zero charge the charges are
-        rebuilt from ``src``, which must therefore be a 3D structure.
+        The conversion runs through ``run_obabel_deterministic``: hydrogens
+        Open Babel places at random are re-placed deterministically, so the
+        same input always gives the same PDBQT. A missing or empty output
+        raises RuntimeError (and is removed). If every atom of the result
+        carries a zero charge the charges are rebuilt from ``src``, which
+        must therefore be a 3D structure.
         """
         if os.path.exists(out):
             os.remove(out)
-        runner.run_obabel([f"-i{fmt}", src, "-opdbqt", "-O", out, *extra_args],
-                          outputs=[out])
+        run_obabel_deterministic([f"-i{fmt}", src, "-opdbqt", "-O", out, *extra_args],
+                                 out, kind="ligand")
         if not os.path.exists(out) or os.path.getsize(out) == 0:
             if os.path.exists(out):
                 os.remove(out)
@@ -443,13 +452,16 @@ class LibraryManager:
                               props: Optional[Dict] = None) -> str:
         """Prepare an SDF ligand: 3D coordinates, optional MMFF94, PDBQT.
 
-        * A 2D input (every z = 0) gets 3D coordinates from ``--gen3d``
-          (together with the minimization, or as a separate step when
-          minimization is off or fails); the planar input is never converted
-          or used as a charge source, and a result that is still planar is
+        * A 2D input (every z = 0) first gets 3D coordinates from
+          ``conformers.generate_3d`` (RDKit ETKDGv3 seeded with the run seed
+          + MMFF94 when RDKit is installed, else ``obabel --gen3d``, which is
+          not reproducible); the method is recorded as
+          ``coordinates_method``. The planar input is never converted or
+          used as a charge source, and a result that is still planar is
           rejected.
-        * MMFF94 minimization (``--minimize --ff MMFF94``) runs when enabled;
-          a failure is logged as a warning and recorded in the metadata.
+        * MMFF94 minimization (``--minimize --ff MMFF94``) of the 3D structure
+          runs when enabled; a failure is logged as a warning and recorded in
+          the metadata.
         * The PDBQT gets hydrogens (``-h``) and Gasteiger charges.
 
         ``props`` are the descriptors if the caller already computed them.
@@ -462,12 +474,27 @@ class LibraryManager:
         minimized = False
         minimization_error = None
 
+        coordinates_method = None
+        if input_is_2d:
+            gen3d_file = os.path.join(self.minimized_dir, f"{ligand_id}_gen3d.sdf")
+            logger.info(f"[*] {ligand_id}: input has no 3D coordinates; generating them")
+            if os.path.exists(gen3d_file):
+                os.remove(gen3d_file)
+            try:
+                coordinates_method = conformers.generate_3d(
+                    sdf_file, gen3d_file, seed=self.seed, run_obabel=runner.run_obabel)
+            except ValueError as e:
+                raise LigandRejected(f"3D coordinate generation failed: {e}") from e
+            if not _sdf_has_3d_coords(gen3d_file):
+                raise LigandRejected("3D coordinate generation produced no 3D "
+                                     "coordinates for a 2D input")
+            source = gen3d_file
+            coordinates = "gen3d"
+
         if self.minimize:
             minimized_file = os.path.join(self.minimized_dir, f"{ligand_id}.sdf")
-            cmd = ["-isdf", sdf_file, "-osdf", "-O", minimized_file]
-            if input_is_2d:
-                cmd.append("--gen3d")
-            cmd += ["--minimize", "--ff", "MMFF94", "--steps", str(self.minimize_steps)]
+            cmd = ["-isdf", source, "-osdf", "-O", minimized_file,
+                   "--minimize", "--ff", "MMFF94", "--steps", str(self.minimize_steps)]
             try:
                 if os.path.exists(minimized_file):
                     os.remove(minimized_file)
@@ -479,26 +506,12 @@ class LibraryManager:
                                        "(MMFF94 setup failed?)")
                 source = minimized_file
                 minimized = True
-                if input_is_2d:
-                    coordinates = "gen3d"
             except (RuntimeError, OSError) as e:
                 minimization_error = str(e)
                 if os.path.exists(minimized_file):
                     os.remove(minimized_file)
                 logger.warning(f"[!] {ligand_id}: MMFF94 minimization failed ({e}); "
                                "continuing with the unminimized structure")
-
-        if input_is_2d and coordinates != "gen3d":
-            gen3d_file = os.path.join(self.minimized_dir, f"{ligand_id}_gen3d.sdf")
-            logger.warning(f"[!] {ligand_id}: input has no 3D coordinates; "
-                           "generating a conformer with --gen3d (Open Babel's "
-                           "conformer search is not seeded by AutoDocker)")
-            runner.run_obabel(["-isdf", sdf_file, "-osdf", "-O", gen3d_file, "--gen3d"],
-                              outputs=[gen3d_file])
-            if not _sdf_has_3d_coords(gen3d_file):
-                raise LigandRejected("--gen3d produced no 3D coordinates for a 2D input")
-            source = gen3d_file
-            coordinates = "gen3d"
 
         # Gasteiger charges are requested here: Open Babel's SDF reader marks
         # charges as known, so the PDBQT writer would otherwise write 0.000
@@ -520,6 +533,7 @@ class LibraryManager:
             "pdbqt": os.path.abspath(pdbqt_file),
             "input_format": "sdf",
             "coordinates": coordinates,
+            "coordinates_method": coordinates_method,
             "mw": props.get("mw"),
             "logp": props.get("logp"),
             "tpsa": props.get("tpsa"),
@@ -545,8 +559,8 @@ class LibraryManager:
         """
         with tempfile.TemporaryDirectory(prefix="autodocker_") as tmp:
             protonated = os.path.join(tmp, "protonated.pdb")
-            runner.run_obabel(["-ipdb", src, "-opdb", "-O", protonated, "-h"],
-                              outputs=[protonated])
+            run_obabel_deterministic(["-ipdb", src, "-opdb", "-O", protonated, "-h"],
+                                     protonated, kind="ligand")
             return self._convert_to_pdbqt(
                 "pdb", protonated, out, ("--partialcharge", "gasteiger", "--title", src))
 
@@ -637,6 +651,7 @@ class LibraryManager:
             "input_format": fmt,
             "pdbqt": os.path.abspath(out),
             "coordinates": "input",
+            "coordinates_method": None,
             "mw": None, "logp": None, "tpsa": None, "rotors": None,
             "hbd": None, "hba": None, "logp_model": None,
             "source_url": "",

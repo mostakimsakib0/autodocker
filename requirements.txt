@@ -12,3 +12,12 @@ idna==3.20
 # urllib3 2.7+ requires Python >= 3.10; 2.6.3 is the last release for 3.9.
 urllib3==2.8.0; python_version >= "3.10"
 urllib3==2.6.3; python_version < "3.10"
+
+# RDKit: deterministic 3D coordinates for 2D ligand input (seeded ETKDGv3 +
+# MMFF94, vspipeline/conformers.py) and the benchmark scripts' start
+# conformers. Without it the pipeline falls back to obabel --gen3d, which is
+# not reproducible (logged as a warning, recorded in run_manifest.json).
+# 2023.9.3 has manylinux wheels for CPython 3.9-3.12 on x86_64 and aarch64.
+rdkit==2023.9.3
+# rdkit's dependency (numpy is pinned above)
+pillow==10.4.0
