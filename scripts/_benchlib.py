@@ -392,6 +392,59 @@ def obrms(ref, query, timeout=TOOL_TIMEOUT):
     raise RuntimeError(f"no RMSD in obrms output: {proc.stdout[-300:]!r}")
 
 
+def inchikey(source, is_smiles=False, extra_args=(), timeout=TOOL_TIMEOUT):
+    """Standard InChIKey computed by Open Babel (None when it cannot be
+    computed). ``source`` is a file (format from its extension) or, with
+    ``is_smiles``, a SMILES string. ``extra_args`` are passed to obabel
+    before the output option, e.g. ``("-h",)`` to see the molecule the way
+    the pipeline's ``obabel -h`` conversion does."""
+    args = ["obabel", f"-:{source}"] if is_smiles else ["obabel", source]
+    proc = subprocess.run(args + list(extra_args) + ["-oinchikey"], capture_output=True,
+                          text=True, timeout=timeout)
+    key = proc.stdout.strip().split()
+    return key[0] if key and len(key[0]) == 27 else None
+
+
+def same_connectivity(key_a, key_b):
+    """True when two InChIKeys share the connectivity (first) block."""
+    return bool(key_a and key_b) and key_a.split("-")[0] == key_b.split("-")[0]
+
+
+def same_compound_and_protonation(key_a, key_b):
+    """True when two standard InChIKeys have the same connectivity block and
+    the same protonation flag (last character: N = neutral InChI, M/O/...
+    = protons removed/added, e.g. carboxylate vs. acid, ammonium vs. amine).
+
+    The middle block (stereo, isotopes) is ignored, so a ligand whose stereo
+    is defined by crystal coordinates still matches a reference SMILES that
+    leaves stereo unspecified; callers report the full-key match separately.
+    Mobile-H tautomers share one standard InChI, so they also compare equal.
+    """
+    return (same_connectivity(key_a, key_b)
+            and key_a.rsplit("-", 1)[-1] == key_b.rsplit("-", 1)[-1])
+
+
+def file_sha256(path):
+    """SHA-256 of a file's content (None when the file does not exist)."""
+    import hashlib
+    if not path or not os.path.exists(path):
+        return None
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def rdkit_version():
+    """Version of the importable RDKit, or None without RDKit."""
+    try:
+        from rdkit import rdBase
+    except ImportError:
+        return None
+    return rdBase.rdkitVersion
+
+
 def tool_version(binary, args=("--version",), timeout=VERSION_TIMEOUT):
     """First non-empty output line of ``binary --version`` (or None)."""
     path = shutil.which(binary) if binary and not os.path.isabs(binary) else binary
@@ -425,6 +478,36 @@ def runner_version(runner_script, timeout=RUNNER_VERSION_TIMEOUT):
 # ---------------------------------------------------------------------------
 
 
+def normalize_pdbid(pdbid):
+    """PDB IDs are compared in lower case without surrounding blanks."""
+    return (pdbid or "").strip().lower()
+
+
+def read_pdbid_rows(ids_csv):
+    """Rows of a CSV with a ``pdbid`` column, keyed by normalized PDB ID
+    (the first row wins for a repeated ID)."""
+    rows = {}
+    with open(ids_csv, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            rows.setdefault(normalize_pdbid(row["pdbid"]), row)
+    rows.pop("", None)
+    return rows
+
+
+def select_complexes(ids, sample, seed, first=None):
+    """The complexes a re-docking run uses, from the ID list of the CSV.
+
+    ``first`` (legacy 1.1.x selection) takes the first N IDs in sorted
+    order; otherwise a seeded sample (see select_sample). fetch_casf_rcsb.py
+    and benchmark_redock.py both call this with the CSV's IDs, so the same
+    options always select the same complexes in both scripts.
+    """
+    pool = sorted({normalize_pdbid(i) for i in ids} - {""})
+    if first:
+        return pool[:first]
+    return select_sample(pool, sample, seed)
+
+
 def select_sample(ids, n, seed):
     """Seeded random sample of ``n`` IDs, returned sorted.
 
@@ -452,6 +535,19 @@ def _pipeline_module(name):
         sys.path.insert(0, root)
     import importlib
     return importlib.import_module(f"vspipeline.{name}")
+
+
+def pipeline_modified_residues():
+    """Residue names the pipeline treats as modified amino acids (part of the
+    protein chain, kept as ATOM records): ``vspipeline.protein.MODIFIED_RESIDUES``.
+
+    protein.py imports runner.py, which imports vspipeline modules that
+    import protein.py again; the pipeline always loads protein.py through
+    runner.py, so runner is imported first here as well."""
+    _pipeline_module("defaults")  # puts autodocker/ on sys.path
+    import importlib
+    importlib.import_module("runner")
+    return frozenset(_pipeline_module("protein").MODIFIED_RESIDUES)
 
 
 def _pipeline_conformers():

@@ -17,13 +17,24 @@ slow drift of the host does not favour one cell), and records per run:
     psutil the tree is read from /proc (Linux).
     ``max_single_process_rss_kb`` (``ru_maxrss`` from wait4) is the largest
     single process, not the group.
-  * Vina threads per process (``--cpu`` value in the logged Vina command;
-    None when the runner passed no ``--cpu``, i.e. Vina used all cores,
-    which is the runner default for ``-p 1``)
+  * Vina threads per process: requested (``--threads``, passed to the
+    runner) and observed (``--cpu`` value in the logged Vina command; None
+    when the runner passed no ``--cpu``, i.e. Vina used all cores), and the
+    total = processes x observed threads
 
-and per cell the median and range over repeats, throughput from the median,
-and the speedup vs. ``-p 1`` at the same library size (only when p=1 is in
-``--processes``), with parallel efficiency = speedup / p.
+and per cell the median and range over repeats, throughput (median over
+repeats of ligands docked successfully per minute) and the speedup vs.
+``-p 1`` at the same library size (only when p=1 is in ``--processes``).
+
+Scaling runs use one Vina thread per process by default (``--threads 1``),
+so ``-p k`` uses k CPU threads and ``-p 1`` one. Without that the runner
+gives ``-p 1`` all cores and ``-p k`` cores/k threads each: every cell uses
+the same CPU budget and speedup / p means nothing. Parallel efficiency is
+therefore defined against total threads:
+efficiency = speedup / (total threads of the cell / total threads at p=1),
+which equals speedup / p with ``--threads 1`` and is None when a cell's
+thread count is unknown (``--threads 0``: runner default, Vina may use all
+cores).
 
 Ligands are a deterministic, seeded subsample (with replacement) of a
 source PDBQT directory. This measures throughput, not docking accuracy.
@@ -230,7 +241,10 @@ def count_docked(dock_dir):
 # ---------------------------------------------------------------------------
 
 def aggregate(runs):
-    """Per-(size, processes) median and range over repeats."""
+    """Per-(size, processes) median and range over repeats.
+
+    Throughput is the median over the successful repeats of ligands docked
+    successfully (``docked_ok``, not the library size) per minute."""
     cells = {}
     for r in runs:
         cells.setdefault((r["n_ligands"], r["processes"]), []).append(r)
@@ -244,6 +258,9 @@ def aggregate(runs):
             return statistics.median(vals) if vals else None
 
         wall = statistics.median(walls) if walls else None
+        rates = [r["docked_ok"] / r["wall_s"] * 60.0 for r in ok if r["wall_s"]]
+        threads = {r.get("vina_threads") for r in ok}
+        observed = next(iter(threads)) if len(threads) == 1 else None
         rows.append({
             "n_ligands": size, "processes": procs,
             "repeats": len(rs), "repeats_ok": len(ok),
@@ -252,30 +269,34 @@ def aggregate(runs):
             "wall_s_max": max(walls) if walls else None,
             "prep_s_median": med("prep_s"), "dock_s_median": med("dock_s"),
             "post_s_median": med("post_s"),
-            "throughput_ligands_per_min": (size / wall * 60.0) if wall else None,
+            "docked_ok_min": min((r["docked_ok"] for r in rs), default=0),
+            "throughput_ligands_per_min": statistics.median(rates) if rates else None,
             "peak_tree_rss_kb_max": max((r["peak_tree_rss_kb"] for r in ok), default=None),
             "peak_tree_pss_kb_max": max((r["peak_tree_pss_kb"] for r in ok
                                          if r["peak_tree_pss_kb"] is not None), default=None),
             "max_single_process_rss_kb": max((r["max_single_process_rss_kb"] for r in ok
                                               if r["max_single_process_rss_kb"]), default=None),
-            "vina_threads_per_process": next((r["vina_threads"] for r in ok
-                                              if r.get("vina_threads")), None),
-            "docked_ok_min": min((r["docked_ok"] for r in rs), default=0),
+            "threads_requested": next((r.get("threads_requested") for r in ok), None),
+            "vina_threads_per_process": observed,
+            "total_threads": procs * observed if observed else None,
         })
     return add_speedup(rows)
 
 
 def add_speedup(rows):
-    """Speedup vs. p=1 at the same library size, and parallel efficiency."""
-    base = {r["n_ligands"]: r["wall_s_median"] for r in rows
+    """Speedup vs. p=1 at the same library size, and parallel efficiency
+    against total threads (see the module docstring); efficiency is None
+    when the total thread count of the cell or of p=1 is unknown."""
+    base = {r["n_ligands"]: r for r in rows
             if r["processes"] == 1 and r["wall_s_median"]}
     for r in rows:
         b = base.get(r["n_ligands"])
+        r["speedup_vs_p1"] = r["efficiency"] = None
         if b and r["wall_s_median"]:
-            r["speedup_vs_p1"] = b / r["wall_s_median"]
-            r["efficiency"] = r["speedup_vs_p1"] / r["processes"]
-        else:
-            r["speedup_vs_p1"] = r["efficiency"] = None
+            r["speedup_vs_p1"] = b["wall_s_median"] / r["wall_s_median"]
+            if r.get("total_threads") and b.get("total_threads"):
+                r["efficiency"] = r["speedup_vs_p1"] / (r["total_threads"]
+                                                        / b["total_threads"])
     return rows
 
 
@@ -316,8 +337,10 @@ def main(argv=None):
     ap.add_argument("--sizes", default="10,25,50,100", help="Comma-separated library sizes")
     ap.add_argument("--processes", default="1,2,4,8", help="Comma-separated process counts")
     ap.add_argument("--repeats", type=int, default=3, help="Runs per cell (default 3)")
-    ap.add_argument("--threads", type=int, default=None,
-                    help="Vina threads per process (default: runner default, cores / -p)")
+    ap.add_argument("--threads", type=int, default=1,
+                    help="Vina threads per process (default 1, so parallel efficiency "
+                         "is meaningful; 0 = runner default: all cores for -p 1, "
+                         "cores / p otherwise)")
     ap.add_argument("--mem-interval", type=float, default=0.5,
                     help="Memory sampling interval in seconds (default 0.5)")
     ap.add_argument("--exhaustiveness", type=int, default=4)
@@ -327,6 +350,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.repeats < 1:
         ap.error("--repeats must be >= 1")
+    if args.threads < 0:
+        ap.error("--threads must be >= 0")
 
     sizes = [int(s) for s in args.sizes.split(",")]
     procs = [int(p) for p in args.processes.split(",")]
@@ -349,11 +374,14 @@ def main(argv=None):
                 os.makedirs(run_dir)
                 r = time_run(args.receptor, libs[size], run_dir, nproc,
                              args.exhaustiveness, args.seed, runner,
-                             threads=args.threads, mem_interval=args.mem_interval)
+                             threads=args.threads or None, mem_interval=args.mem_interval)
                 dock_dir = os.path.join(run_dir, "dock")
+                observed = vina_threads(dock_dir)
                 r.update({"n_ligands": size, "processes": nproc, "repeat": rep,
+                          "threads_requested": args.threads or None,
                           "docked_ok": count_docked(dock_dir),
-                          "vina_threads": vina_threads(dock_dir)})
+                          "vina_threads": observed,
+                          "total_threads": nproc * observed if observed else None})
                 runs.append(r)
                 print(f"rep={rep} size={size:5d} procs={nproc} wall={r['wall_s']:8.2f}s "
                       f"prep={r['prep_s']} dock={r['dock_s']} "
@@ -373,6 +401,7 @@ def main(argv=None):
     with open(os.path.join(args.outdir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump({"seed": args.seed, "exhaustiveness": args.exhaustiveness,
                    "repeats": args.repeats, "threads_option": args.threads,
+                   "efficiency_definition": "speedup / (total threads / total threads at p=1)",
                    "mem_interval_s": args.mem_interval,
                    "runner_version": _benchlib.runner_version(runner),
                    "host": host_info(), "cells": rows, "runs": runs}, f, indent=2)

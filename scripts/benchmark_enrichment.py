@@ -8,11 +8,20 @@ Protocol
               protease (fa10), HIV-1 aspartic protease (hivpr), nuclear
               receptor (andr), reductases (aldr, hmdh) and the esterase
               superfamily (aces)
-  * Ligands : actives + decoys from DUD-E (``actives_final.mol2.gz``,
-              ``decoys_final.mol2.gz``), seeded sample, converted to PDBQT
-              with Open Babel. MOL2 intermediates are written to a scratch
+  * Ligands : per target a seeded sample of 50 unique active and 500
+              unique decoy compounds (1:10; ``--max-actives``,
+              ``--max-decoys``) from DUD-E (``actives_final.mol2.gz``,
+              ``decoys_final.mol2.gz``). DUD-E lists a compound once per
+              protonation state/tautomer under the same ID, so entries are
+              grouped by compound ID, compounds are sampled, and each one
+              is docked as its first entry in the file (ENTRY_RULE; counts
+              of entries and compounds go to summary.json, the entry used
+              per compound to ``<target>/ligands.csv``). Converted to PDBQT
+              with Open Babel; MOL2 intermediates are written to a scratch
               directory, so the ligand directory handed to the runner holds
-              only the final PDBQT files. Conversion failures are recorded.
+              only the final PDBQT files (``A_<CHEMBL id>.pdbqt``,
+              ``D_<ZINC id>.pdbqt``). A compound whose conversion fails is
+              recorded and replaced by the next one in the seeded order.
   * Receptor: DUD-E ``receptor.pdb``, all chains (``--chain all``).
   * Box     : ``--box-source crystal`` (default): cubic box centred on the
               heavy-atom centroid of DUD-E's ``crystal_ligand.mol2``, edge
@@ -25,8 +34,11 @@ Protocol
   * Ranking : lower score = better. Every sampled ligand stays in N: a
               ligand without a usable score (docking failure, not in
               ranking.csv) is ranked last, tied with the other failures.
-  * Metrics : ROC AUC (tie-aware), EF at 1 % and 5 % with the maximum
-              achievable EF, BEDROC (alpha = 80.5, Truchon & Bayly 2007),
+  * Metrics : primary: ROC AUC (tie-aware) with its bootstrap CI, and EF
+              at 5 % with the maximum achievable EF. Secondary (computed,
+              reported with caveats, see SECONDARY_METRIC_CAVEATS): EF at
+              1 % (n_top = 6 of 550) and BEDROC (alpha = 80.5, Truchon &
+              Bayly 2007; alpha * Ra = 7.3 > 1 at 50/550). Also
               ROC enrichment at 1 % / 5 % FPR, stratified bootstrap CIs
               (``--ci``, default 95 %), one-sided Mann-Whitney U test
               (normal approximation, tie-corrected). Ties are resolved by
@@ -108,6 +120,22 @@ BEDROC_ALPHA = 80.5
 EF_FRACTIONS = (0.01, 0.05)
 ROCE_FRACTIONS = (0.01, 0.05)
 MIN_STABLE_N_TOP = 10
+# Default library per target (protocol "option B"): 50 unique active
+# compounds + 500 unique decoys, i.e. DUD-E's 1:50 active:decoy ratio is
+# reduced to 1:10 to keep the docking cost manageable.
+DEFAULT_MAX_ACTIVES = 50
+DEFAULT_MAX_DECOYS = 500
+# Metrics reported as the result of the benchmark. The others are computed
+# and written as well but are secondary, for the reasons below.
+PRIMARY_METRICS = ("auc", "ef5")
+SECONDARY_METRIC_CAVEATS = {
+    "ef1": (f"EF1% rests on n_top = ceil(0.01 N) ligands (6 of 550 with the "
+            f"defaults, < {MIN_STABLE_N_TOP}): one active more or less in the top "
+            "changes it by a large step, so it is unstable at this library size"),
+    "bedroc": (f"BEDROC (alpha = {BEDROC_ALPHA}) assumes alpha * Ra << 1; with 50 "
+               "actives in 550 ligands alpha * Ra = 7.3, so BEDROC saturates and is "
+               "not comparable with values from full DUD-E sets (Ra about 0.02)"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -187,53 +215,102 @@ def read_molecules(mol2_gz):
     return [("@<TRIPOS>MOLECULE" + b) for b in blocks[1:] if b.strip()]
 
 
+def molecule_name(block):
+    """Compound ID of a MOL2 block (first token of the name line), or None."""
+    lines = block.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().startswith("@<TRIPOS>MOLECULE"):
+            name = lines[i + 1].split() if i + 1 < len(lines) else []
+            return name[0] if name else None
+    return None
+
+
+# DUD-E lists each compound under one ID (CHEMBL... for actives, ZINC... for
+# decoys) once per protonation state/tautomer, so a compound can have
+# several MOL2 entries. The benchmark samples compounds, not entries, and
+# docks one entry per compound: the first one in the file (see
+# group_compounds). Recorded in summary.json.
+ENTRY_RULE = ("one entry per compound ID: the first of its entries in DUD-E's "
+              "*_final.mol2.gz (DUD-E documents no preferred state; the first "
+              "entry is a fixed, reproducible choice)")
+
+
+def group_compounds(blocks):
+    """``{compound_id: [entry indices in file order]}`` (insertion-ordered).
+
+    Entries without a name get a unique placeholder ID (``entry<i>``), so
+    they are never merged."""
+    groups = {}
+    for idx, block in enumerate(blocks):
+        name = molecule_name(block) or f"entry{idx}"
+        groups.setdefault(name, []).append(idx)
+    return groups
+
+
+def _file_stem(prefix, compound):
+    safe = "".join(ch if ch.isalnum() or ch in "-." else "_" for ch in compound)
+    return f"{prefix}{safe}"
+
+
 def sample_ligands(mol2_gz, out_dir, prefix, max_n, seed, scratch_dir,
                    skip_existing=True):
-    """Seeded-sample up to ``max_n`` ligands and convert them to PDBQT.
+    """Seeded sample of up to ``max_n`` unique compounds, converted to PDBQT.
 
-    MOL2 intermediates go to ``scratch_dir``; ``out_dir`` receives only the
-    PDBQT files (the runner docks every ligand file it finds there). A
-    ligand whose conversion fails is recorded and replaced by the next one
-    in the seeded order.
+    Entries are grouped by compound ID (group_compounds); the IDs, sorted,
+    are shuffled with ``random.Random(seed)`` and taken in that order, so
+    the sample depends only on the set of IDs and the seed. Each compound is
+    docked as one entry (its first in the file, ENTRY_RULE) in the file
+    ``<prefix><compound ID>.pdbqt``. MOL2 intermediates go to
+    ``scratch_dir``; ``out_dir`` receives only the PDBQT files (the runner
+    docks every ligand file it finds there). A compound whose conversion
+    fails is recorded and replaced by the next compound in the seeded order.
 
-    Returns ``(pdbqt_paths, failures)``; ``failures`` is a list of
-    ``{"ligand", "error"}`` dicts.
+    Returns ``(pdbqt_paths, failures, info)``; ``failures`` is a list of
+    ``{"ligand", "error"}`` dicts; ``info`` holds the entry/compound counts
+    of the file and one record per docked compound.
     """
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(scratch_dir, exist_ok=True)
-    paths, failures = [], []
+    paths, failures, selected = [], [], []
     blocks = read_molecules(mol2_gz)
-    order = list(range(len(blocks)))
+    groups = group_compounds(blocks)
+    stems = {}
+    for compound in groups:
+        stem = _file_stem(prefix, compound)
+        if stem in stems:
+            raise RuntimeError(f"compound IDs {stems[stem]!r} and {compound!r} map to "
+                               f"the same file name {stem}")
+        stems[stem] = compound
+    order = sorted(groups)
     random.Random(seed).shuffle(order)
-    count = 0
-    for idx in order:
+    for compound in order:
         if len(paths) >= max_n:
             break
-        block = blocks[idx]
-        name_line = next(
-            (ln.strip() for ln in block.splitlines()
-             if ln.strip() and not ln.strip().startswith("@<TRIPOS>")),
-            str(idx))
-        name = (name_line.split()[0] or "_").replace("/", "_")
-        stem = f"{prefix}{count}_{name}"
+        entries = groups[compound]
+        idx = entries[0]
+        stem = _file_stem(prefix, compound)
         pdbqt_path = os.path.join(out_dir, stem + ".pdbqt")
-        if skip_existing and os.path.exists(pdbqt_path) and os.path.getsize(pdbqt_path):
-            paths.append(pdbqt_path)
-            count += 1
-            continue
-        mol2_path = os.path.join(scratch_dir, stem + ".mol2")
-        try:
-            with open(mol2_path, "w", encoding="utf-8") as out:
-                out.write(block)
-            mol2_to_pdbqt(mol2_path, pdbqt_path)
-        except Exception as e:  # recorded, never fatal
-            failures.append({"ligand": f"{prefix}{name} (block {idx})",
-                             "error": str(e)[-300:]})
-            sys.stderr.write(f"  [!] convert failed [{prefix}{name}]: {e}\n")
-            continue
+        record = {"ligand": stem, "compound": compound, "entry_index": idx,
+                  "n_entries": len(entries)}
+        if not (skip_existing and os.path.exists(pdbqt_path) and os.path.getsize(pdbqt_path)):
+            mol2_path = os.path.join(scratch_dir, stem + ".mol2")
+            try:
+                with open(mol2_path, "w", encoding="utf-8") as out:
+                    out.write(blocks[idx])
+                mol2_to_pdbqt(mol2_path, pdbqt_path)
+            except Exception as e:  # recorded, never fatal
+                failures.append({"ligand": f"{stem} (entry {idx})",
+                                 "error": str(e)[-300:]})
+                sys.stderr.write(f"  [!] convert failed [{stem}]: {e}\n")
+                continue
         paths.append(pdbqt_path)
-        count += 1
-    return paths, failures
+        selected.append(record)
+    info = {"file_entries": len(blocks), "file_compounds": len(groups),
+            "file_compounds_with_several_entries": sum(1 for v in groups.values()
+                                                       if len(v) > 1),
+            "selected_with_several_entries": sum(1 for r in selected if r["n_entries"] > 1),
+            "selected": selected}
+    return paths, failures, info
 
 
 def clean_ligand_dir(lig_dir, keep):
@@ -605,6 +682,19 @@ def write_metrics(target, outdir, names, scores, status, ranking):
     return metrics
 
 
+def write_ligand_table(target, outdir, selected):
+    """``<outdir>/<target>/ligands.csv``: the docked compounds, with the DUD-E
+    entry used (0-based position in the .mol2.gz) and its number of entries."""
+    os.makedirs(os.path.join(outdir, target), exist_ok=True)
+    path = os.path.join(outdir, target, "ligands.csv")
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["ligand", "compound", "entry_index",
+                                               "n_entries"])
+        writer.writeheader()
+        writer.writerows(selected)
+    return path
+
+
 def crystal_box(crystal_mol2, padding, min_size):
     center, size = _benchlib.ligand_box(
         _benchlib.mol2_heavy_coords(crystal_mol2), padding=padding,
@@ -628,16 +718,28 @@ def process_target(target, workdir, opts):
 
         lig_dir = os.path.join(tdir, "ligands")
         scratch = os.path.join(tdir, "ligands_mol2")
-        actives, fail_a = sample_ligands(actives_gz, lig_dir, "A_",
-                                         opts["max_actives"], target_seed, scratch)
-        decoys, fail_d = sample_ligands(decoys_gz, lig_dir, "D_",
-                                        opts["max_decoys"], target_seed ^ DECOY_SEED_SALT,
-                                        scratch)
+        actives, fail_a, info_a = sample_ligands(actives_gz, lig_dir, "A_",
+                                                 opts["max_actives"], target_seed, scratch)
+        decoys, fail_d, info_d = sample_ligands(decoys_gz, lig_dir, "D_",
+                                                opts["max_decoys"],
+                                                target_seed ^ DECOY_SEED_SALT, scratch)
         clean_ligand_dir(lig_dir, actives + decoys)
         rec["n_actives"], rec["n_decoys"] = len(actives), len(decoys)
         rec["n_convert_failed_actives"] = len(fail_a)
         rec["n_convert_failed_decoys"] = len(fail_d)
         rec["convert_failures"] = fail_a + fail_d
+        for label, info in (("actives", info_a), ("decoys", info_d)):
+            rec[f"dude_{label}_entries"] = info["file_entries"]
+            rec[f"dude_{label}_compounds"] = info["file_compounds"]
+            rec[f"dude_{label}_compounds_with_several_entries"] = (
+                info["file_compounds_with_several_entries"])
+            rec[f"sampled_{label}_with_several_entries"] = info["selected_with_several_entries"]
+        write_ligand_table(target, opts["outdir"], info_a["selected"] + info_d["selected"])
+        for label, n, wanted in (("actives", len(actives), opts["max_actives"]),
+                                 ("decoys", len(decoys), opts["max_decoys"])):
+            if n < wanted:
+                rec.setdefault("warnings", []).append(
+                    f"only {n} unique {label} usable (requested {wanted})")
         if not actives or not decoys:
             raise RuntimeError("no usable actives/decoys after conversion")
         expected = [os.path.basename(p)[:-len(".pdbqt")] for p in actives + decoys]
@@ -696,8 +798,9 @@ def process_target(target, workdir, opts):
                                             if s == "MISSING")
         rec["metrics"] = write_metrics(target, opts["outdir"], names, scores,
                                        info["status"], ranking)
-        rec.update(compute_stats(names, scores, target_seed, opts["bootstrap"],
-                                 opts["ci"]))
+        stats = compute_stats(names, scores, target_seed, opts["bootstrap"], opts["ci"])
+        stats["warnings"] = rec.get("warnings", []) + stats["warnings"]
+        rec.update(stats)
         rec["status"] = "ok"
     except Exception as e:
         rec["error"] = str(e)
@@ -708,9 +811,13 @@ SUMMARY_COLS = [
     "target", "family", "status", "box_source", "total", "n_actives",
     "n_decoys", "n_failed_actives", "n_failed_decoys",
     "n_convert_failed_actives", "n_convert_failed_decoys",
+    "dude_actives_entries", "dude_actives_compounds",
+    "dude_decoys_entries", "dude_decoys_compounds",
+    # primary metrics
     "auc", "auc_lo", "auc_hi",
-    "ef1", "ef1_max", "ef1_n_top", "ef1_lo", "ef1_hi",
     "ef5", "ef5_max", "ef5_n_top", "ef5_lo", "ef5_hi",
+    # secondary metrics (see SECONDARY_METRIC_CAVEATS)
+    "ef1", "ef1_max", "ef1_n_top", "ef1_lo", "ef1_hi",
     "bedroc", "bedroc_lo", "bedroc_hi",
     "roce1", "roce1_lo", "roce1_hi", "roce5", "roce5_lo", "roce5_hi",
     "p_mw_one", "p_mw_two", "sig", "ci_level", "bootstrap", "error",
@@ -725,7 +832,10 @@ def save_tables(results, outdir, protocol):
         for r in results:
             writer.writerow(r)
     with open(os.path.join(outdir, "summary.json"), "w", encoding="utf-8") as f:
-        json.dump({"protocol": protocol, "targets": results}, f, indent=2)
+        json.dump({"protocol": protocol,
+                   "primary_metrics": list(PRIMARY_METRICS),
+                   "secondary_metrics_caveats": SECONDARY_METRIC_CAVEATS,
+                   "targets": results}, f, indent=2)
     print(f"\nResults written to {rows_path}")
 
 
@@ -735,10 +845,12 @@ def main(argv=None):
     ap.add_argument("--targets", default=",".join(DEFAULT_TARGETS),
                     help="Comma-separated DUD-E target codes "
                          f"(default: {','.join(DEFAULT_TARGETS)})")
-    ap.add_argument("--max-actives", type=int, default=50,
-                    help="Actives sampled per target (default 50)")
-    ap.add_argument("--max-decoys", type=int, default=100,
-                    help="Decoys sampled per target (default 100)")
+    ap.add_argument("--max-actives", type=int, default=DEFAULT_MAX_ACTIVES,
+                    help="Unique active compounds sampled per target "
+                         f"(default {DEFAULT_MAX_ACTIVES})")
+    ap.add_argument("--max-decoys", type=int, default=DEFAULT_MAX_DECOYS,
+                    help="Unique decoy compounds sampled per target "
+                         f"(default {DEFAULT_MAX_DECOYS})")
     ap.add_argument("--bootstrap", type=int, default=1000,
                     help="Bootstrap replicates for CIs (default 1000)")
     ap.add_argument("--ci", type=float, default=BOOTSTRAP_CI,
@@ -778,6 +890,10 @@ def main(argv=None):
         "targets": targets, "box_source": args.box_source,
         "padding": args.padding, "min_box": args.min_box, "chain": args.chain,
         "max_actives": args.max_actives, "max_decoys": args.max_decoys,
+        "sampling_unit": "compound (DUD-E compound ID), not MOL2 entry",
+        "entry_per_compound": ENTRY_RULE,
+        "primary_metrics": list(PRIMARY_METRICS),
+        "secondary_metrics_caveats": SECONDARY_METRIC_CAVEATS,
         "seed": args.seed, "exhaustiveness": args.exhaustiveness,
         "binding_modes": 1, "processes": args.processes,
         "bootstrap": args.bootstrap, "ci": args.ci,
@@ -806,9 +922,10 @@ def main(argv=None):
               f"decoys={rec['n_decoys']} failed="
               f"{rec.get('n_failed_actives')}/{rec.get('n_failed_decoys')} "
               f"auc={rec.get('auc')} ({rec.get('auc_lo')}-{rec.get('auc_hi')}) "
-              f"ef1={rec.get('ef1')} (max {rec.get('ef1_max')}) "
-              f"bedroc={rec.get('bedroc')} p_mw={rec.get('p_mw_one')} "
-              f"{rec.get('sig')} err={rec['error']}", flush=True)
+              f"ef5={rec.get('ef5')} (max {rec.get('ef5_max')}) "
+              f"p_mw={rec.get('p_mw_one')} {rec.get('sig')} | secondary: "
+              f"ef1={rec.get('ef1')} bedroc={rec.get('bedroc')} "
+              f"err={rec['error']}", flush=True)
         for w in rec.get("warnings", []):
             print(f"    [!] {w}", flush=True)
         save_tables(results, args.outdir, protocol)  # partial runs stay usable

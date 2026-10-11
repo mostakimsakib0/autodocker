@@ -31,10 +31,10 @@ python3 scripts/benchmark_vina_parity.py \
 python3 scripts/benchmark_enrichment.py \
     --targets akt1,braf,cdk2,egfr,fa10,hivpr,andr,aldr,hmdh,aces \
     --workdir data/dude --outdir benchmarks/results/enrichment \
-    --max-actives 50 --max-decoys 100 --exhaustiveness 4 --processes 8 --seed 42
+    --max-actives 50 --max-decoys 500 --exhaustiveness 4 --processes 8 --seed 42
 python3 scripts/benchmark_performance.py \
     --receptor data/dude/akt1/receptor.pdb --ligands data/dude/akt1/ligands \
-    --sizes 10,25,50,100 --processes 1,2,4,8 --repeats 3 \
+    --sizes 10,25,50,100 --processes 1,2,4,8 --repeats 3 --threads 1 \
     --exhaustiveness 2 --outdir benchmarks/results/performance
 ```
 
@@ -45,29 +45,59 @@ deposited RCSB entries of the CASF-2016 core-set IDs
 (`benchmarks/data/casf2016_core_set.csv`). These are not the
 PDBbind-processed files, so results are not directly comparable with
 published CASF numbers. Per entry: first model; one alternate conformer per
-residue (blank/`A`, else highest occupancy); receptor = protein atoms plus
-metal ions (`--hetatm metals`); ligand = the crystal instance of the HET group
-whose heavy-atom formula matches the core-set SMILES and whose identity is
-confirmed by InChIKey connectivity block or heavy-atom graph isomorphism,
-with bond orders from the Chemical Component Dictionary (RCSB ModelServer).
-Peptide and multi-residue ligands cannot be built and are listed with the
-reason in `manifest.csv`.
+residue (blank/`A`, else highest occupancy); receptor = protein atoms, the
+modified amino acids the pipeline treats as protein
+(`vspipeline.protein.MODIFIED_RESIDUES`: MSE, TPO, SEP, ...) and metal ions
+(`--hetatm metals`): HETATM residues made of a single metal atom, the rule of
+the runner's `--detect-metals`, so the iron of a heme is dropped together
+with the heme instead of being kept alone.
+
+Ligand: the crystal instance of the HET group whose heavy-atom formula
+matches the core-set SMILES (coordinates from the RCSB ModelServer). One
+RDKit molecule is built from it: crystal coordinates and heavy-atom graph;
+bond orders, formal charges and hydrogen counts (the protonation state)
+from the core-set SMILES (`AllChem.AssignBondOrdersFromTemplate`, which
+requires the crystal graph to be isomorphic to the SMILES graph); stereo
+from the crystal coordinates; explicit hydrogens added once. In 9 of its 285
+SMILES the core-set CSV writes deprotonated phosphates charge-separated
+(`[P+](=O)(=O)[O-]`, a valence-6 phosphorus); these are rewritten as the
+`P(=O)([O-])[O-]` dianion (same atoms and hydrogens) first. The molecule is
+written as `{pdbid}_ligand.sdf` and `{pdbid}_ligand.mol2` (crystal start
+and RMSD reference), and the RDKit start conformer is embedded from the
+same molecule, so both start modes dock the same topology and protonation.
+A complex is skipped with the reason in `manifest.csv` unless the MOL2's
+InChIKey equals the SDF's, also after `obabel -h` (the pipeline's MOL2 ->
+PDBQT conversion; with every hydrogen explicit it adds none), and matches
+the core-set InChIKey in connectivity block and protonation flag; the
+start conformer is written only if its InChIKey equals the crystal
+MOL2's. `manifest.csv` records the ligand, core-set and CCD InChIKeys, the
+full-key (stereo) match, and `identity_check`: whether the CCD bond orders
+already gave the core-set connectivity (`ccd-inchikey-connectivity`) or the
+SMILES bond orders were needed (`heavy-atom-graph+smiles-bond-orders`, e.g.
+1y6r, whose ModelServer SDF lacks a ring double bond). Peptide and
+multi-residue ligands cannot be built and are listed with the reason.
+RDKit is required. (Data directories written by earlier versions of the
+script lost hydrogens in an Open Babel `sdf -> mol2` conversion of the
+H-less ModelServer SDF in 12 of 39 complexes; `benchmark_redock.py` refuses
+an RDKit start conformer whose InChIKey differs from the crystal MOL2.)
 
 **Protocol.**
 
 | Item | Setting |
 |---|---|
-| Complexes | seeded random sample of the core set: `--sample 40 --sample-seed 42` (the same selection in both scripts); no receptor-size filter |
-| Start conformer | `--start-conformer rdkit` (default): one ETKDGv3 conformer from the CCD molecule (randomSeed 42, single thread, then MMFF94, at most 2000 iterations; deterministic for a given RDKit version), so ring conformations, bond lengths and angles do not come from the crystal pose. `--start-conformer crystal` reproduces the 1.1.x protocol for comparison |
+| Complexes | seeded random sample of the core set: `--sample 40 --sample-seed 42`, or `--first N` (first N IDs of the CSV in sorted order); both scripts select through the same function, so the same options select the same complexes; `--pdbids` is case-insensitive; no receptor-size filter |
+| Start conformer | `--start-conformer rdkit` (default): one ETKDGv3 conformer of the same protonated molecule as the crystal-start MOL2 (InChIKeys must match; randomSeed 42, single thread, then MMFF94, at most 2000 iterations; deterministic for a given RDKit version), so ring conformations, bond lengths and angles do not come from the crystal pose. `--start-conformer crystal` reproduces the 1.1.x protocol for comparison |
 | Receptor | all chains; metal ions kept (runner `--detect-metals`) |
 | Box | cube centred on the crystal-ligand heavy-atom centroid, edge = max(22.5 Å, ligand extent + 2 × 6 Å), given in input-PDB coordinates |
 | Docking | Vina, seed 42, exhaustiveness 8, 9 modes, energy range 3 kcal/mol |
 | RMSD | `obrms`: heavy atoms, symmetry-corrected, no superposition, against the crystal pose moved into the docking frame with `frame_offset.txt` |
 | Top-1 | mode 1 (first MODEL). If its RMSD cannot be computed the complex is `rmsd_failed`; it is never replaced by mode 2 |
-| Success | RMSD ≤ 2.0 Å |
+| Success | RMSD ≤ 2.0 Å. Top-1 and best-of-9 successes are both counted among the evaluated complexes (docked, mode-1 RMSD computed) and reported over the evaluated and over the attempted complexes (docking and RMSD failures count as misses); medians are over the evaluated complexes |
 
 A complex is reused on resume only if its stored `params.json` matches the
-current docking parameters.
+current docking parameters, the AutoDocker and RDKit versions and the
+SHA-256 of the complex's input files (receptor, ligand MOL2/SDF,
+precomputed start conformer).
 
 **Results** (AutoDocker 2.0.0, Vina version as recorded in `summary.json`):
 
@@ -94,7 +124,7 @@ complexes, protocol).
 | Item | Setting |
 |---|---|
 | Targets | akt1, braf, cdk2, egfr (kinases), fa10 (serine protease), hivpr (aspartic protease), andr (nuclear receptor), aldr, hmdh (reductases), aces (esterase) |
-| Ligands | per target a seeded sample of 50 actives and 100 decoys from DUD-E, converted to PDBQT with Open Babel; MOL2 intermediates kept out of the docked folder; conversion failures recorded (`convert_failures`) and replaced by the next ligand in the seeded order |
+| Ligands | per target a seeded sample of 50 unique active and 500 unique decoy compounds (1:10; DUD-E's own ratio is about 1:50). DUD-E lists a compound once per protonation state/tautomer under the same ID (e.g. akt1: 423 active entries for 293 compounds, hivpr 1395 for 536; decoy IDs repeat too), so entries are grouped by compound ID, the sorted IDs are shuffled with the seed, and each sampled compound is docked as ONE entry: the first of its entries in DUD-E's `*_final.mol2.gz`. DUD-E documents no preferred state among them; the first entry is a fixed, reproducible choice, not a claim about the dominant species. Entry and compound counts per file are in `summary.json`, the entry used per compound in `<target>/ligands.csv`. Files are named per compound (`A_<CHEMBL id>.pdbqt`, `D_<ZINC id>.pdbqt`); converted to PDBQT with Open Babel; MOL2 intermediates kept out of the docked folder; conversion failures recorded (`convert_failures`) and replaced by the next compound in the seeded order |
 | Receptor | DUD-E `receptor.pdb`, all chains (`--chain all`) |
 | Box | `--box-source crystal` (default): cube around DUD-E's `crystal_ligand.mol2`, same rule as J1 (max(22.5 Å, extent + 12 Å)), passed as `--grid-center/--grid-size`. `--box-source fpocket` reproduces the 1.1.x protocol (fpocket pocket; frame alignment in `protein.py::_receptor_centroid`) |
 | Docking | Vina, seed 42, exhaustiveness 4, 1 mode |
@@ -102,16 +132,27 @@ complexes, protocol).
 
 **Metrics** (N ligands, n actives, n_top = ⌈xN⌉; lower score = better; ties
 resolved by their expected value under random tie-breaking, so no metric
-depends on input order):
+depends on input order). With 50 actives and 500 decoys, N = 550.
 
-- ROC AUC (tie-aware; equals the Mann-Whitney U statistic / n·(N−n)).
-- EF at 1 % and 5 %: EF = (TP/n_top)/(n/N), reported with the maximum
-  achievable EF_max = (min(n_top, n)/n_top)/(n/N). With 150 ligands, n_top is
-  2 (1 %) and 8 (5 %); EF on fewer than 10 ligands is unstable and the script
-  says so.
+Primary (the reported result):
+
+- ROC AUC (tie-aware; equals the Mann-Whitney U statistic / n·(N−n)), with
+  its bootstrap CI.
+- EF at 5 %: EF = (TP/n_top)/(n/N), n_top = 28, reported with the maximum
+  achievable EF_max = (min(n_top, n)/n_top)/(n/N) = 11.
+
+Secondary (computed and written, but only with these caveats; `summary.json`
+carries them under `secondary_metrics_caveats`, and per target in
+`warnings`):
+
+- EF at 1 %: n_top = 6 ligands (< 10); one active more or less in the top
+  changes EF1% by 1.8, so it is unstable at this library size.
 - BEDROC, α = 80.5 (Truchon & Bayly, *J. Chem. Inf. Model.* 2007, 47, 488).
-  With 50 actives in 150 ligands α·Rₐ ≈ 27 ≫ 1, so BEDROC saturates and is not
-  comparable with values from full DUD-E sets; the script warns.
+  It assumes α·Rₐ ≪ 1; here α·Rₐ = 80.5 × 50/550 = 7.3, so BEDROC saturates
+  and is not comparable with values from full DUD-E sets (Rₐ ≈ 0.02).
+
+Also reported:
+
 - ROC enrichment at 1 % and 5 % false-positive rate (TPR/FPR).
 - 95 % percentile-bootstrap CIs (`--ci`, `--bootstrap 1000`), stratified:
   each replicate redraws the actives and the decoys separately, with
@@ -122,7 +163,10 @@ depends on input order):
 
 **Results:**
 
-| Target | Family | N (failed act./dec.) | AUC (95 % CI) | EF1% (max) | EF5% (max) | BEDROC | p (M-W, one-sided) |
+Primary columns: AUC and EF5%. EF1% and BEDROC (†) are secondary, see the
+caveats above.
+
+| Target | Family | N (failed act./dec.) | AUC (95 % CI) | EF5% (max) | EF1% (max) † | BEDROC † | p (M-W, one-sided) |
 |---|---|---|---|---|---|---|---|
 | akt1 | kinase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
 | braf | kinase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
@@ -135,9 +179,11 @@ depends on input order):
 | hmdh | reductase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
 | aces | esterase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
 
-Files: `enrichment.csv` (one row per target, all metrics and CIs),
-`<target>/metrics.csv` (ranked ligands incl. failures), `<target>/ranking.csv`
-(the pipeline's ranking) and `summary.json` (protocol and per-target records
+Files: `enrichment.csv` (one row per target, all metrics and CIs, DUD-E entry
+and compound counts), `<target>/metrics.csv` (ranked ligands incl. failures),
+`<target>/ligands.csv` (docked compounds and the DUD-E entry used),
+`<target>/ranking.csv` (the pipeline's ranking) and `summary.json` (protocol
+incl. the sampling rule and primary/secondary metrics, and per-target records
 including warnings and conversion failures).
 
 `--ingest DIR` scores an external `ranking.csv` per target against the same
@@ -178,16 +224,23 @@ Files: `parity.csv`, `summary.json`.
 
 **Protocol.** The pipeline is run on the akt1 DUD-E receptor (fpocket box)
 with seeded subsamples of 10/25/50/100 prepared ligands, exhaustiveness 2,
-one mode, at 1/2/4/8 worker processes; each cell is run 3 times
-(`--repeats 3`), interleaved across cells. Recorded per run: wall time,
-split into preparation (start to the runner's docking step), docking and
-post-processing from the time-stamped runner log; peak memory of the whole
-process tree (summed RSS and, where readable, summed PSS, sampled every
-0.5 s); the largest single process (`ru_maxrss`); Vina threads per process
-(the `--cpu` value in the logged command; by default the runner gives each
-of `-p N` processes cores/N threads). Per cell: median and range of the wall
-time, throughput from the median, speedup vs. `-p 1` at the same library
-size and parallel efficiency (speedup / p). `summary.json` records the
+one mode, at 1/2/4/8 worker processes with one Vina thread per process
+(`--threads 1`, the default); each cell is run 3 times (`--repeats 3`),
+interleaved across cells. Without `--threads` the runner gives `-p 1` all
+cores and each of `-p N` processes cores/N threads, so every cell would use
+the same CPU budget and speedup/p would not measure parallel efficiency.
+Recorded per run: wall time, split into preparation (start to the runner's
+docking step), docking and post-processing from the time-stamped runner
+log; peak memory of the whole process tree (summed RSS and, where readable,
+summed PSS, sampled every 0.5 s); the largest single process (`ru_maxrss`);
+ligands docked successfully; Vina threads per process (requested, and
+observed as the `--cpu` value in the logged command) and total threads
+(processes × threads). Per cell: median and range of the wall time,
+throughput (median over repeats of successfully docked ligands per minute,
+not library size per minute), speedup vs. `-p 1` at the same library size
+and parallel efficiency against total threads = speedup / (total threads /
+total threads at p = 1), i.e. speedup / p with one thread per process
+(None when a cell's thread count is unknown). `summary.json` records the
 logical and physical core counts, CPU model, Vina and AutoDocker versions.
 
 **Results:**

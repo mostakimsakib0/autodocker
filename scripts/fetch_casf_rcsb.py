@@ -10,29 +10,56 @@ this set are therefore not directly comparable with published CASF numbers.
 
   * IDs and ligand SMILES : ``benchmarks/data/casf2016_core_set.csv``;
                             a seeded random sample (``--sample 40
-                            --sample-seed 42``, the same selection as
-                            ``benchmark_redock.py``) or ``--first N``
+                            --sample-seed 42``) or ``--first N`` (first N
+                            IDs of the CSV in sorted order); both select
+                            exactly what ``benchmark_redock.py`` selects
+                            with the same options
   * Alternate locations   : per residue, the blank/'A' conformer is kept
                             (the highest-occupancy one when there is no 'A')
-  * Receptor              : ``{pdbid}_protein.pdb`` = ATOM/TER records plus,
-                            with ``--hetatm metals`` (default), metal-ion
-                            HETATM records (Zn, Mg, Ca, Mn, Fe, ...);
+  * Receptor              : ``{pdbid}_protein.pdb`` = ATOM/TER records plus
+                            the modified amino acids the pipeline keeps as
+                            protein (``vspipeline.protein.MODIFIED_RESIDUES``:
+                            MSE, TPO, SEP, ...) plus, with ``--hetatm metals``
+                            (default), metal ions = HETATM residues made of a
+                            single metal atom (Zn, Mg, Ca, Mn, Fe, ...; the
+                            rule of the runner's --detect-metals, so the Fe of
+                            a heme is dropped with the heme);
                             ``--hetatm all`` keeps every non-water HETATM
-                            except the chosen ligand instance
-  * Ligand                : ``{pdbid}_ligand.mol2`` = one crystal instance of
-                            the HET group whose heavy-atom formula matches the
-                            core-set SMILES, with bond orders from the RCSB
-                            ModelServer (Chemical Component Dictionary). The
-                            identity is verified against the core-set SMILES:
-                            the InChIKey connectivity block must match, or
-                            (for SMILES whose charges/hydrogens differ, e.g.
-                            charge-separated phosphonates) the heavy-atom
-                            graph must be isomorphic. Stereo and protonation
-                            are reported (full_inchikey_match), not required
-  * Start conformer       : with RDKit available, ``{pdbid}_ligand_rdkit.mol2``
-                            (+ ``.json``) = seeded ETKDGv3 + MMFF conformer for
-                            ``benchmark_redock.py --start-conformer rdkit``
-                            (lets the re-docking run where RDKit is missing)
+                            except the chosen ligand instance; ``--hetatm
+                            none`` keeps the protein only
+  * Ligand                : one crystal instance of the HET group whose
+                            heavy-atom formula matches the core-set SMILES
+                            (coordinates from the RCSB ModelServer, kept as
+                            ``{pdbid}_ligand_modelserver.sdf``). One RDKit
+                            molecule is built from it: crystal coordinates
+                            and heavy-atom graph; bond orders, formal charges
+                            and hydrogen counts (the protonation state) from
+                            the core-set SMILES via AssignBondOrdersFromTemplate
+                            (the crystal graph must be isomorphic to the
+                            SMILES graph; the SMILES' charge-separated
+                            ``[P+](=O)(=O)[O-]`` phosphates, a valence-6
+                            phosphorus, are first rewritten as the
+                            ``P(=O)([O-])[O-]`` dianion with the same atoms
+                            and hydrogens); stereo from the crystal
+                            coordinates; explicit hydrogens added once. It is
+                            written as ``{pdbid}_ligand.sdf`` and, via Open
+                            Babel, ``{pdbid}_ligand.mol2`` (crystal-start
+                            ligand and RMSD reference). The complex is skipped
+                            unless the MOL2's InChIKey equals the SDF's (also
+                            after ``obabel -h``, as the pipeline converts it)
+                            and matches the core-set InChIKey in connectivity
+                            block and protonation flag. The full-key match
+                            (incl. stereo) and whether the CCD bond orders
+                            alone already gave the right connectivity
+                            (``identity_check``) are reported
+  * Start conformer       : ``{pdbid}_ligand_rdkit.mol2`` (+ ``.json``) =
+                            seeded ETKDGv3 + MMFF conformer of the SAME
+                            protonated molecule, for ``benchmark_redock.py
+                            --start-conformer rdkit`` (lets the re-docking run
+                            where RDKit is missing). Its InChIKey must equal
+                            the crystal MOL2's, else it is not written
+
+RDKit is required (bond orders, protonation, conformers).
 
 Ligands that are polymers (peptides) or span several residues have no single
 matching HET group and are skipped. ``manifest.csv`` records the chosen
@@ -64,6 +91,8 @@ PDB_URL = "https://files.rcsb.org/download/{pdbid}.pdb"
 LIGAND_URL = ("https://models.rcsb.org/v1/{pdbid}/ligand?label_comp_id={comp}"
               "&auth_asym_id={chain}&auth_seq_id={resnum}&encoding=sdf")
 WATERS = {"HOH", "WAT", "DOD"}
+# Metal ions kept in the receptor with --hetatm metals (single-atom residues
+# only; see receptor_records).
 METAL_ELEMENTS = {"ZN", "MG", "CA", "MN", "FE", "CU", "NI", "CO", "CD", "HG"}
 # Never chosen as "the ligand" (solvent, buffer, ions).
 SKIP_RESNAMES = WATERS | {"SO4", "PO4", "GOL", "EDO", "ACT", "DMS", "PEG",
@@ -142,15 +171,16 @@ def filter_altlocs(lines):
     return out
 
 
-def het_groups(records):
-    """Heavy-atom element counts of every candidate ligand HET residue."""
+def het_groups(records, modified_residues=frozenset()):
+    """Heavy-atom element counts of every candidate ligand HET residue
+    (solvent, buffer, ions and modified amino acids are never candidates)."""
     groups = defaultdict(Counter)
     order = []
     for line in records:
         if not line.startswith("HETATM"):
             continue
         resname = line[17:20].strip()
-        if resname in SKIP_RESNAMES:
+        if resname in SKIP_RESNAMES or resname in modified_residues:
             continue
         element = _element(line)
         if element in ("H", "D"):
@@ -162,10 +192,30 @@ def het_groups(records):
     return [(k, groups[k]) for k in order]
 
 
-def receptor_records(records, hetatm="metals", ligand_key=None):
-    """Receptor lines: ATOM/TER plus the HETATM records selected by
-    ``hetatm`` ('none', 'metals', or 'all' = every non-water HETATM except
-    the residue ``ligand_key`` = (resname, chain, resnum))."""
+def _het_residue_key(line):
+    return (line[17:20].strip(), line[21], line[22:26].strip(), line[26])
+
+
+def receptor_records(records, hetatm="metals", ligand_key=None,
+                     modified_residues=frozenset()):
+    """Receptor lines: ATOM/TER, the modified amino acids of the chain, and
+    the HETATM records selected by ``hetatm``:
+
+    * ``none``: no other HETATM records;
+    * ``metals``: metal ions, i.e. HETATM residues made of one metal atom
+      (the rule of the pipeline's --detect-metals); a metal inside a larger
+      HET group (the Fe of HEM, the Fe/S of SF4) is not an ion and is
+      dropped with its group;
+    * ``all``: every non-water HETATM except the residue ``ligand_key`` =
+      (resname, chain, resnum).
+
+    ``modified_residues`` (the pipeline's MODIFIED_RESIDUES: MSE, TPO, ...)
+    are part of the protein and are kept in every mode; the pipeline turns
+    them into ATOM records.
+    """
+    heavy_atoms = Counter(_het_residue_key(line) for line in records
+                          if line.startswith("HETATM")
+                          and _element(line) not in ("H", "D"))
     out = []
     for line in records:
         if line.startswith(("ATOM", "TER")):
@@ -173,10 +223,12 @@ def receptor_records(records, hetatm="metals", ligand_key=None):
         elif line.startswith("HETATM"):
             resname = line[17:20].strip()
             key = (resname, line[21], line[22:26].strip())
-            if hetatm == "metals" and _element(line) in METAL_ELEMENTS \
-                    and resname not in WATERS:
+            if resname in WATERS or key == ligand_key:
+                continue
+            if resname in modified_residues or hetatm == "all":
                 out.append(line)
-            elif hetatm == "all" and resname not in WATERS and key != ligand_key:
+            elif (hetatm == "metals" and _element(line) in METAL_ELEMENTS
+                  and heavy_atoms[_het_residue_key(line)] == 1):
                 out.append(line)
     return out
 
@@ -207,63 +259,137 @@ def smiles_formula(smiles):
     return formula_counts(out)
 
 
-def inchikey(source, is_smiles=False):
-    """Standard InChIKey via Open Babel (None when it cannot be computed)."""
-    args = ["obabel", f"-:{source}"] if is_smiles else ["obabel", source]
-    proc = subprocess.run(args + ["-oinchikey"], capture_output=True, text=True,
-                          timeout=_benchlib.TOOL_TIMEOUT)
-    key = proc.stdout.strip().split()
-    return key[0] if key and len(key[0]) == 27 else None
+class LigandMismatch(ValueError):
+    """The crystal ligand cannot be made into the core-set molecule."""
 
 
-def same_connectivity(key_a, key_b):
-    """True when two InChIKeys share the connectivity (first) block."""
-    return bool(key_a and key_b) and key_a.split("-")[0] == key_b.split("-")[0]
+def normalize_core_set_smiles(smiles):
+    """Repair the one non-physical charge pattern of the core-set SMILES.
 
-
-def sdf_heavy_graph(sdf_text):
-    """Heavy-atom graph of the first V2000 molecule: ``(elements, edges)``.
-
-    Bond orders, charges and hydrogens are ignored, so protonation states
-    and charge-separated resonance forms describe the same skeleton.
+    The core-set CSV writes deprotonated phosphate groups charge-separated
+    as ``[P+](=O)(=O)[O-]``: a phosphorus with valence 6 (9 molecules of
+    the 285). It is rewritten as ``P(=O)([O-])[O-]``, the dianion with the
+    same atoms and hydrogens (no hydrogen is added or removed, only the
+    formal charges and one P=O bond order change). Other molecules are
+    returned unchanged. Returns ``(smiles, changed)``.
     """
-    lines = sdf_text.split("\n")
-    n_atoms, n_bonds = int(lines[3][:3]), int(lines[3][3:6])
-    elements = [lines[4 + i][31:34].strip().upper() for i in range(n_atoms)]
-    heavy = {i: e for i, e in enumerate(elements) if e not in ("H", "D")}
-    edges = set()
-    for j in range(n_bonds):
-        line = lines[4 + n_atoms + j]
-        a, b = int(line[:3]) - 1, int(line[3:6]) - 1
-        if a in heavy and b in heavy:
-            edges.add((min(a, b), max(a, b)))
-    index = {old: new for new, old in enumerate(sorted(heavy))}
-    return ([heavy[i] for i in sorted(heavy)],
-            sorted((index[a], index[b]) for a, b in edges))
+    from rdkit import Chem
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return smiles, False
+    rw, changed = Chem.RWMol(mol), False
+    Chem.Kekulize(rw, clearAromaticFlags=True)
+    for atom in rw.GetAtoms():
+        if not (atom.GetSymbol() == "P" and atom.GetFormalCharge() == 1
+                and atom.GetTotalValence() == 6):
+            continue
+        for bond in atom.GetBonds():
+            other = bond.GetOtherAtom(atom)
+            if (bond.GetBondType() == Chem.BondType.DOUBLE and other.GetSymbol() == "O"
+                    and other.GetDegree() == 1):
+                bond.SetBondType(Chem.BondType.SINGLE)
+                other.SetFormalCharge(-1)
+                atom.SetFormalCharge(0)
+                changed = True
+                break
+    if not changed:
+        return smiles, False
+    Chem.SanitizeMol(rw)
+    return Chem.MolToSmiles(rw), True
 
 
-def skeleton_hash(elements, edges, iterations=6):
-    """Weisfeiler-Lehman hash of an element-labelled graph. Isomorphic
-    graphs always hash equal; for drug-sized molecules a collision between
-    different skeletons of the same formula is practically excluded."""
-    neighbours = defaultdict(list)
-    for a, b in edges:
-        neighbours[a].append(b)
-        neighbours[b].append(a)
-    labels = list(elements)
-    for _ in range(iterations):
-        labels = [labels[i] + "(" + ",".join(sorted(labels[j] for j in neighbours[i])) + ")"
-                  for i in range(len(labels))]
-        # compress labels to keep strings short
-        table = {lab: f"{k:x}" for k, lab in enumerate(sorted(set(labels)))}
-        labels = [elements[i] + table[lab] for i, lab in enumerate(labels)]
-    return "|".join(sorted(labels)) + f"#{len(edges)}"
+def protonated_ligand(sdf_text, smiles):
+    """The crystal ligand as one RDKit molecule with explicit hydrogens.
+
+    Coordinates and the heavy-atom graph come from the crystal (ModelServer
+    SDF); bond orders, formal charges and hydrogen counts (i.e. the
+    protonation state) come from the core-set SMILES, assigned with
+    ``AllChem.AssignBondOrdersFromTemplate`` after the crystal's own bond
+    orders and charges are reset, so the result never depends on how the
+    CCD (or a reader) drew them. Stereo is taken from the crystal
+    coordinates. Hydrogens are added once, with coordinates.
+
+    Raises LigandMismatch when the heavy-atom graphs differ (atom or bond
+    count, or no isomorphism with matching elements).
+    """
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+
+    crystal = Chem.MolFromMolBlock(sdf_text, sanitize=False, removeHs=False)
+    if crystal is None or crystal.GetNumConformers() == 0:
+        raise LigandMismatch("RDKit cannot read the crystal ligand SDF")
+    template = Chem.MolFromSmiles(smiles)
+    if template is None:
+        raise LigandMismatch(f"RDKit cannot read the core-set SMILES {smiles}")
+    heavy = Chem.RWMol(crystal)
+    for idx in sorted((a.GetIdx() for a in heavy.GetAtoms() if a.GetAtomicNum() == 1),
+                      reverse=True):
+        heavy.RemoveAtom(idx)
+    for bond in heavy.GetBonds():
+        bond.SetBondType(Chem.BondType.SINGLE)
+        bond.SetIsAromatic(False)
+    for atom in heavy.GetAtoms():
+        atom.SetFormalCharge(0)
+        atom.SetIsAromatic(False)
+        atom.SetNumExplicitHs(0)
+        atom.SetNoImplicit(False)
+        atom.SetNumRadicalElectrons(0)
+    heavy = heavy.GetMol()
+    heavy.UpdatePropertyCache(strict=False)
+    Chem.FastFindRings(heavy)
+    if (heavy.GetNumAtoms(), heavy.GetNumBonds()) != (template.GetNumAtoms(),
+                                                      template.GetNumBonds()):
+        raise LigandMismatch(
+            f"heavy-atom graph differs from the core-set SMILES ({heavy.GetNumAtoms()} "
+            f"atoms/{heavy.GetNumBonds()} bonds vs {template.GetNumAtoms()}/"
+            f"{template.GetNumBonds()})")
+    try:
+        mol = AllChem.AssignBondOrdersFromTemplate(template, heavy)
+    except (ValueError, RuntimeError) as e:  # no match, or sanitization failed
+        raise LigandMismatch(f"core-set SMILES does not map onto the crystal "
+                             f"heavy-atom graph: {e}") from None
+    Chem.AssignStereochemistryFrom3D(mol)
+    mol = Chem.AddHs(mol, addCoords=True)
+    return mol
 
 
-def smiles_sdf(smiles):
-    """Connection table of a SMILES string (Open Babel, no coordinates)."""
-    return subprocess.run(["obabel", f"-:{smiles}", "-osdf"], capture_output=True,
-                          text=True, timeout=_benchlib.TOOL_TIMEOUT).stdout
+def write_ligand_files(mol, sdf_path, mol2_path, name):
+    """Write ``mol`` (explicit H, crystal coordinates) as SDF (RDKit) and
+    MOL2 (Open Babel ``sdf -> mol2``; the MOL2 keeps every hydrogen)."""
+    from rdkit import Chem
+    mol = Chem.Mol(mol)
+    mol.SetProp("_Name", name)
+    with open(sdf_path, "w", encoding="utf-8") as f:
+        f.write(Chem.MolToMolBlock(mol, kekulize=True))
+        f.write("$$$$\n")
+    subprocess.run(["obabel", "-isdf", sdf_path, "-omol2", "-O", mol2_path],
+                   check=True, capture_output=True, timeout=_benchlib.TOOL_TIMEOUT)
+
+
+def check_ligand_files(sdf_path, mol2_path, ref_key):
+    """InChIKeys of the written ligand; returns ``(keys, problem)``.
+
+    The MOL2 must be the same molecule as the SDF it was written from (full
+    InChIKey), also after ``obabel -h`` (the pipeline's MOL2 -> PDBQT
+    conversion adds hydrogens with -h; with every hydrogen explicit it must
+    add none), and must be the core-set compound in the core-set
+    protonation state (see _benchlib.same_compound_and_protonation).
+    """
+    keys = {"sdf": _benchlib.inchikey(sdf_path),
+            "mol2": _benchlib.inchikey(mol2_path),
+            "mol2_obabel_h": _benchlib.inchikey(mol2_path, extra_args=("-h",)),
+            "core_set": ref_key}
+    if not keys["sdf"] or keys["mol2"] != keys["sdf"]:
+        return keys, (f"MOL2 written by Open Babel is not the built molecule "
+                      f"(SDF {keys['sdf']}, MOL2 {keys['mol2']})")
+    if keys["mol2_obabel_h"] != keys["mol2"]:
+        return keys, (f"obabel -h changes the MOL2 ligand ({keys['mol2']} -> "
+                      f"{keys['mol2_obabel_h']})")
+    if not _benchlib.same_compound_and_protonation(keys["mol2"], ref_key):
+        return keys, (f"ligand InChIKey {keys['mol2']} is not the core-set compound/"
+                      f"protonation state {ref_key}")
+    return keys, None
 
 
 def normalize_sdf_elements(sdf):
@@ -285,58 +411,84 @@ def normalize_sdf_elements(sdf):
     return "\n".join(lines)
 
 
-def build(pdbid, smiles, outdir, hetatm="metals", conformer_seed=_benchlib.BENCH_SEED):
+def build(pdbid, smiles, outdir, hetatm="metals", conformer_seed=_benchlib.BENCH_SEED,
+          modified_residues=None):
+    """Write one complex; returns ``(info, None)`` or ``(None, reason)``."""
+    if modified_residues is None:
+        modified_residues = _benchlib.pipeline_modified_residues()
     pdb_text = fetch(PDB_URL.format(pdbid=pdbid.upper())).decode()
     records = filter_altlocs(first_model_records(pdb_text))
     target = smiles_formula(smiles)
-    matches = [key for key, counts in het_groups(records) if counts == target]
+    matches = [key for key, counts in het_groups(records, modified_residues)
+               if counts == target]
     if not matches:
         return None, "no HET group matches the ligand formula (peptide or multi-residue ligand)"
-    ref_key = inchikey(smiles, is_smiles=True)
-    ref_skeleton = skeleton_hash(*sdf_heavy_graph(smiles_sdf(smiles)))
+    smiles, smiles_normalized = normalize_core_set_smiles(smiles)
+    ref_key = _benchlib.inchikey(smiles, is_smiles=True)
+    if not ref_key:
+        return None, f"Open Babel computes no InChIKey for the core-set SMILES {smiles}"
     cdir = os.path.join(outdir, pdbid)
     os.makedirs(cdir, exist_ok=True)
+    raw_sdf = os.path.join(cdir, f"{pdbid}_ligand_modelserver.sdf")
     sdf_path = os.path.join(cdir, f"{pdbid}_ligand.sdf")
-    chosen, last_key, identity = None, None, None
+    mol2 = os.path.join(cdir, f"{pdbid}_ligand.mol2")
+    chosen, keys, ccd_key, problems = None, None, None, []
     for comp, chain, resnum in matches:
         sdf = fetch(LIGAND_URL.format(pdbid=pdbid.lower(), comp=comp, chain=chain,
                                       resnum=resnum)).decode()
         sdf = normalize_sdf_elements(sdf.split("$$$$")[0] + "$$$$\n")
-        with open(sdf_path, "w", encoding="utf-8") as f:
+        with open(raw_sdf, "w", encoding="utf-8") as f:
             f.write(sdf)
-        last_key = inchikey(sdf_path)
-        if same_connectivity(last_key, ref_key):
-            chosen, identity = (comp, chain, resnum), "inchikey-connectivity"
+        ccd_key = _benchlib.inchikey(raw_sdf)
+        try:
+            mol = protonated_ligand(sdf, smiles)
+            write_ligand_files(mol, sdf_path, mol2, pdbid)
+            keys, problem = check_ligand_files(sdf_path, mol2, ref_key)
+        except (LigandMismatch, subprocess.SubprocessError) as e:
+            problem = str(e)
+        if problem is None:
+            chosen = (comp, chain, resnum)
             break
-        if skeleton_hash(*sdf_heavy_graph(sdf)) == ref_skeleton:
-            chosen, identity = (comp, chain, resnum), "heavy-atom-graph"
-            break
+        problems.append(f"{comp} {chain}{resnum}: {problem}")
     if chosen is None:
-        os.remove(sdf_path)
-        return None, (f"formula matches {len(matches)} HET group(s) but neither the "
-                      f"InChIKey connectivity block nor the heavy-atom graph matches "
-                      f"the core-set SMILES (core set {ref_key}, PDB {last_key})")
-    mol2 = os.path.join(cdir, f"{pdbid}_ligand.mol2")
-    subprocess.run(["obabel", sdf_path, "-omol2", "-O", mol2],
-                   check=True, capture_output=True)
+        for path in (raw_sdf, sdf_path, mol2):
+            if os.path.exists(path):
+                os.remove(path)
+        return None, (f"formula matches {len(matches)} HET group(s) but none is the "
+                      f"core-set molecule ({'; '.join(problems)[:600]})")
     with open(os.path.join(cdir, f"{pdbid}_protein.pdb"), "w", encoding="utf-8") as f:
-        for line in receptor_records(records, hetatm, ligand_key=chosen):
+        for line in receptor_records(records, hetatm, ligand_key=chosen,
+                                     modified_residues=modified_residues):
             f.write(line + "\n")
         f.write("END\n")
     info = {"comp": chosen[0], "chain": chosen[1], "resnum": chosen[2],
-            "instances": len(matches), "inchikey_pdb": last_key,
-            "identity_check": identity,
+            "instances": len(matches),
+            "inchikey_pdb": ccd_key,
+            "inchikey_ligand": keys["mol2"],
             "inchikey_core_set": ref_key,
-            "full_key_match": last_key == ref_key}
+            "core_set_smiles": smiles,
+            "core_set_smiles_normalized": smiles_normalized,
+            # How the crystal heavy atoms were identified as the core-set
+            # compound; bond orders/protonation always come from the SMILES.
+            "identity_check": ("ccd-inchikey-connectivity"
+                               if _benchlib.same_connectivity(ccd_key, ref_key)
+                               else "heavy-atom-graph+smiles-bond-orders"),
+            "full_key_match": keys["mol2"] == ref_key}
+    rd_mol2 = os.path.join(cdir, f"{pdbid}_ligand_rdkit.mol2")
+    rd_json = rd_mol2[:-len(".mol2")] + ".json"
     try:
-        rd_mol2 = os.path.join(cdir, f"{pdbid}_ligand_rdkit.mol2")
         meta = _benchlib.rdkit_start_conformer(sdf_path, rd_mol2, conformer_seed)
-        with open(rd_mol2[:-len(".mol2")] + ".json", "w", encoding="utf-8") as f:
+        meta["inchikey"] = _benchlib.inchikey(rd_mol2)
+        if meta["inchikey"] != keys["mol2"]:
+            raise RuntimeError(f"RDKit start conformer {meta['inchikey']} differs from "
+                               f"the crystal ligand {keys['mol2']}")
+        with open(rd_json, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
-    except ImportError:
-        pass
     except Exception as e:  # the crystal-start benchmark still works
         info["conformer_error"] = str(e)[:200]
+        for path in (rd_mol2, rd_json):
+            if os.path.exists(path):
+                os.remove(path)
     return info, None
 
 
@@ -357,12 +509,14 @@ def main(argv=None):
                     help="ETKDG seed of the precomputed RDKit start conformer")
     args = ap.parse_args(argv)
 
-    with open(args.ids, encoding="utf-8") as f:
-        all_rows = {r["pdbid"].lower(): r for r in csv.DictReader(f)}
-    if args.first:
-        ids = sorted(all_rows)[:args.first]
-    else:
-        ids = _benchlib.select_sample(all_rows, args.sample, args.sample_seed)
+    try:
+        import rdkit  # noqa: F401
+    except ImportError:
+        ap.error("fetch_casf_rcsb.py needs RDKit (bond orders, protonation, conformers)")
+
+    all_rows = _benchlib.read_pdbid_rows(args.ids)
+    ids = _benchlib.select_complexes(all_rows, args.sample, args.sample_seed, args.first)
+    modified = _benchlib.pipeline_modified_residues()
     os.makedirs(args.outdir, exist_ok=True)
     manifest = []
     for pdbid in ids:
@@ -370,22 +524,27 @@ def main(argv=None):
         smiles = all_rows[pdbid]["smiles"].split("</s>")[-1].replace(" ", "")
         try:
             info, reason = build(pdbid, smiles, args.outdir, args.hetatm,
-                                 args.conformer_seed)
+                                 args.conformer_seed, modified_residues=modified)
         except Exception as e:  # network or conversion failure: record and go on
             info, reason = None, f"error: {e}"
         if info:
             manifest.append([pdbid, "ok", info["comp"], info["chain"], info["resnum"],
                              info["instances"], info["inchikey_pdb"],
-                             info["identity_check"], info["full_key_match"], ""])
+                             info["inchikey_ligand"], info["inchikey_core_set"],
+                             info["identity_check"], info["full_key_match"],
+                             (f"rdkit conformer not written: {info['conformer_error']}"
+                              if info.get("conformer_error") else "")])
             print(f"{pdbid}: {info['comp']} {info['chain']}{info['resnum']} "
-                  f"({info['instances']} candidate(s))", flush=True)
+                  f"({info['instances']} candidate(s), {info['identity_check']})",
+                  flush=True)
         else:
-            manifest.append([pdbid, "skipped", "", "", "", 0, "", "", "", reason])
+            manifest.append([pdbid, "skipped", "", "", "", 0, "", "", "", "", "", reason])
             print(f"{pdbid}: skipped - {reason}", flush=True)
     with open(os.path.join(args.outdir, "manifest.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["pdbid", "status", "comp_id", "chain", "resnum", "instances",
-                    "inchikey", "identity_check", "full_inchikey_match", "reason"])
+                    "inchikey_pdb", "inchikey_ligand", "inchikey_core_set",
+                    "identity_check", "full_inchikey_match", "reason"])
         w.writerows(manifest)
     ok = sum(1 for m in manifest if m[1] == "ok")
     print(f"{ok}/{len(manifest)} complexes written to {args.outdir}")
