@@ -1,43 +1,196 @@
 name: CI
 
+# Single test workflow (replaces the former duplicate test.yml):
+#  - lint:        ruff (pyflakes + syntax), shellcheck, hadolint
+#  - pytest:      Python 3.9-3.12 with Open Babel and the official Vina 1.2.7
+#  - docker:      on pull requests, build the image, smoke-screen it through
+#                 the entrypoint twice and require byte-identical results
 on:
   push:
-    paths:
-      - '**.py'
-      - '**.sh'
-      - 'requirements.txt'
-      - 'tests/**'
-      - '**/*.yml'
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'paper/**'
+      - 'CITATION.cff'
+      - '.zenodo.json'
+      - 'LICENSE'
   pull_request:
-    paths:
-      - '**.py'
-      - '**.sh'
-      - 'requirements.txt'
-      - 'tests/**'
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'paper/**'
+      - 'CITATION.cff'
+      - '.zenodo.json'
+      - 'LICENSE'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Upstream AutoDock Vina 1.2.7 release binary (statically linked), the same
+  # release the Docker image compiles from tools/autodock-vina. Checksum of
+  # https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v1.2.7/vina_1.2.7_linux_x86_64
+  VINA_VERSION: '1.2.7'
+  VINA_SHA256: 'f31f774f723bba7bbe6e9d1c47577020eea9a8da16424284c043d22593570644'
+  RUFF_VERSION: '0.17.0'
+  HADOLINT_IMAGE: 'docker.io/hadolint/hadolint:v2.12.0'
 
 jobs:
-  test:
-    name: pytest
-    runs-on: ubuntu-latest
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
-      - name: Install system dependencies
+      - name: Install ruff
+        run: pip install "ruff==${RUFF_VERSION}"
+
+      - name: ruff (syntax errors, Python 3.9 target) - blocking
+        run: ruff check --output-format=github --select E9 .
+
+      # Non-blocking until the unused-import cleanup lands; configuration in
+      # ruff.toml (rules F and E9). Remove continue-on-error once it passes.
+      - name: ruff (pyflakes) - non-blocking
+        continue-on-error: true
+        run: ruff check --output-format=github .
+
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck autodocker/entry.sh scripts/*.sh .github/smoke/*.sh
+
+      - name: hadolint
+        run: docker run --rm -i -v "$PWD/.hadolint.yaml:/.config/hadolint.yaml:ro" "$HADOLINT_IMAGE" < Dockerfile
+
+  pytest:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # Open Babel 3.1.1 from Ubuntu (same upstream release as the image).
+      # SMINA, QuickVina 2 and fpocket are not packaged for Ubuntu 24.04; the
+      # tests that need them skip here and run in the docker job instead,
+      # against the binaries built into the image (pytest's fpocket tests
+      # use mocks).
+      - name: Install Open Babel
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            autodock-vina openbabel
+          sudo apt-get install -y --no-install-recommends openbabel
+
+      # The pinned Vina 1.2.7 instead of Ubuntu's autodock-vina (1.2.5):
+      # the upstream static release binary, verified by checksum. Building
+      # tools/autodock-vina here would need Boost in every matrix job for
+      # the same release; the docker job covers the from-source build.
+      - name: Install AutoDock Vina ${{ env.VINA_VERSION }}
+        run: |
+          curl -fsSL --retry 5 -o vina \
+            "https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v${VINA_VERSION}/vina_${VINA_VERSION}_linux_x86_64"
+          echo "${VINA_SHA256}  vina" | sha256sum -c -
+          sudo install -m 0755 vina /usr/local/bin/vina
+          vina --version
+          obabel -V
 
       - name: Install Python dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt pytest
 
       - name: Run test suite
-        run: python -m pytest tests/ -q
+        run: python -m pytest tests/ -q -rs
+        env:
+          VS_COMMAND_TIMEOUT: '120'
+
+  docker:
+    name: docker image smoke + determinism
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Read version
+        id: version
+        run: echo "version=$(cat autodocker/VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          push: false
+          tags: autodocker:ci
+          build-args: |
+            AUTODOCKER_VERSION=${{ steps.version.outputs.version }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check image metadata and bundled tools
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          label="$(docker image inspect autodocker:ci \
+            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')"
+          test "$label" = "$VERSION"
+          docker run --rm --entrypoint python3 autodocker:ci \
+            /autodocker/runner.py --version | grep -Fx "AutoDocker $VERSION"
+          docker run --rm --entrypoint sh autodocker:ci -c '
+            set -eu
+            vina --version | grep -F "v1.2.7"
+            obabel -V | grep -F "Open Babel 3.1.1"
+            smina --version | head -n 1
+            qvina --version | head -n 1
+            command -v fpocket
+            test -s /ngl/ngl.js'
+
+      - name: Smoke screen twice and compare (determinism)
+        run: .github/smoke/run_smoke.sh autodocker:ci "$RUNNER_TEMP/smoke"
+
+      # Tests that need real SMINA / QuickVina 2 / Vina binaries, run inside
+      # the image against the tools it ships.
+      - name: Real-binary tests inside the image
+        run: |
+          docker run --rm --entrypoint sh \
+            -v "$PWD:/repo:ro" -w /repo -e PYTHONDONTWRITEBYTECODE=1 \
+            autodocker:ci -c '
+              pip install --no-cache-dir --root-user-action=ignore --disable-pip-version-check -q pytest==8.4.2
+              python3 -m pytest -q -rs -p no:cacheprovider \
+                tests/test_smina_real.py tests/test_tools_real.py tests/test_e2e.py'
+
+      - name: Upload smoke outputs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-outputs
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: ignore
