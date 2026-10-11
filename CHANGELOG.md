@@ -1,6 +1,157 @@
 # Changelog
 
-## 1.1.5 (unreleased)
+## 2.0.0
+
+A major release: docking scores, docking boxes and several output formats
+change compared with 1.1.x (entries marked **(results)**). Rerun any screen
+whose numbers you need to compare. Version 1.1.5 was never released; its
+changes (below) are part of 2.0.0.
+
+### Fixed
+
+- **(results)** Receptor protonation is deterministic. Open Babel places
+  some hydrogens in a random, clock-seeded direction when the neighbouring
+  atoms do not fix one; Vina decides which atoms are hydrogen-bond donors
+  from hydrogen positions, so re-preparing the same receptor changed scores.
+  Hydrogens in the input receptor are now removed before protonation at
+  `--ph` (pre-protonated inputs such as DUD-E receptors previously got an
+  extra, randomly placed hydrogen on every Lys NZ and Arg NH1), and any
+  hydrogen that still differs between two Open Babel runs is re-placed
+  deterministically from the heavy atoms. The 1HSG case-study receptor is
+  unchanged.
+- **(results)** Ligand hydrogens are deterministic: the same two-run check
+  is applied to every ligand conversion that adds or keeps hydrogens (some
+  MOL2 inputs got randomly placed amine hydrogens).
+- **(results)** 2D ligands get 3D coordinates from RDKit ETKDGv3 seeded with
+  `--seed` (Open Babel `--gen3d` gave different coordinates on every run; it
+  remains a fallback without RDKit, with a warning).
+- **(results)** A 2D SDF with `--no-minimize`, or after an MMFF94 failure,
+  was docked flat (all z = 0) because the charge repair rebuilt it from the
+  2D input; it is now converted from 3D coordinates and a flat result is
+  rejected.
+- **(results)** The docking box is centered on the midpoint of the pocket's
+  bounding box, so the padding is equal on both sides (it was centered on
+  the mean of the pocket atoms). `--no-fpocket` boxes and automatically
+  chosen flexible residues ignore hydrogens.
+- **(results)** Affinities are read from the output PDBQT at full precision;
+  the screen output had rounded them (Vina to 4 significant digits, QuickVina
+  and SMINA to 0.1 kcal/mol).
+- **(results)** Polar hydrogens of PDB ligands get Gasteiger charges (charges
+  were computed before hydrogens were added). Vina does not use charges.
+- The run fingerprint includes receptor and flexible-residue hydrogens and
+  the SHA-256 and version of each docking binary, so a changed receptor or an
+  upgraded engine invalidates the checkpoint. Existing checkpoints are
+  discarded once.
+- QuickVina receives `--flex` in flexible docking; an engine that cannot
+  take it fails the ligand instead of docking against a receptor with the
+  side chains removed.
+- A valid score outside the accepted window is reported as `OUT_OF_WINDOW`
+  with its number, ranked after in-window results and counted separately, not
+  as a failed docking. A screen in which every result is out of the window no
+  longer stops with "all docking attempts failed".
+- All-zero partial charges (e.g. benzene after nonpolar hydrogen merging)
+  are a warning, not a failure.
+- Pocket ties are broken by pocket number instead of fpocket's random Monte
+  Carlo volume.
+- No silent fallbacks: a missing or failing fpocket, a receptor without
+  pockets, PubChem downloads that yield nothing, and unreadable chain lists
+  stop the run with a clear message instead of docking in a whole-receptor
+  box, docking the local ligand folder, or assuming chain A.
+- Receptor cleaning keeps one alternate location per residue (highest
+  occupancy) and the first model, also for kept HETATM residues; kept waters
+  are no longer added twice with `--keep-hetero` and `--keep-waters`. Kept
+  HETATM residues keep P, F, Cl, Br and I atoms; `--detect-metals` keeps
+  metal ions only, not a whole heme.
+- V3000 SDF files are read correctly (3D coordinates were discarded).
+- A Lipinski-rejected `x.sdf` no longer lets `x.mol2` of the same molecule be
+  docked unfiltered; same-name files are resolved by precedence and the
+  others are reported as superseded.
+- An output directory inside the ligand folder is no longer docked as
+  ligands on the next run.
+- `--mw-min/--mw-max/--logp-max` are rejected outside `--library custom`
+  instead of being ignored; in custom mode they replace Lipinski's limits.
+- `-v` enables debug logging in every module.
+- `--smina-only` rejects options it cannot honour, and SMINA commands are
+  logged like Vina's.
+- Checkpoints are written atomically, and a lock prevents two runs from
+  sharing an output directory.
+- The engine settings reach worker processes explicitly, so `--vina-bin` and
+  `--timeout` also work with the spawn start method (macOS, Python 3.14).
+- Every docking command is logged before it runs, and failed runs keep
+  their stderr and a real traceback.
+- The HTML report: the table header no longer sorts with the rows, the
+  interpretation guide matches the score colours, and the NGL viewer
+  download is pinned and hash-checked.
+- The PyMOL box script draws the box in the intended colour.
+
+### Changed
+
+- Consensus scoring rescores Vina's top pose with SMINA's Vinardo function
+  (it re-docked with SMINA's default function, which is Vina's, so the
+  agreement mostly measured search noise). `consensus_ranking.csv` loses the
+  "Agreement (heuristic)" column; the Spearman correlation is written to
+  `consensus_summary.json`.
+- The "ADMET" filter is named for what it is: the Lipinski rule-of-five
+  filter (zero violations allowed; Open Babel descriptors). `--no-lipinski`
+  replaces `--no-admet` (kept as a deprecated alias), and `LIPINSKI=0`
+  replaces `ADMET=0` in the container.
+- Custom PubChem libraries use Open Babel's logP for every filter (the
+  PubChem XLogP3 pre-filter is removed). Ranitidine (withdrawn in 2020) is
+  removed from the built-in drug list; `--max-compounds` sets the number of
+  compounds (default 20).
+- `ranking.csv`: new `Engine` and `Minimized` columns; `Docked_File` is
+  relative to the output directory; SimScore and modes are blank when
+  undefined instead of 0.
+- `Top_hits.txt`, `metrics.txt` and `Results_full.txt` contain no timestamps;
+  `receptor.pdbqt` contains no output path.
+- Chain IDs are case-sensitive.
+- Open Babel always runs single-threaded.
+- Exit codes: 2 for invalid options, environment or missing tools; 3 when
+  more ligands fail than `--max-failure-fraction` (default 0.5) allows;
+  130 when interrupted.
+- The druggability label uses fpocket's documented threshold of 0.5.
+
+### Added
+
+- `run_manifest.json` in every output directory: version, command line and
+  resolved options, seed, platform, the path, version and SHA-256 of every
+  tool, the run fingerprint, RDKit version, timestamps and failure counts.
+- Container images for linux/amd64 and linux/arm64 (native builds in one
+  manifest). Docking engines and fpocket are compiled with
+  `-ffp-contract=off`, which was verified to leave amd64 binaries and results
+  unchanged. On arm64, fpocket reads PDB input only, which is all AutoDocker
+  uses.
+- Reproducible image builds: base images pinned by digest, Debian packages
+  from a dated snapshot (Open Babel 3.1.1 asserted), NGL from a lockfile,
+  exact Python pins (now including RDKit), and `autodocker/VERSION` as the
+  single version source.
+- `--max-compounds`, `--max-failure-fraction`, `--no-lipinski`.
+- Benchmarks: enrichment boxes from the DUD-E crystal ligand with all chains;
+  BEDROC and ROC enrichment; re-docking from seeded RDKit start conformers on
+  a seeded sample of the core set; per-mode RMSDs; ligand identity checks in
+  `fetch_casf_rcsb.py`; a parity check that `ranking.csv` equals raw Vina;
+  repeated, per-phase throughput measurements.
+- Tests for determinism of receptor and ligand preparation, and end-to-end
+  runs that must be byte-identical across repeats, `-p` and Vina `--cpu`.
+
+### Fixed in the benchmark scripts
+
+- Enrichment factors were computed against the nominal fraction instead of
+  the screened fraction and could exceed their maximum; the bootstrap
+  collapsed duplicate draws; failed ligands were dropped from the count
+  instead of ranked last; `--ci` was ignored; p-values were rounded to zero.
+- Re-docking took mode 2 as "top-1" when the mode-1 RMSD failed, reported
+  success over docked instead of attempted complexes, and resumed with
+  changed parameters.
+- The parity check passed when every complex errored.
+
+### CI
+
+- One workflow: Python 3.9 to 3.12 with the official Vina 1.2.7, ruff,
+  shellcheck and hadolint; on pull requests the image is built for both
+  architectures and a smoke screen must reproduce byte for byte.
+
+## 1.1.5 (never released; superseded by 2.0.0)
 
 Changes marked **(results)** alter docking scores compared with 1.1.4; rerun
 screens that need comparable numbers.
@@ -73,9 +224,11 @@ screens that need comparable numbers.
   so the first 1.1.5 run on an old output directory docks every ligand again.
 - `scripts/patch.sh` stops the image build when a patch no longer applies.
 
-- The run fingerprint ignores receptor hydrogen coordinates: Open Babel's
-  pH protonation places rotatable polar hydrogens differently on every run,
-  which Vina ignores but which would otherwise invalidate every checkpoint.
+- The run fingerprint ignores receptor hydrogen coordinates. *(Withdrawn in
+  2.0.0: the premise that Vina ignores hydrogen positions is wrong. Vina
+  decides which atoms are hydrogen-bond donors from hydrogen positions, so
+  the random placements changed scores. 2.0.0 makes the placement
+  deterministic and fingerprints the full receptor file.)*
 
 ### Added
 

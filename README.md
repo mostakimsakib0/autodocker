@@ -15,12 +15,23 @@ AutoDocker is a containerized virtual-screening pipeline. It prepares proteins
 
 ## Quick start
 
-Build the image (submodule-based; builds Vina, QVina2, OpenBabel, fpocket):
+Pull the published image (linux/amd64 and linux/arm64; Docker picks the
+right one):
+
+```bash
+docker pull ghcr.io/mostakimsakib0/autodocker:v2.0.0
+docker tag ghcr.io/mostakimsakib0/autodocker:v2.0.0 autodocker
+```
+
+or build it from source (Vina, QuickVina 2, SMINA and fpocket are compiled
+from pinned submodules; Open Babel comes from a pinned Debian snapshot):
 
 ```bash
 git clone --recurse-submodules https://github.com/mostakimsakib0/autodocker.git
 cd autodocker
-docker build -t autodocker .
+docker build -t autodocker \
+  --build-arg AUTODOCKER_VERSION="$(cat autodocker/VERSION)" \
+  --build-arg VCS_REF="$(git rev-parse HEAD)" .
 ```
 
 Run a screening on a protein + ligand directory:
@@ -35,10 +46,12 @@ docker run --rm \
   autodocker
 ```
 
-To screen a PubChem library instead of local files (a built-in list of
-approved drugs, up to 20 compounds per run; `custom` also filters by
-`--mw-min/--mw-max/--logp-max`), leave `works/ligs/` empty and pass the
-library option:
+To screen a PubChem library instead of local files, leave `works/ligs/`
+empty and pass the library option. `fda` is a fixed list of 74 well-known
+approved drugs (not the full FDA list); `custom` is the same list filtered by
+`--mw-min/--mw-max/--logp-max`; `--max-compounds` (default 20) limits how many
+are prepared. Each compound's PubChem CID, download URL and retrieval time are
+recorded in `ligand_metadata.json`.
 
 ```bash
 docker run --rm -v "$PWD/works:/workspace" autodocker --library fda
@@ -54,15 +67,28 @@ docker run --rm \
 ```
 
 Results are written under `/workspace/output/`:
-- `ranking.csv` — sorted docking scores with descriptors
-- `Top_hits.txt` — the top-N hits with interpretation
-- `metrics.txt` — pose statistics and SimScore
-- `pocket_summary.csv` — fpocket pocket scores
-- `grid_box.pml` — PyMOL script visualizing the docking box
-- `docked/*_out.pdbqt` — docked poses; `*_vina.log` — per-ligand logs
+- `ranking.csv` — all ligands ranked by score: in-window results first, then
+  `OUT_OF_WINDOW` results (a valid Vina score outside the accepted window,
+  shown with its number), then failures. Columns include the descriptors,
+  `Status`, `Engine` (which docking binary produced the score) and
+  `Minimized`; `Docked_File` is relative to the output directory.
+- `Top_hits.txt`, `metrics.txt`, `Results_full.txt` — summaries (no timestamps,
+  so repeated runs give identical files)
+- `run_manifest.json` — everything needed to audit or repeat the run: version,
+  command line and resolved options, seed, tool paths, versions and SHA-256,
+  the docking fingerprint, platform, timestamps and failure counts
+- `ligand_metadata.json` — per-ligand source, descriptors, preparation details
+- `pocket_summary.csv` — fpocket pocket scores (the `Volume` column is
+  fpocket's clock-seeded Monte Carlo estimate and varies between runs; it is
+  never used to choose a pocket)
+- `grid.conf`, `grid_box.pml` — the docking box and a PyMOL script that draws it
+- `docked/*_out.pdbqt` — docked poses; `*_vina.log` — per-ligand logs whose
+  first line is the exact command
+- `consensus_ranking.csv`, `consensus_summary.json` — with `--consensus`
 - `frame_offset.txt` — translation back to the input PDB's coordinates (see below)
 
-The receptor is protonated at pH 7.4 (`--ph`) and centered at the origin
+Hydrogens present in the input receptor are removed and the receptor is
+protonated at pH 7.4 (`--ph`); it is centered at the origin
 during preparation, so `receptor.pdbqt`, `grid.conf` and the docked poses
 share that centered frame (`--grid-center` is given in the input PDB's
 coordinates and converted automatically).
@@ -81,37 +107,42 @@ Direct use (inside the image or with tools on `PATH`):
 | Option | Description | Default |
 |---|---|---|
 | `-r, --receptor` | Protein PDB file (**required**) | |
-| `-l, --ligands` | SDF file, PDBQT/MOL2/PDB file, or directory (**required**) | |
-| `-o, --output` | Output directory (**required**) | |
-| `--library` | `local` · `fda` · `custom` (PubChem source) | `local` |
-| `--no-admet` | Skip Lipinski ADMET filtering | off |
-| `--no-minimize` | Skip MMFF94 ligand minimization | off |
-| `--chain` | Chains to keep, e.g. `A`, `A,B`, or `all` | auto |
+| `-l, --ligands` | Ligand file or directory of SDF/MOL2/PDB/PDBQT files (searched recursively). Same-name files resolve SDF > PDBQT > MOL2 > PDB; the others are reported as superseded | required for `local` |
+| `-o, --output` | Output directory (**required**); skipped if it lies inside `-l` | |
+| `--library` | `local` · `fda` · `custom` (PubChem) | `local` |
+| `--mw-min/--mw-max/--logp-max` | `custom` only: replace Lipinski's MW and logP limits (Open Babel logP) | `200/500/5` |
+| `--max-compounds` | PubChem compounds to prepare | `20` |
+| `--no-lipinski` | Skip the Lipinski filter (SDF/PubChem inputs; zero violations allowed). `--no-admet` is a deprecated alias | filter on |
+| `--no-minimize` | Skip MMFF94 minimization (SDF/PubChem ligands only) | off |
+| `--chain` | Chains to keep, e.g. `A`, `A,B`, or `all` (case-sensitive) | first chain, with a warning |
 | `--ph` | pH for receptor hydrogens (Open Babel `-p`) | `7.4` |
+| `--pockets` | fpocket pocket numbers, e.g. `1` or `2,3` | best score |
+| `--padding` | Box padding around the pocket (Å) | `6.0` |
+| `--no-fpocket` | Skip fpocket; box around the whole receptor | off |
 | `--grid-center X,Y,Z` | Explicit box center, input-PDB coordinates | auto |
-| `--grid-center-frame` | `input` or `docking` (frame of `--grid-center`; ≤1.1.4 used `docking`) | `input` |
+| `--grid-center-frame` | `input` or `docking` (≤1.1.4 used `docking`) | `input` |
 | `--grid-size SX,SY,SZ` | Explicit box size (Å) | auto |
-| `--no-fpocket` | Skip fpocket; use centroid grid | off |
-| `--pockets` | Pocket numbers, e.g. `1` or `2,3` | best |
-| `--padding` | Grid padding around pocket (Å) | `6.0` |
-| `-p, --processes` | Parallel workers (`-1` = all available CPUs) | `1` |
-| `--threads` | CPU threads per Vina/SMINA process (`--cpu`) | CPUs ÷ workers |
-| `--exhaustiveness` | Vina exhaustiveness | `8` |
-| `--binding-modes` | Vina binding modes | `9` |
-| `--seed` | Random seed (reproducibility) | `42` |
-| `--no-resume` | Ignore checkpoint and start fresh (a checkpoint is also discarded automatically when the receptor, box, parameters or engine change) | off |
+| `--keep-waters`, `--detect-metals`, `--detect-cofactors` | Keep waters near the site, metal ions, known cofactors | off |
+| `--flexible-residues` | Flexible side chains, e.g. `A45,A78` | none |
+| `--auto-flexible N` | The N residues closest to the box center become flexible | none |
+| `-p, --processes` | Parallel docking processes (`0`/`-1` = all CPUs, `-N` = CPUs ÷ N) | `1` |
+| `--threads` | CPU threads per docking process (`--cpu`) | CPUs ÷ processes |
+| `--exhaustiveness` | Vina exhaustiveness (≥ 1) | `8` |
+| `--binding-modes`, `--energy-range` | Vina output modes and energy range | `9`, `3.0` |
+| `--seed` | Random seed | `$VS_SEED` or `42` |
+| `--min-valid-affinity` | Scores ≥ this (or < −20) are reported as `OUT_OF_WINDOW` | `-1.0` |
+| `--vina-bin`, `--vina-extra` | Custom docking binary; extra engine arguments | auto, none |
+| `--timeout` | Per-command timeout (s) | `$VS_COMMAND_TIMEOUT` or `900` |
+| `--max-failure-fraction` | Exit 3 if more than this fraction of ligands fail | `0.5` |
+| `--no-resume` | Ignore the checkpoint (it is also discarded when receptor, box, parameters or engine binaries change) | off |
+| `--consensus` | Rescore Vina's top pose with SMINA's Vinardo function; writes `consensus_ranking.csv` and `consensus_summary.json` (needs SMINA) | off |
+| `--smina-only` | Dock with SMINA instead of Vina (1 mode, no resume) | off |
 | `--top-n` | Hits in `Top_hits.txt` | `20` |
 | `--no-html-report` | Skip the self-contained HTML report | report on |
-| `--vina-bin` | Custom docking binary | auto |
-| `--vina-extra` | Extra args passed to the docking binary | none |
-| `--keep-waters` | Keep waters near binding site | off |
-| `--detect-metals` | Detect & keep metal ions | off |
-| `--detect-cofactors` | Detect & keep cofactors | off |
-| `--flexible-residues` | Flexible side chains, e.g. `A45,A78` (enables flexible docking) | none |
-| `--auto-flexible N` | Auto-select the N closest residues with rotatable side chains | none |
-| `--consensus` | Vina + SMINA consensus scoring (needs SMINA on PATH) | off |
-| `--smina-only` | Dock and rank with SMINA instead of Vina | off |
+| `-v, --verbose` | Debug logging for all modules | off |
 | `--version` | Print version and exit | — |
+
+`python3 autodocker/runner.py --help` lists every option with its default.
 
 ## Environment variables
 
@@ -126,32 +157,48 @@ Direct use (inside the image or with tools on `PATH`):
 | `BINDING_MODES` | Vina binding modes | `9` |
 | `ENERGY_RANGE` | Vina energy range | `3.0` |
 | `TOP_N` | Top hits count | `20` |
-| `TIMEOUT` | Per-command timeout (s) | `900` |
-| `ADMET` | Set `0` to disable ADMET filtering | `1` |
+| `TIMEOUT` | Per-command timeout (s) | `VS_COMMAND_TIMEOUT` or `900` |
+| `LIPINSKI` | Set `0` to disable the Lipinski filter (`ADMET=0` is a deprecated alias) | `1` |
+| `NO_MINIMIZE` | Set `1` to skip MMFF94 minimization | `0` |
+| `PADDING` | Box padding (Å) | `6` |
+| `POCKETS` | fpocket pocket number(s) | best |
 | `RESUME` | Set `0` to disable checkpoint resume | `1` |
 | `VS_SEED` | RNG seed (an explicit `--seed` takes precedence) | `42` |
 | `PUBCHEM_REST` | PubChem REST base (mirrors) | official |
 
 ## Exit status
 
-The container (and `runner.py`) exits 0 only when the screen completes; any
-failure exits non-zero, so scripts and schedulers can detect it. For a debug
-shell as root, run the image with `--root-shell` as the first argument.
+| Code | Meaning |
+|---|---|
+| 0 | Screen completed |
+| 1 | Pipeline error |
+| 2 | Invalid options or environment, or a required tool is missing |
+| 3 | More ligands failed than `--max-failure-fraction` allows (all outputs are still written) |
+| 130 | Interrupted |
+
+For a debug shell as root, run the image with `--root-shell` as the first
+argument.
 
 ## Reproducibility
 
-Docking is seeded (`--seed 42`); the same input + seed produces identical
-rankings (verified by the golden determinism test in `tests/test_e2e.py`
-and the standalone `scripts/reproducibility_check.sh` checker).
+Every random step is seeded or made deterministic: Vina runs with `--seed`;
+hydrogens that Open Babel would place in random directions (receptor and
+ligand) are re-placed deterministically; 2D ligands get 3D coordinates from
+RDKit ETKDG seeded with `--seed`; Open Babel runs single-threaded. Repeating a
+run with the same inputs, options and image gives byte-identical
+`ranking.csv`, summaries and poses on the same CPU architecture, for any `-p`
+or `--threads`. Whether amd64 and arm64 results are identical is measured in
+CI and not guaranteed. `run_manifest.json` records what is needed to repeat a
+run. See [`docs/reproducibility.md`](docs/reproducibility.md) and
+`scripts/reproducibility_check.sh`.
 
 ## Validation
 
-Scientific results are in `BENCHMARKS.md`: a CASF-2016 re-docking benchmark
-(76.9% top-1 pose success ≤2 Å), a DUD-E enrichment test (mean AUC 0.740:
-akt1 0.76, braf 0.74, aldr 0.71, each significant with bootstrap CIs and
-Mann-Whitney U tests), a raw-Vina parity check (222/222 modes score
-identically), and throughput/scaling measurements across library sizes and
-process counts. All are reproducible from `scripts/benchmark_*.py`.
+`BENCHMARKS.md` describes the bundled benchmarks: CASF-2016 re-docking from
+seeded RDKit start conformers, DUD-E enrichment (ROC AUC, EF, BEDROC with
+bootstrap confidence intervals) with boxes from the crystal ligands, a
+raw-Vina parity check, and throughput scaling. Results for 2.0.0 are pending;
+every benchmark is reproducible from `scripts/benchmark_*.py`.
 
 ## More docs
 
@@ -169,8 +216,12 @@ pip install -r requirements.txt pytest
 python -m pytest tests/ -q
 ```
 
-`tests/` covers validation, grid fallbacks, ADMET gating, checkpoint resume,
-report generation/HMTL escaping, and an end-to-end smoke dock.
+`tests/` covers input validation, receptor and ligand preparation
+(including repeated-preparation determinism), pocket and box selection, the
+Lipinski filter, checkpoint resume, report generation and HTML escaping, the
+benchmark statistics, and end-to-end docking runs that must be byte-identical
+across repeats and process counts. Tests marked `slow` use the real
+Open Babel/Vina binaries for longer; deselect them with `-m "not slow"`.
 
 ## Citation
 

@@ -8,38 +8,56 @@ fixed, what is not, and how it is tested.
 
 - Docking seed: `--seed 42` by default (`VS_SEED`), passed to every Vina /
   SMINA call.
-- Pinned software in the Docker image: the Dockerfile compiles Vina 1.2.7
-  (tagged release; images up to v1.1.4 used a later commit with identical
-  C++ source), QuickVina 2, and fpocket 4.2.3 from pinned submodules, and
-  installs Open Babel 3.1.1 from the Debian bookworm repository (the
-  `tools/openbabel` submodule is not used by the image); Python and pip
-  dependencies are pinned (`python:3.12-slim-bookworm`, exact versions in
-  `requirements.txt`). A native install uses whatever versions are on PATH;
-  record them (`vina --version`, `obabel -V`).
-- Every docking command is recorded in `docked/*_vina.log`, so the exact
-  inputs passed to Vina can be recovered and re-run
-  (`scripts/benchmark_vina_parity.py` does this).
+- Pinned software in the Docker image: Vina 1.2.7, QuickVina 2, SMINA and
+  fpocket 4.2.3 are compiled from pinned submodules (with
+  `-ffp-contract=off`, verified to leave amd64 binaries and results
+  unchanged); Open Babel 3.1.1 and the other system packages come from a
+  pinned Debian snapshot (`DEBIAN_SNAPSHOT`); base images are pinned by
+  digest; Python dependencies, including RDKit, are pinned in
+  `requirements.txt`. A native install uses whatever versions are on PATH;
+  `run_manifest.json` records the path, version and SHA-256 of every tool
+  used, and the RDKit version.
+- Every docking command is recorded at the top of `docked/*_vina.log` (also
+  for failed attempts), so the exact inputs passed to Vina can be recovered
+  and re-run (`scripts/benchmark_vina_parity.py` does this).
+- Receptor hydrogens. Hydrogens in the input receptor are removed and the
+  receptor is protonated at `--ph` by Open Babel. Open Babel places some
+  hydrogens in a random, clock-seeded direction when the neighbouring atoms
+  do not fix one (pre-protonated groups, isolated atoms such as waters,
+  distorted residues). AutoDocker runs Open Babel twice, finds every hydrogen
+  that differs, and re-places it deterministically from the heavy atoms,
+  checking that Vina still bonds it only to its parent atom. This matters
+  because Vina decides which atoms are hydrogen-bond donors from hydrogen
+  positions.
+- Ligand hydrogens: the same two-run check is applied to every ligand
+  conversion that adds or keeps hydrogens.
+- 3D coordinates for 2D ligands come from RDKit ETKDGv3 seeded with `--seed`
+  (single thread), followed by MMFF94. Without RDKit the pipeline falls back
+  to Open Babel `--gen3d`, which is not reproducible, and logs a warning;
+  `ligand_metadata.json` records the method per ligand.
+- Open Babel always runs single-threaded (`OMP_NUM_THREADS=1`).
+- Pocket choice: pockets are ranked by fpocket score, then druggability, then
+  pocket number; fpocket's pocket atoms and scores are deterministic.
+- Text outputs contain no timestamps or absolute paths; timestamps are only
+  in `run_manifest.json`.
 - Benchmark scripts seed every sampling step (ligand subsets, complex
   subsets, bootstrap, RDKit start conformers) and record their parameters
   and tool versions in `summary.json`.
 
-## What is not fixed by the seed
+## What is not fixed
 
-- **3D generation of ligands without coordinates.** SMILES or 2D inputs are
-  embedded with Open Babel `--gen3d`, which is not seeded. Library
-  preparation from such inputs is not guaranteed to be identical between
-  runs; supply 3D ligands (SDF/MOL2/PDBQT) when bit-identical results
-  matter.
-- **fpocket.** fpocket seeds its random number generator from the clock, so
-  the detected pockets, and therefore the automatically chosen box, can
-  differ between runs. For reproducible boxes give the box explicitly
-  (`--grid-center X,Y,Z --grid-size SX,SY,SZ`, optionally `--no-fpocket`).
-- **Receptor protonation.** Hydrogens are added to the receptor with Open
-  Babel at `--ph`; making this step deterministic is being handled in a
-  separate change. Until that change is released, compare `receptor.pdbqt`
-  between runs (e.g. `sha256sum`) before comparing docking scores.
+- **fpocket volumes.** fpocket estimates pocket volumes by Monte Carlo with a
+  clock-based seed, so the `Volume` column of `pocket_summary.csv` varies
+  between runs. Pocket selection never uses it.
 - **Software versions.** A different Vina, Open Babel or RDKit version can
   change results; the seed fixes results only for a fixed software stack.
+- **CPU architecture.** Results are byte-reproducible on a given
+  architecture. Whether linux/amd64 and linux/arm64 give identical results is
+  measured in CI (the cross-architecture job) and not guaranteed: Open
+  Babel's Debian build, glibc's math library (which chooses FMA or non-FMA
+  routines at run time depending on the CPU) and SMINA's vectorised code may
+  differ between architectures, and in principle between x86 CPUs with and
+  without FMA.
 
 ## Thread and process count
 

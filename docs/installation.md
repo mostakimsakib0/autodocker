@@ -6,13 +6,21 @@ or **native Python** (lightweight, needs scientific binaries).
 ## 1. Docker (recommended)
 
 Requires a working Docker installation on Linux, macOS, or Windows (WSL2).
+Images run natively on x86-64 and ARM64 (Apple Silicon via Docker Desktop,
+AWS Graviton); `docker pull` selects the right architecture. Results are
+byte-reproducible on a given architecture; see `docs/reproducibility.md` for
+amd64 versus arm64.
 
 ```bash
 git clone --recurse-submodules https://github.com/mostakimsakib0/autodocker.git
 cd autodocker
-docker build -t autodocker .
+docker build -t autodocker \
+  --build-arg AUTODOCKER_VERSION="$(cat autodocker/VERSION)" \
+  --build-arg VCS_REF="$(git rev-parse HEAD)" .
 ```
 
+The build arguments set the image's version label and source revision (the
+build fails if `AUTODOCKER_VERSION` disagrees with `autodocker/VERSION`).
 The build compiles Vina, QuickVina 2, SMINA and fpocket from pinned
 submodules; allow 15-45 minutes on first build. To use a prebuilt image:
 
@@ -22,8 +30,10 @@ docker pull ghcr.io/mostakimsakib0/autodocker
 
 ## 2. Native Python
 
-Requires Python 3.9-3.12 and the `vina` and `obabel` executables on `PATH`
-(fpocket is optional — the pipeline falls back to a centroid grid).
+Requires Python 3.9-3.12 and the `vina`, `obabel` and `fpocket` executables
+on `PATH` (fpocket is needed unless you pass `--no-fpocket` or an explicit
+box). RDKit (in `requirements.txt`) is needed for reproducible 3D coordinates
+of 2D ligands.
 
 ```bash
 # Debian/Ubuntu
