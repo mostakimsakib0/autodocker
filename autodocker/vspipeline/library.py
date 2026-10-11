@@ -1039,7 +1039,8 @@ class LibraryManager:
                         "PDBQT, MOL2 and PDB ligands are docked unfiltered")
         if self.minimize and non_sdf:
             logger.info("[*] MMFF94 minimization applies to SDF inputs only; "
-                        "PDBQT, MOL2 and PDB ligands keep their input coordinates")
+                        "PDBQT, MOL2 and PDB ligands keep their input coordinates "
+                        "(a 2D MOL2/PDB gets seeded RDKit 3D coordinates)")
 
         self.failed = []
         self.superseded = []
