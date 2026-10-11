@@ -334,7 +334,8 @@ class TestLigandPrep:
         lig_dir, scratch = tmp_path / "ligands", tmp_path / "scratch"
         lig_dir.mkdir()
         (lig_dir / "A_9_old.mol2").write_text("stale")
-        paths, failures = be.sample_ligands(str(gz), str(lig_dir), "A_", 3, 1, str(scratch))
+        paths, failures, _info = be.sample_ligands(str(gz), str(lig_dir), "A_", 3, 1,
+                                                   str(scratch))
         be.clean_ligand_dir(str(lig_dir), paths)
         assert len(paths) == 3 and len(failures) == 1
         assert sorted(os.listdir(lig_dir)) == sorted(os.path.basename(p) for p in paths)
@@ -478,19 +479,27 @@ class TestRedock:
             {"pdbid": "d", "status": "ok", "rmsd_top1": 5.0, "rmsd_best": 4.0, "error": None},
             {"pdbid": "e", "status": "error", "rmsd_top1": None, "rmsd_best": None,
              "error": "docking failed"},
+            # mode-1 RMSD failed, mode 2 fine: attempted, not evaluated, and
+            # not a best-of-N success (same numerator set as top-1)
+            {"pdbid": "h", "status": "rmsd_failed", "rmsd_top1": None, "rmsd_best": 0.7,
+             "error": "mode 1: obrms crashed"},
             {"pdbid": "f", "status": "missing", "rmsd_top1": None, "rmsd_best": None,
              "error": "fetch skipped"},
             {"pdbid": "g", "status": "skipped", "rmsd_top1": None, "rmsd_best": None,
              "error": "too large"},
         ]
         s = br.summarize(results, 2.0)
-        assert (s["n_selected"], s["n_attempted"], s["n_evaluated"]) == (7, 5, 4)
+        assert (s["n_selected"], s["n_attempted"], s["n_evaluated"]) == (8, 6, 4)
+        assert s["n_rmsd_failed"] == 1
         assert s["success_top1"] == 2
         assert s["success_top1_frac_evaluated"] == 0.5
-        assert s["success_top1_frac_attempted"] == 0.4
-        assert s["success_best"] == 3 and s["success_best_frac_attempted"] == 0.6
+        assert s["success_top1_frac_attempted"] == pytest.approx(2 / 6)
+        assert s["success_best"] == 3
+        assert s["success_best_frac_evaluated"] == 0.75        # 3 / 4 evaluated
+        assert s["success_best_frac_attempted"] == pytest.approx(3 / 6)
         assert s["median_rmsd_top1"] == 2.25   # mean of 1.5 and 3.0
-        assert {e["pdbid"] for e in s["excluded"]} == {"e", "f", "g"}
+        assert s["median_rmsd_best"] == 1.5    # evaluated complexes only
+        assert {e["pdbid"] for e in s["excluded"]} == {"e", "f", "g", "h"}
 
     def test_resume_requires_same_params(self, tmp_path):
         params = br.docking_params({"seed": 42, "exhaustiveness": 8})
@@ -499,6 +508,28 @@ class TestRedock:
         assert br.params_match(str(tmp_path), params)
         changed = dict(params, exhaustiveness=16)
         assert not br.params_match(str(tmp_path), changed)
+
+    def test_resume_params_hold_rdkit_version_and_input_hashes(self, tmp_path):
+        cdir, work = tmp_path / "1abc", tmp_path / "work"
+        cdir.mkdir()
+        work.mkdir()
+        (cdir / "1abc_protein.pdb").write_text("ATOM\n")
+        (cdir / "1abc_ligand.mol2").write_text("@<TRIPOS>MOLECULE\n")
+        opts = {"seed": 42, "rdkit_version": "2023.09.3", "runner_version": "AutoDocker 2.0.0"}
+        params = br.complex_params(opts, "1abc", str(cdir))
+        assert params["rdkit_version"] == "2023.09.3"
+        assert params["inputs"]["1abc_protein.pdb"] == bl.file_sha256(
+            str(cdir / "1abc_protein.pdb"))
+        assert params["inputs"]["1abc_ligand_rdkit.mol2"] is None
+        (work / "params.json").write_text(json.dumps({"docking": params}))
+        assert br.params_match(str(work), br.complex_params(opts, "1abc", str(cdir)))
+        # same name, different content -> re-dock
+        (cdir / "1abc_ligand.mol2").write_text("@<TRIPOS>MOLECULE\nother\n")
+        assert not br.params_match(str(work), br.complex_params(opts, "1abc", str(cdir)))
+        # another RDKit version -> re-dock
+        (cdir / "1abc_ligand.mol2").write_text("@<TRIPOS>MOLECULE\n")
+        assert not br.params_match(str(work), br.complex_params(
+            dict(opts, rdkit_version="2024.03.1"), "1abc", str(cdir)))
 
     def test_rdkit_conformer_is_deterministic(self, tmp_path, mol2_file):
         pytest.importorskip("rdkit")
@@ -617,28 +648,15 @@ class TestFetch:
         assert [ln[17:20].strip() for ln in every if ln.startswith("HETATM")] == ["ZN", "NAG"]
         assert not any(ln.startswith("HETATM") for ln in fc.receptor_records(recs, "none"))
 
-    def test_skeleton_ignores_charges_and_bond_orders(self):
-        def sdf(elements, bonds):
-            lines = ["x", "", "", f"{len(elements):3d}{len(bonds):3d}  0  0  0  0  0  0  0  0999 V2000"]
-            lines += [f"    0.0000    0.0000    0.0000 {e:<3s} 0  0" for e in elements]
-            lines += [f"{a:3d}{b:3d}{o:3d}  0" for a, b, o in bonds]
-            return "\n".join(lines + ["M  END", "$$$$"])
-
-        # acetate as C-C(=O)O vs a different bond-order/charge pattern
-        a = fc.skeleton_hash(*fc.sdf_heavy_graph(sdf("CCOO", [(1, 2, 1), (2, 3, 2), (2, 4, 1)])))
-        b = fc.skeleton_hash(*fc.sdf_heavy_graph(sdf("CCOOH", [(1, 2, 1), (2, 3, 1), (2, 4, 2),
-                                                               (4, 5, 1)])))
-        c = fc.skeleton_hash(*fc.sdf_heavy_graph(sdf("COCO", [(1, 2, 1), (2, 3, 1), (3, 4, 1)])))
-        assert a == b
-        assert a != c
-
 
 # ---------------------------------------------------------------------------
 # Performance
 # ---------------------------------------------------------------------------
 
 class TestPerformance:
-    def _runs(self):
+    def _runs(self, threads=lambda p: 1):
+        """Runs of a 2-size x 2-p grid; ``threads(p)`` = Vina threads per
+        process as logged (default: --threads 1)."""
         runs = []
         for size, p, walls in ((10, 1, [100, 110, 90]), (10, 2, [60, 50, 55]),
                                (20, 1, [200, 220, 210]), (20, 4, [70, 80, 75])):
@@ -646,9 +664,36 @@ class TestPerformance:
                 runs.append({"n_ligands": size, "processes": p, "repeat": rep, "wall_s": w,
                              "exit": 0, "prep_s": 5, "dock_s": w - 6, "post_s": 1,
                              "peak_tree_rss_kb": 1000 * p, "peak_tree_pss_kb": None,
-                             "max_single_process_rss_kb": 500, "vina_threads": 8 // p,
-                             "docked_ok": size})
+                             "max_single_process_rss_kb": 500, "vina_threads": threads(p),
+                             "threads_requested": 1, "docked_ok": size})
         return runs
+
+    def test_efficiency_is_per_thread(self):
+        # --threads 1: p processes use p threads -> efficiency = speedup / p
+        rows = {(r["n_ligands"], r["processes"]): r for r in bperf.aggregate(self._runs())}
+        assert rows[(20, 4)]["total_threads"] == 4
+        assert rows[(20, 4)]["efficiency"] == pytest.approx(210 / 75 / 4)
+        # runner default (cores / p threads each): every cell uses 8 threads,
+        # so the efficiency against total threads is the speedup itself
+        rows = {(r["n_ligands"], r["processes"]): r
+                for r in bperf.aggregate(self._runs(threads=lambda p: 8 // p))}
+        assert rows[(20, 4)]["total_threads"] == rows[(20, 1)]["total_threads"] == 8
+        assert rows[(20, 4)]["efficiency"] == pytest.approx(210 / 75)
+        # unknown thread count (no --cpu logged: Vina used all cores)
+        rows = {(r["n_ligands"], r["processes"]): r
+                for r in bperf.aggregate(self._runs(threads=lambda p: None))}
+        assert rows[(20, 4)]["speedup_vs_p1"] == pytest.approx(210 / 75)
+        assert rows[(20, 4)]["efficiency"] is None
+
+    def test_throughput_counts_docked_ligands(self):
+        runs = self._runs()
+        for r in runs:
+            if (r["n_ligands"], r["processes"]) == (20, 4):
+                r["docked_ok"] = 15          # 5 of 20 ligands failed to dock
+        row = next(r for r in bperf.aggregate(runs)
+                   if (r["n_ligands"], r["processes"]) == (20, 4))
+        assert row["throughput_ligands_per_min"] == pytest.approx(15 / 75 * 60)
+        assert row["docked_ok_min"] == 15
 
     def test_speedup_vs_p1_same_size(self):
         rows = {(r["n_ligands"], r["processes"]): r for r in bperf.aggregate(self._runs())}

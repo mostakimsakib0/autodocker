@@ -14,7 +14,8 @@ Protocol
                No receptor-size filter unless ``--max-receptor-atoms`` is set.
   * Ligand   : start conformer from ``--start-conformer``:
                ``rdkit`` (default) = one ETKDGv3 conformer embedded from the
-               CCD-derived molecule (fixed randomSeed, single thread, then
+               same protonated molecule as the crystal-start MOL2 (its
+               InChIKey must match; fixed randomSeed, single thread, then
                MMFF94 with a fixed iteration cap; deterministic), so the
                docked ring conformations, bond lengths and angles do not
                come from the crystal pose; ``crystal`` = the crystal-ligand
@@ -29,12 +30,14 @@ Protocol
                the crystal pose (``obrms``, no superposition). Top-1 is
                always mode 1 (the first MODEL); if its RMSD cannot be
                computed the complex is reported as ``rmsd_failed``.
-  * Success  : RMSD <= --rmsd-cutoff (default 2.0 A). Success rates are
-               reported over complexes evaluated and over complexes
-               attempted (failures count as misses).
+  * Success  : RMSD <= --rmsd-cutoff (default 2.0 A). Top-1 and best-of-N
+               successes are counted among the evaluated complexes (mode-1
+               RMSD computed) and reported over the evaluated and over the
+               attempted complexes (docking/RMSD failures count as misses).
 
 Resume: a complex is reused only when ``params.json`` in its work directory
-matches the current docking parameters; otherwise it is re-docked.
+matches the current docking parameters, AutoDocker and RDKit versions and
+the SHA-256 of the complex's input files; otherwise it is re-docked.
 
 Results: ``outdir/results.csv`` and ``outdir/summary.json``.
 """
@@ -117,11 +120,27 @@ def apply_rmsds(rec, rmsds, errors):
 
 
 def docking_params(opts):
-    """Everything that changes the docked poses (stored per complex)."""
+    """Run-wide settings that change the docked poses."""
     keys = ("seed", "exhaustiveness", "binding_modes", "energy_range",
             "padding", "min_box", "threads", "start_conformer",
-            "conformer_seed", "receptor_hetatm", "runner_version")
+            "conformer_seed", "receptor_hetatm", "runner_version",
+            "rdkit_version")
     return {k: opts.get(k) for k in keys}
+
+
+def complex_inputs(pdbid, complex_dir):
+    """The input files of one complex: ``{file name: SHA-256 or None}``."""
+    names = [f"{pdbid}_protein.pdb", f"{pdbid}_ligand.mol2", f"{pdbid}_ligand.sdf",
+             f"{pdbid}_ligand_rdkit.mol2", f"{pdbid}_ligand_rdkit.json"]
+    return {n: _benchlib.file_sha256(os.path.join(complex_dir, n)) for n in names}
+
+
+def complex_params(opts, pdbid, complex_dir):
+    """Everything that changes one complex's docked poses (stored in its
+    params.json; resume requires an exact match): the run-wide settings
+    (incl. AutoDocker and RDKit versions) and the content hashes of the
+    complex's input files."""
+    return {**docking_params(opts), "inputs": complex_inputs(pdbid, complex_dir)}
 
 
 def params_match(work, params):
@@ -144,24 +163,40 @@ def prepare_start_ligand(pdbid, complex_dir, work, opts):
     sdf = os.path.join(complex_dir, f"{pdbid}_ligand.sdf")
     pre = os.path.join(complex_dir, f"{pdbid}_ligand_rdkit.mol2")
     pre_meta = pre[:-len(".mol2")] + ".json"
+    meta = None
     try:
         meta = _benchlib.rdkit_start_conformer(
             sdf if os.path.exists(sdf) else crystal, out, opts["conformer_seed"])
-        return out, meta
     except ImportError:
-        pass
-    # No RDKit here (e.g. inside the AutoDocker image): use the conformer
-    # fetch_casf_rcsb.py generated, if it was made with the same seed.
-    if os.path.exists(pre) and os.path.exists(pre_meta):
-        with open(pre_meta, encoding="utf-8") as f:
-            meta = json.load(f)
-        if meta.get("seed") == opts["conformer_seed"]:
-            shutil.copy(pre, out)
-            meta["source"] = "precomputed"
-            return out, meta
-    raise RuntimeError(
-        "--start-conformer rdkit needs RDKit, or a precomputed "
-        f"{os.path.basename(pre)} (+ .json, same seed) from fetch_casf_rcsb.py")
+        # No RDKit here (e.g. inside the AutoDocker image): use the conformer
+        # fetch_casf_rcsb.py generated, if it was made with the same seed.
+        if os.path.exists(pre) and os.path.exists(pre_meta):
+            with open(pre_meta, encoding="utf-8") as f:
+                pre_info = json.load(f)
+            if pre_info.get("seed") == opts["conformer_seed"]:
+                shutil.copy(pre, out)
+                meta = dict(pre_info, source="precomputed")
+    if meta is None:
+        raise RuntimeError(
+            "--start-conformer rdkit needs RDKit, or a precomputed "
+            f"{os.path.basename(pre)} (+ .json, same seed) from fetch_casf_rcsb.py")
+    check_same_molecule(crystal, out)
+    return out, meta
+
+
+def check_same_molecule(crystal_mol2, start_mol2, key_fn=None):
+    """Both start modes must dock the same molecule: the RDKit start
+    conformer must have the crystal ligand's InChIKey (same connectivity,
+    hydrogens/protonation and stereo). Raises RuntimeError otherwise, e.g.
+    for a data directory written by an older fetch_casf_rcsb.py, whose
+    crystal MOL2 lost hydrogens in an Open Babel conversion."""
+    key_fn = key_fn or _benchlib.inchikey
+    crystal_key, start_key = key_fn(crystal_mol2), key_fn(start_mol2)
+    if not crystal_key or crystal_key != start_key:
+        raise RuntimeError(
+            f"start conformer {os.path.basename(start_mol2)} ({start_key}) is not the "
+            f"crystal ligand's molecule ({crystal_key}); rebuild the data directory "
+            "with fetch_casf_rcsb.py")
 
 
 def run_docking(pdbid, complex_dir, work, opts):
@@ -195,7 +230,8 @@ def run_docking(pdbid, complex_dir, work, opts):
             f"docking failed (rc={proc.returncode}): "
             f"{(proc.stdout or '')[-300:]} {(proc.stderr or '')[-300:]}")
     with open(os.path.join(work, "params.json"), "w", encoding="utf-8") as f:
-        json.dump({"docking": docking_params(opts), "start_conformer": conf_meta,
+        json.dump({"docking": complex_params(opts, pdbid, complex_dir),
+                   "start_conformer": conf_meta,
                    "box": {"center_input_frame": [cx, cy, cz], "edge": size}},
                   f, indent=2)
     return {"box_edge": size, "start_conformer": conf_meta}
@@ -224,7 +260,7 @@ def process_complex(job):
                 rec["error"] = (f"receptor too large ({n_atom} ATOM > "
                                 f"{opts['max_receptor_atoms']})")
                 return rec
-        params = docking_params(opts)
+        params = complex_params(opts, pdbid, complex_dir)
         if os.path.exists(out_pdbqt) and params_match(work, params):
             rec["reused"] = True
         else:
@@ -251,12 +287,20 @@ def _frac(k, n):
 
 
 def summarize(results, cutoff):
-    """Success rates with explicit denominators, medians, exclusions."""
+    """Success rates with explicit denominators, medians, exclusions.
+
+    Top-1 and best-of-N use the same sets: the numerators count successes
+    among the evaluated complexes (status ok: docked, mode-1 RMSD computed);
+    ``*_frac_evaluated`` divides by the evaluated complexes and
+    ``*_frac_attempted`` by every attempted complex (docking failures and
+    rmsd_failed count as misses). A complex whose mode-1 RMSD failed is
+    therefore never a best-of-N success either, even when another mode's
+    RMSD could be computed. Medians are over the evaluated complexes.
+    """
     evaluated = [r for r in results if r["status"] == "ok"]
     attempted = [r for r in results if r["status"] not in ("missing", "skipped")]
-    best = [r for r in attempted if r.get("rmsd_best") is not None]
     top1_ok = sum(1 for r in evaluated if r["rmsd_top1"] <= cutoff)
-    best_ok = sum(1 for r in best if r["rmsd_best"] <= cutoff)
+    best_ok = sum(1 for r in evaluated if r["rmsd_best"] <= cutoff)
     return {
         "n_selected": len(results),
         "n_missing": sum(1 for r in results if r["status"] == "missing"),
@@ -269,12 +313,14 @@ def summarize(results, cutoff):
         "success_top1_frac_evaluated": _frac(top1_ok, len(evaluated)),
         "success_top1_frac_attempted": _frac(top1_ok, len(attempted)),
         "success_best": best_ok,
-        "success_best_frac_evaluated": _frac(best_ok, len(best)),
+        "success_best_frac_evaluated": _frac(best_ok, len(evaluated)),
         "success_best_frac_attempted": _frac(best_ok, len(attempted)),
         "median_rmsd_top1": (statistics.median(r["rmsd_top1"] for r in evaluated)
                              if evaluated else None),
-        "median_rmsd_best": (statistics.median(r["rmsd_best"] for r in best)
-                             if best else None),
+        "median_rmsd_best": (statistics.median(r["rmsd_best"] for r in evaluated)
+                             if evaluated else None),
+        "denominators": ("successes counted among evaluated complexes; "
+                         "frac_evaluated = /n_evaluated, frac_attempted = /n_attempted"),
         "rmsd_cutoff": cutoff,
         "excluded": [{"pdbid": r["pdbid"], "status": r["status"],
                       "reason": r["error"]}
@@ -295,14 +341,13 @@ def read_manifest(data_dir):
 
 
 def select_ids(args):
+    """``--pdbids`` (lower-cased), else the selection from ``--ids-csv``
+    (``--first N`` or the seeded sample) made by the same function as in
+    fetch_casf_rcsb.py."""
     if args.pdbids:
-        return sorted({p.strip() for p in args.pdbids.split(",") if p.strip()})
-    if args.first:
-        return sorted(d for d in os.listdir(args.data_dir)
-                      if os.path.isdir(os.path.join(args.data_dir, d)))[:args.first]
-    with open(args.ids_csv, newline="", encoding="utf-8") as f:
-        ids = [row["pdbid"].strip().lower() for row in csv.DictReader(f)]
-    return _benchlib.select_sample(ids, args.sample, args.sample_seed)
+        return sorted({_benchlib.normalize_pdbid(p) for p in args.pdbids.split(",")} - {""})
+    return _benchlib.select_complexes(_benchlib.read_pdbid_rows(args.ids_csv),
+                                      args.sample, args.sample_seed, args.first)
 
 
 def main(argv=None):
@@ -320,7 +365,8 @@ def main(argv=None):
     ap.add_argument("--ids-csv", default=DEFAULT_IDS,
                     help="CSV with a pdbid column (default: CASF-2016 core set)")
     ap.add_argument("--first", "--max-complexes", dest="first", type=int, default=None,
-                    help="Legacy 1.1.x selection: first N sorted IDs in --data-dir")
+                    help="Legacy 1.1.x selection: first N IDs of --ids-csv in sorted "
+                         "order (the same IDs fetch_casf_rcsb.py --first N fetches)")
     ap.add_argument("--outdir", default="benchmarks/results/redock")
     ap.add_argument("--runner", default="autodocker/runner.py")
     ap.add_argument("--processes", type=int, default=_benchlib.available_cpus(),
@@ -359,6 +405,8 @@ def main(argv=None):
                                if args.start_conformer == "rdkit" else None),
             "receptor_hetatm": args.receptor_hetatm,
             "runner": runner, "runner_version": _benchlib.runner_version(runner),
+            "rdkit_version": (_benchlib.rdkit_version()
+                              if args.start_conformer == "rdkit" else None),
             "max_receptor_atoms": args.max_receptor_atoms,
             "timeout": args.timeout, "manifest": read_manifest(args.data_dir)}
     workroot = os.path.join(args.outdir, "work")
