@@ -35,10 +35,6 @@ import runner  # noqa: E402  (tool paths and run_obabel, resolved at call time)
 
 logger = logging.getLogger(__name__)
 
-# A real single-molecule molblock is longer than this; smaller files are
-# truncated downloads or error messages.
-MIN_SDF_BYTES = 100
-
 # Lipinski rule-of-five cut-offs (a value above the cut-off is a violation).
 LIPINSKI_MW_MAX = 500.0
 LIPINSKI_LOGP_MAX = 5.0
@@ -101,10 +97,11 @@ def _is_valid_sdf(sdf_file: str) -> Tuple[bool, str]:
     if not os.path.exists(sdf_file):
         return False, f"File not found: {sdf_file}"
 
-    file_size = os.path.getsize(sdf_file)
-    if file_size < MIN_SDF_BYTES:
-        return False, (f"File is too small ({file_size} bytes) - likely a "
-                       "truncated download or an error message")
+    # No size threshold: a complete molblock can be tiny (methane with its
+    # hydrogens is ~90 bytes). Truncated downloads and error pages are caught
+    # by the parse checks below (no "M  END", no atom block).
+    if os.path.getsize(sdf_file) == 0:
+        return False, "File is empty"
     try:
         with open(sdf_file, errors="replace", encoding="utf-8") as f:
             content = f.read()

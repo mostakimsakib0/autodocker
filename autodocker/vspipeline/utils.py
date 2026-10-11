@@ -31,6 +31,13 @@ OBABEL_ENV = {"OMP_NUM_THREADS": "1"}
 # Lines of Open Babel stderr quoted in an error message.
 _STDERR_TAIL_LINES = 5
 
+# Elements Open Babel 3.1 has Gasteiger charge parameters for. Open Babel
+# skips a molecule containing any other element when --partialcharge
+# gasteiger is requested ("0 molecules converted", exit code 0).
+GASTEIGER_ELEMENTS = frozenset({"H", "D", "C", "N", "O", "F", "CL", "BR", "I", "S", "P"})
+
+_CONVERTED = re.compile(r"(\d+) molecules? converted")
+
 
 def run(cmd_list: List[str], capture: bool = False,
         extra_env: Optional[Dict[str, str]] = None) -> Optional[Tuple[str, str, int]]:
@@ -68,6 +75,10 @@ def _tail(text: Optional[str]) -> str:
     return " | ".join(lines[-_STDERR_TAIL_LINES:])
 
 
+class ObabelNoOutput(RuntimeError):
+    """Open Babel exited 0 but converted nothing or wrote no/empty output."""
+
+
 def run_obabel(args: List[str], outputs: Iterable[str] = (),
                return_stderr: bool = False) -> Union[str, Tuple[str, str]]:
     """Run Open Babel single-threaded and return its stdout (with
@@ -78,7 +89,11 @@ def run_obabel(args: List[str], outputs: Iterable[str] = (),
     timeout and a DEBUG log line with the exact command. On failure the files
     in ``outputs`` are deleted (a partial output must never be mistaken for a
     prepared ligand or receptor) and a RuntimeError with Open Babel's last
-    stderr lines is raised.
+    stderr lines is raised. Open Babel exits 0 when it skips every molecule
+    (e.g. an element without Gasteiger parameters: "0 molecules converted"),
+    so a run that reports 0 molecules converted or leaves an output of
+    ``outputs`` missing or empty is a failure too (ObabelNoOutput, a
+    RuntimeError).
     """
     if not runner.OBABEL:
         raise RuntimeError("Open Babel (obabel) not found in PATH")
@@ -99,15 +114,65 @@ def run_obabel(args: List[str], outputs: Iterable[str] = (),
             raise RuntimeError(
                 f"obabel exited with code {e.returncode}: {_tail(e.stderr)}") from e
         raise
+    stdout, stderr = (result[0], result[1]) if result else ("", "")
+    problem = _conversion_problem(stderr, outputs)
+    if problem:
+        # Open Babel exits 0 when it skips every molecule (e.g. an element
+        # without Gasteiger parameters); never let an empty file through.
+        for path in outputs:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+        detail = _tail(_CONVERTED.sub("", stderr or ""))
+        raise ObabelNoOutput(f"obabel {problem}" + (f": {detail}" if detail else ""))
     for path in outputs:
         if path.lower().endswith((".sdf", ".sd", ".mol")):
             _strip_molfile_timestamps(path)
-    stdout, stderr = (result[0], result[1]) if result else ("", "")
     if return_stderr:
         return stdout or "", stderr or ""
     if stderr and stderr.strip():
         logger.debug(f"obabel: {_tail(stderr)}")
     return stdout or ""
+
+
+def _conversion_problem(stderr: Optional[str], outputs: Iterable[str]) -> Optional[str]:
+    """Why a successful (exit code 0) Open Babel run produced nothing usable:
+    it reported converting 0 molecules, or an expected output file is missing
+    or empty. None if the run looks fine."""
+    match = None
+    for match in _CONVERTED.finditer(stderr or ""):
+        pass
+    if match is not None and int(match.group(1)) == 0:
+        return "converted 0 molecules (exit code 0)"
+    for path in outputs:
+        if not os.path.exists(path):
+            return f"wrote no output file {os.path.basename(path)}"
+        if os.path.getsize(path) == 0:
+            return f"wrote an empty {os.path.basename(path)}"
+    return None
+
+
+def elements_without_gasteiger(elements: Iterable[str]) -> List[str]:
+    """Sorted element symbols (as given) that Open Babel cannot assign
+    Gasteiger charges to."""
+    return sorted({e for e in elements if e and e.upper() not in GASTEIGER_ELEMENTS})
+
+
+def molecule_elements(path: str, fmt: Optional[str] = None) -> List[str]:
+    """Element symbols of the molecule(s) in ``path`` from Open Babel's
+    formula (best effort for error messages; [] when it cannot be read)."""
+    args = ([f"-i{fmt}"] if fmt else []) + [path, "-osmi", "--append", "formula"]
+    try:
+        stdout, _ = run_obabel(args, return_stderr=True)
+    except (RuntimeError, OSError):
+        return []
+    elements = set()
+    for line in (stdout or "").splitlines():
+        if line.split():
+            # The formula is the last token (after the SMILES and the title).
+            elements.update(re.findall(r"[A-Z][a-z]?", line.split()[-1]))
+    return sorted(elements)
 
 
 # MDL molfile header line 2: program name followed by a MMDDYYHHmm date.
@@ -196,20 +261,45 @@ def _safe_ligand_id(name: str) -> str:
     return token or "compound"
 
 
+class ChainAmbiguityError(ValueError):
+    """ATOM records with a blank chain ID next to records of chain
+    ``DEFAULT_CHAIN``: the blank chain is read as that chain, so the two
+    cannot be told apart."""
+
+
 def get_chains(pdb_file: str) -> List[str]:
     """Sorted unique chain IDs of the ATOM records of a PDB file.
 
-    A file whose ATOM records carry no chain ID yields ``[DEFAULT_CHAIN]``.
-    An unreadable file raises (OSError) instead of silently defaulting.
-    Chain IDs are case-sensitive and returned as written.
+    ATOM records with a blank chain ID (column 22) are reported as
+    ``DEFAULT_CHAIN`` ("A"), the ID receptor preparation reads them as
+    (``protein.record_chain``), so ``--chain A`` and ``--chain all`` select
+    them and a blank-chain receptor (DUD-E style) is reported as chain A. A
+    file in which blank-chain ATOM records coexist with records of a real
+    chain A raises ChainAmbiguityError (the two could not be told apart);
+    give the blank-chain records a chain ID. An unreadable file raises
+    (OSError) instead of silently defaulting. Chain IDs are case-sensitive
+    and returned as written.
     """
     chains = set()
+    blank = named_default = 0
     with open(pdb_file, errors="replace", encoding="utf-8") as f:
         for line in f:
             if line.startswith("ATOM") and len(line) > 21:
                 chain = line[21]
                 if chain.strip():
                     chains.add(chain)
+                    named_default += chain == DEFAULT_CHAIN
+                else:
+                    blank += 1
+    if blank and named_default:
+        raise ChainAmbiguityError(
+            f"{pdb_file}: {blank} ATOM record(s) have a blank chain ID and "
+            f"{named_default} are in chain {DEFAULT_CHAIN}; a blank chain is read as "
+            f"chain {DEFAULT_CHAIN}, so they cannot be told apart. Give the "
+            "blank-chain records a chain ID (PDB column 22) other than "
+            f"{DEFAULT_CHAIN}.")
+    if blank:
+        chains.add(DEFAULT_CHAIN)
     return sorted(chains) if chains else [DEFAULT_CHAIN]
 
 

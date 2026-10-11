@@ -52,6 +52,11 @@ _LIGAND_PDBQT_3D = (
     "ATOM      3  N   UNL     1      -0.500   1.100  -0.700  0.00  0.00     0.200 NA\n"
     "ENDROOT\nTORSDOF 0\n")
 _LIGAND_PDBQT_FLAT = _LIGAND_PDBQT_3D.replace("   0.400", "   0.000").replace("  -0.700", "   0.000")
+# Four atoms in the z = 0 plane (three atoms are coplanar whatever their
+# geometry, so the planarity check needs at least four).
+_LIGAND_PDBQT_FLAT4 = _LIGAND_PDBQT_FLAT.replace(
+    "ENDROOT",
+    "ATOM      4  C   UNL     1       1.500   1.500   0.000  0.00  0.00     0.100 C\nENDROOT")
 
 
 def _fake_obabel(calls=None, pdbqt=_LIGAND_PDBQT_3D, fail_on=None):
@@ -522,9 +527,10 @@ def test_sdf_conversion_requests_gasteiger_charges(tmp_path, monkeypatch):
     sdf.write_text(_molblock(0.8))
     lm = library.LibraryManager(str(tmp_path / "out"), str(tmp_path), minimize=False)
     lm._prepare_sdf_to_pdbqt(str(sdf), str(tmp_path / "a.pdbqt"), "a")
-    # The conversion runs twice (deterministic hydrogen check), identically.
+    # The conversion runs twice (deterministic hydrogen check), identically,
+    # and a third time because the first two outputs agree.
     converts = [c for c, _ in calls if "-opdbqt" in c]
-    assert len(converts) == 2
+    assert len(converts) == 3
     assert all(c[-3:] == ["-h", "--partialcharge", "gasteiger"] for c in converts)
 
 
@@ -580,17 +586,20 @@ def test_unminimized_2d_sdf_gets_3d_intermediate(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "run", _fake_obabel(calls))
     fixes = []
     monkeypatch.setattr(runner, "_ensure_pdbqt_has_charges", lambda p: False)
-    monkeypatch.setattr(runner, "_fix_pdbqt_charges", lambda p, src: fixes.append(src))
+    monkeypatch.setattr(runner, "_fix_pdbqt_charges",
+                        lambda p, src, gen3d=None: fixes.append((src, gen3d)))
     sdf = tmp_path / "flat.sdf"
     sdf.write_text(_molblock(0.0))
     lm = library.LibraryManager(str(tmp_path / "out"), str(tmp_path), minimize=False)
     lm._prepare_sdf_to_pdbqt(str(sdf), str(tmp_path / "flat.pdbqt"), "flat")
     obabel_cmds = [c for c, _ in calls if "--append" not in c]
-    gen3d, convert, probe = obabel_cmds  # conversion + its determinism probe
+    # conversion + its determinism probe, run again as the two agree
+    gen3d, convert, probe, probe2 = obabel_cmds
     assert "--gen3d" in gen3d and gen3d[gen3d.index("-O") + 1].endswith("flat_gen3d.sdf")
     src = convert[convert.index("-isdf") + 1]
     assert src.endswith("flat_gen3d.sdf") and "-h" in convert
-    assert fixes == [src]
+    # The charge rebuild never generates coordinates (--gen3d) itself.
+    assert fixes == [(src, False)]
     assert lm.metadata["flat"]["coordinates"] == "gen3d"
     assert lm.metadata["flat"]["coordinates_method"] == "obabel-gen3d"
     assert "h-probe" in probe[probe.index("-O") + 1]
@@ -608,7 +617,7 @@ def test_failed_minimization_of_2d_input_still_gets_3d(tmp_path, monkeypatch):
 
 
 def test_planar_result_of_2d_input_is_rejected(tmp_path, monkeypatch):
-    monkeypatch.setattr(runner, "run", _fake_obabel(pdbqt=_LIGAND_PDBQT_FLAT))
+    monkeypatch.setattr(runner, "run", _fake_obabel(pdbqt=_LIGAND_PDBQT_FLAT4))
     indir = tmp_path / "in"
     indir.mkdir()
     (indir / "flat.sdf").write_text(_molblock(0.0))
@@ -621,9 +630,10 @@ def test_planar_result_of_2d_input_is_rejected(tmp_path, monkeypatch):
 
 def test_failed_conversion_removes_partial_output(tmp_path, monkeypatch):
     def fake_run(cmd, capture=False, extra_env=None, **kw):
-        out = cmd[cmd.index("-O") + 1]
-        with open(out, "w", encoding="utf-8") as f:
-            f.write("partial")
+        if "-O" in cmd:
+            out = cmd[cmd.index("-O") + 1]
+            with open(out, "w", encoding="utf-8") as f:
+                f.write("partial")
         raise subprocess.CalledProcessError(1, cmd, output="", stderr="kekulize error")
 
     monkeypatch.setattr(runner, "run", fake_run)
@@ -648,10 +658,12 @@ def test_every_obabel_call_is_single_threaded(tmp_path, monkeypatch):
     lm = library.LibraryManager(str(tmp_path / "out"), str(indir))
     lm.prepare_local(apply_lipinski=False)
     obabel_calls = [(c, env) for c, env in calls if c[0] == runner.OBABEL]
-    # SDF: descriptors, gen3d, MMFF94, conversion; MOL2: conversion; PDB:
-    # protonation and conversion. Conversions that add hydrogens run twice
-    # (run_obabel_deterministic), so 3 + 2 + 2 + 2 + 2 = 11.
-    assert len(obabel_calls) == 11
+    # Every input: one fragment check (-ocan). SDF: descriptors, gen3d,
+    # MMFF94, conversion; MOL2: conversion; PDB: protonation and conversion.
+    # Conversions that add hydrogens run three times here
+    # (run_obabel_deterministic: the faked outputs of the first two agree),
+    # so (1 + 3 + 3) + (1 + 3) + (1 + 3 + 3) = 18.
+    assert len(obabel_calls) == 18
     assert all(env == {"OMP_NUM_THREADS": "1"} for _, env in obabel_calls)
 
 
@@ -743,10 +755,12 @@ def test_pdb_ligand_gets_charged_polar_hydrogens_with_real_obabel(tmp_path):
     assert all(float(line[70:76]) > 0.1 for line in hd)
 
     # Coordinates, atom types, torsion tree and name record are those of the
-    # former one-step conversion; only the charge column differs.
+    # former one-step conversion; only the charge column differs. The name
+    # record is the file name, not its path (L4).
     single = tmp_path / "single.pdbqt"
     subprocess.run(["obabel", "-ipdb", str(pdb), "-opdbqt", "-O", str(single), "-h",
-                    "--partialcharge", "gasteiger"], check=True, capture_output=True, env=env)
+                    "--partialcharge", "gasteiger", "--title", "acetamide.pdb"],
+                   check=True, capture_output=True, env=env)
 
     def mask(path):
         return [line[:70] + line[76:] if line.startswith(("ATOM", "HETATM")) else line

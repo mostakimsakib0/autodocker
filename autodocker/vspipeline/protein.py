@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -43,9 +44,11 @@ from vspipeline.hydrogens import (  # noqa: E402,F401  (some re-exported)
     VINA_METAL_COVALENT_RADIUS,
     SpatialHash as _SpatialHash,
     pdbqt_element as _pdbqt_element,
+    same_bytes,
     stabilize_hydrogens,
     vina_bond_cutoff as _vina_bond_cutoff,
 )
+from vspipeline.utils import elements_without_gasteiger  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,13 @@ MODIFIED_RESIDUES = {
     "MSE", "SEP", "TPO", "PTR", "CSO", "CSD", "CME", "MLY", "HYP", "KCX",
     "PCA", "CSS", "OCS", "SCH", "NEP", "ALY", "M3L", "TYS",
 }
+
+# Selenomethionine is written as methionine (Se -> S): AutoDock Vina has no
+# selenium atom type and Open Babel no Gasteiger parameters for Se, so a SeMet
+# structure could not be converted at all. The side chains are isosteric
+# (C-Se 1.95 A vs C-S 1.81 A); coordinates are kept as deposited.
+SELENOMETHIONINE = "MSE"
+_SEMET_TO_MET_ATOM = {"SE": " SD "}
 
 # A receptor with fewer ATOM records than this is rejected as truncated.
 MIN_PROTEIN_ATOM_LINES = 100
@@ -191,6 +201,13 @@ def record_chain(line: str) -> str:
     return (line[21:22].strip() or BLANK_CHAIN_ID)
 
 
+def _has_blank_chain(pdb_file: str) -> bool:
+    """True if an ATOM record of ``pdb_file`` has a blank chain ID."""
+    with open(pdb_file, errors="replace", encoding="utf-8") as f:
+        return any(line.startswith("ATOM") and len(line) > 21 and not line[21].strip()
+                   for line in f)
+
+
 def _heavy_atom_coords(path: str) -> Tuple[List[float], List[float], List[float]]:
     """Coordinates of the non-hydrogen ATOM/HETATM records of a PDB/PDBQT."""
     pdbqt = path.lower().endswith(".pdbqt")
@@ -243,6 +260,57 @@ def _strip_remark_name_paths(path: str) -> None:
              if l.startswith(prefix) else l for l in lines]
     with open(path, "w", encoding="utf-8") as f:
         f.writelines(lines)
+
+
+def _semet_to_met(line: str) -> Tuple[str, Tuple[str, str]]:
+    """A selenomethionine (MSE) record as methionine: residue name MET, the
+    selenium as ' SD ' with element S. Returns (line, residue position)."""
+    name = line[12:16]
+    element = line[76:78] if len(line) > 76 else ""
+    if name.strip() in _SEMET_TO_MET_ATOM:
+        name = _SEMET_TO_MET_ATOM[name.strip()]
+        element = " S"
+    line = line[:12] + name + line[16:17] + "MET" + line[20:]
+    if len(line) > 76:
+        line = line[:76] + element + line[78:]
+    return line, _residue_position(line)
+
+
+def _write_without_residues(src: str, dst: str, residues: set) -> None:
+    """Copy a PDB without the HETATM residues whose ``pocket._residue_key``
+    is in ``residues``."""
+    from vspipeline import pocket
+    with open(src, encoding="utf-8") as f:
+        lines = f.readlines()
+    kept = []
+    for line in lines:
+        parsed = pocket._parse_hetatm(line)
+        if parsed is not None and pocket._residue_key(parsed) in residues:
+            continue
+        kept.append(line)
+    with open(dst, "w", encoding="utf-8") as f:
+        f.writelines(kept)
+
+
+def _unsupported_elements_hint(pdb_file: str) -> str:
+    """' (elements without Open Babel Gasteiger parameters: ...)' for the
+    records of ``pdb_file``, or '' when every element is supported."""
+    found = defaultdict(set)
+    try:
+        with open(pdb_file, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith(("ATOM", "HETATM")):
+                    found[pdb_record_element(line)].add(
+                        f"{line[17:20].strip()} {record_chain(line)}{line[22:27].strip()}")
+    except OSError:
+        return ""
+    bad = elements_without_gasteiger(found)
+    if not bad:
+        return ""
+    where = "; ".join(f"{e} in " + ", ".join(sorted(found[e])[:3])
+                      + (" ..." if len(found[e]) > 3 else "") for e in bad)
+    return (f" (element(s) without Open Babel Gasteiger parameters: {where}; remove "
+            "those residues or run without --keep-hetero)")
 
 
 def _xyz_key(line: str) -> Tuple[float, float, float]:
@@ -478,7 +546,12 @@ class ProteinPreparation:
         chains = runner.get_chains(self.pdb_file)
 
         if len(chains) == 1:
-            logger.info(f"[*] Single chain detected: {chains[0]}")
+            note = ""
+            if chains[0] == BLANK_CHAIN_ID and _has_blank_chain(self.pdb_file):
+                note = (f" (blank chain ID in the PDB, read as {BLANK_CHAIN_ID}; "
+                        f"--chain {BLANK_CHAIN_ID} and residue keys such as "
+                        f"{BLANK_CHAIN_ID}45 or 45 address it)")
+            logger.info(f"[*] Single chain detected: {chains[0]}{note}")
             return chains[0]
 
         logger.warning(
@@ -490,13 +563,16 @@ class ProteinPreparation:
     def _write_clean_pdb(self, selected_chains: Sequence[str], keep_hetero: bool) -> None:
         """Write ``pdb_clean``: first model, one altloc per residue, the
         selected chains, no hydrogens, HETATM records only with
-        ``keep_hetero`` (modified amino acids are always kept as ATOM)."""
+        ``keep_hetero`` (modified amino acids are always kept as ATOM;
+        selenomethionine is written as methionine, see SELENOMETHIONINE)."""
         try:
             lines, skipped_altloc = read_pdb_records(self.pdb_file)
         except IOError as e:
             raise IOError(f"Failed to read {self.pdb_file}: {e}")
 
         kept_atoms = skipped_hetero = removed_h = 0
+        semet = set()
+        other_chains = defaultdict(lambda: [0, 0])  # chain -> [ATOM, HETATM] records
         last_was_atom = False
         out = []
         for line in lines:
@@ -507,6 +583,8 @@ class ProteinPreparation:
                 is_atom, is_het = True, False
             if is_atom or (keep_hetero and is_het):
                 if len(line) <= 21 or record_chain(line) not in selected_chains:
+                    if len(line) > 21:
+                        other_chains[record_chain(line)][0 if is_atom else 1] += 1
                     continue
                 # Input hydrogens are dropped: Open Babel's pH model would
                 # protonate the already protonated groups once more and put
@@ -514,6 +592,9 @@ class ProteinPreparation:
                 if is_hydrogen_record(line):
                     removed_h += 1
                     continue
+                if is_atom and line[17:20] == SELENOMETHIONINE:
+                    line, residue = _semet_to_met(line)
+                    semet.add(residue)
                 out.append(line)
                 kept_atoms += 1
                 last_was_atom = True
@@ -544,26 +625,60 @@ class ProteinPreparation:
                 f"[!] Removed {removed_h} hydrogen records from the input; the receptor "
                 "is re-protonated by Open Babel at the requested pH (input "
                 "protonation states are not kept)")
+        if semet:
+            logger.warning(
+                f"[!] Wrote {len(semet)} selenomethionine (MSE) residue(s) as "
+                "methionine (MET, Se -> S): AutoDock Vina has no selenium atom type "
+                "and Open Babel no Gasteiger parameters for Se; coordinates are kept")
         if skipped_hetero and not keep_hetero:
             logger.info(
                 f"[*] Removed {skipped_hetero} HETATM records during receptor cleaning")
+        het_only = sorted(c for c, (n_atom, _) in other_chains.items() if n_atom == 0)
+        if keep_hetero and het_only:
+            logger.warning(
+                "[!] --keep-hetero: not keeping HETATM records of chain(s) without "
+                "protein atoms, which --chain never selects: " + ", ".join(
+                    f"{c} ({other_chains[c][1]} records)" for c in het_only))
+        dropped_het = sum(n_het for c, (n_atom, n_het) in other_chains.items() if n_atom)
+        if keep_hetero and dropped_het:
+            logger.info(f"[*] --keep-hetero: {dropped_het} HETATM records of chains "
+                        "outside the selection are not kept")
 
-    def _protonate(self, ph: float) -> None:
-        """Convert ``pdb_clean`` to ``receptor_pdbqt`` with Open Babel,
-        adding hydrogens for ``ph``, with deterministic hydrogen positions."""
+    def _metal_ions(self) -> List[Tuple[str, str, str]]:
+        """Residue keys (see ``pocket._residue_key``) of the single-atom metal
+        ions in ``pdb_clean`` that AutoDock Vina can type."""
+        from vspipeline import pocket
+        ions = []
+        for key, atoms in pocket._hetatm_residues(self.pdb_clean).items():
+            if len(atoms) == 1 and atoms[0]["element"] in pocket.VINA_METAL_TYPE_MAP:
+                ions.append(key)
+        return ions
+
+    def _protonate(self, ph: float, source: Optional[str] = None) -> None:
+        """Convert ``source`` (default ``pdb_clean``) to ``receptor_pdbqt``
+        with Open Babel, adding hydrogens for ``ph``, with deterministic
+        hydrogen positions."""
+        source = source or self.pdb_clean
         probe = self.receptor_pdbqt + ".probe"
         # -p adds hydrogens for the given pH. Vina's atom typing needs them:
         # without polar hydrogens every N is typed as an acceptor and the
         # receptor has no hydrogen-bond donors. The PDBQT writer (-xr) keeps
         # the polar hydrogens and merges the non-polar ones.
-        base = ["-ipdb", self.pdb_clean, "-opdbqt", "-O"]
+        base = ["-ipdb", source, "-opdbqt", "-O"]
         options = ["-xr", "-p", f"{ph:g}", "--partialcharge", "gasteiger"]
         try:
-            _run_obabel(base + [self.receptor_pdbqt] + options,
-                        outputs=[self.receptor_pdbqt])
+            try:
+                _run_obabel(base + [self.receptor_pdbqt] + options,
+                            outputs=[self.receptor_pdbqt])
+            except RuntimeError as e:
+                raise RuntimeError(f"{e}{_unsupported_elements_hint(source)}") from e
             # A second conversion exposes every hydrogen Open Babel placed at
-            # random (see stabilize_hydrogens).
+            # random (see stabilize_hydrogens). Open Babel seeds its generator
+            # from the clock (usec % 70092), so two runs can draw the same
+            # seed; when the two files are identical a third run is compared.
             _run_obabel(base + [probe] + options, outputs=[probe], log_stderr=False)
+            if same_bytes(self.receptor_pdbqt, probe):
+                _run_obabel(base + [probe] + options, outputs=[probe], log_stderr=False)
             moved = stabilize_hydrogens(self.receptor_pdbqt, probe)
         finally:
             if os.path.exists(probe):
@@ -588,15 +703,35 @@ class ProteinPreparation:
                 "is written to; move it out of the output directory")
 
         self._write_clean_pdb(selected_chains, keep_hetero)
+        self.selected_chains = selected_chains
 
         try:
-            self._protonate(ph)
-            # obabel -p re-perceives residues; put the input's labels back.
-            relabelled = _restore_residue_labels(self.receptor_pdbqt, self.pdb_clean)
+            # Metal ions kept by --keep-hetero stay in pdb_clean (and in the
+            # frame offset) but are not given to Open Babel, which has no
+            # Gasteiger parameters for them and would skip the whole receptor;
+            # they are appended with their Vina metal types afterwards.
+            ions = self._metal_ions() if keep_hetero else []
+            with tempfile.TemporaryDirectory(prefix="autodocker_receptor_") as tmp:
+                source = self.pdb_clean
+                if ions:
+                    # Same file name, so the PDBQT's REMARK Name is unchanged.
+                    source = os.path.join(tmp, os.path.basename(self.pdb_clean))
+                    _write_without_residues(self.pdb_clean, source, set(ions))
+                self._protonate(ph, source)
+                # obabel -p re-perceives residues; put the input's labels back.
+                relabelled = _restore_residue_labels(self.receptor_pdbqt, source)
             logger.info(f"[*] Restored input residue labels on {relabelled} receptor atoms")
             # Centre on the heavy atoms of pdb_clean (the frame offset written
             # to frame_offset.txt).
             _translate_pdbqt(self.receptor_pdbqt, self._receptor_centroid())
+            if ions:
+                appended = runner._append_hetatm_to_receptor(
+                    self.receptor_pdbqt, self.pdb_clean, ions, selected_chains,
+                    offset=self.frame_offset())
+                logger.info(
+                    f"[*] --keep-hetero: added {appended} metal ion(s) with their Vina "
+                    "metal types (not charged by Open Babel): "
+                    + ", ".join(f"{n} {c}{r}" for c, r, n in ions))
 
             # Receptor PDBQT must not contain ligand torsion tags (ROOT/BRANCH/TORSDOF).
             runner._sanitize_receptor_pdbqt(self.receptor_pdbqt)
@@ -615,8 +750,6 @@ class ProteinPreparation:
         except Exception as e:
             logger.error(f"Failed to prepare receptor: {e}")
             raise
-
-        self.selected_chains = selected_chains
 
         return selected_chains
 

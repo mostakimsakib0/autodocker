@@ -98,13 +98,20 @@ def _parse_hetatm(line: str) -> Optional[Dict]:
     }
 
 
+def _residue_id(parsed: Dict) -> str:
+    """Residue number with its insertion code ('301', '301A')."""
+    return parsed["resnum"] + parsed.get("icode", "")
+
+
 def _residue_key(parsed: Dict) -> Tuple[str, str, str]:
-    return parsed["chain"], parsed["resnum"], parsed["resname"]
+    """(chain, resnum + insertion code, resname): HOH 301 and HOH 301A are
+    different residues."""
+    return parsed["chain"], _residue_id(parsed), parsed["resname"]
 
 
 def _hetatm_residues(pdb_file: str) -> "OrderedDict[Tuple[str, str, str], List[Dict]]":
     """All HETATM atoms of ``pdb_file`` (first model, chosen altlocs),
-    grouped by (chain, resnum, resname) in file order."""
+    grouped by (chain, resnum + insertion code, resname) in file order."""
     lines, _ = read_pdb_records(pdb_file)
     residues = OrderedDict()
     for line in lines:
@@ -134,7 +141,8 @@ def detect_water_molecules(pdb_file: str, binding_site_coords: Tuple[float, floa
     """Detect water molecules near the binding site.
 
     Returns a list of residue dicts (chain/resnum/resname/coords) for waters
-    whose oxygen lies within ``distance_threshold`` A of the site center.
+    whose oxygen lies within ``distance_threshold`` A of the site center;
+    ``resnum`` includes the insertion code ('301A').
     """
     cx, cy, cz = binding_site_coords
     waters = []
@@ -142,7 +150,7 @@ def detect_water_molecules(pdb_file: str, binding_site_coords: Tuple[float, floa
             pdb_file, lambda r: r["resname"] in WATER_RESNAMES and r["element"] == "O"):
         x, y, z = res["coords"]
         if math.sqrt((x - cx) ** 2 + (y - cy) ** 2 + (z - cz) ** 2) <= distance_threshold:
-            waters.append(res)
+            waters.append(dict(res, resnum=_residue_id(res)))
     return waters
 
 
@@ -173,7 +181,7 @@ def detect_metal_ions(pdb_file: str) -> List[Dict]:
             "name": METAL_ELEMENTS[ion["element"]],
             "atom": ion["atom"],
             "chain": ion["chain"],
-            "resnum": ion["resnum"],
+            "resnum": _residue_id(ion),
             "resname": ion["resname"],
             "coords": ion["coords"],
         })
@@ -189,7 +197,7 @@ def detect_cofactors(pdb_file: str) -> List[Dict]:
             "name": res["resname"],
             "resname": res["resname"],
             "chain": res["chain"],
-            "resnum": res["resnum"],
+            "resnum": _residue_id(res),
             "coords": res["coords"],
         })
     return cofactors
