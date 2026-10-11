@@ -753,3 +753,12 @@ def test_pdb_ligand_gets_charged_polar_hydrogens_with_real_obabel(tmp_path):
                 for line in open(path)]
 
     assert mask(out) == mask(str(single))
+
+
+def test_metadata_paths_inside_output_are_relative(tmp_path):
+    from vspipeline.library import LibraryManager
+    lm = LibraryManager(str(tmp_path / "out"), str(tmp_path))
+    inside = tmp_path / "out" / "ligands" / "a.pdbqt"
+    outside = tmp_path / "given.pdbqt"
+    assert lm._out_relpath(str(inside)) == os.path.join("ligands", "a.pdbqt")
+    assert lm._out_relpath(str(outside)) == str(outside)

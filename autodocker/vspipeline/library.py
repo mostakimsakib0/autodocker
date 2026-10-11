@@ -213,6 +213,16 @@ class LibraryManager:
         self.pubchem_rest = os.environ.get('PUBCHEM_REST') or self.PUBCHEM_REST
         self._network_failures = 0
 
+    def _out_relpath(self, path: str) -> str:
+        """Path relative to the output directory when it lies inside it (as
+        ranking.csv's Docked_File), so metadata does not depend on where the
+        output directory is; absolute otherwise (e.g. a PDBQT used as given)."""
+        out = os.path.abspath(self.outdir)
+        full = os.path.abspath(path)
+        if os.path.commonpath([out, full]) == out:
+            return os.path.relpath(full, out)
+        return full
+
     # ------------------------------------------------------------------
     # PubChem libraries
     # ------------------------------------------------------------------
@@ -529,8 +539,8 @@ class LibraryManager:
 
         self.metadata[ligand_id] = {
             "source_sdf": os.path.abspath(sdf_file),
-            "prepared_sdf": os.path.abspath(source),
-            "pdbqt": os.path.abspath(pdbqt_file),
+            "prepared_sdf": self._out_relpath(source),
+            "pdbqt": self._out_relpath(pdbqt_file),
             "input_format": "sdf",
             "coordinates": coordinates,
             "coordinates_method": coordinates_method,
@@ -649,7 +659,7 @@ class LibraryManager:
         self.metadata[name] = {
             "source_file": os.path.abspath(path),
             "input_format": fmt,
-            "pdbqt": os.path.abspath(out),
+            "pdbqt": self._out_relpath(out),
             "coordinates": "input",
             "coordinates_method": None,
             "mw": None, "logp": None, "tpsa": None, "rotors": None,

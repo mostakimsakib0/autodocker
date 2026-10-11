@@ -156,3 +156,15 @@ def test_run_obabel_real_failure_message(tmp_path):
         pytest.skip("obabel not installed")
     with pytest.raises(RuntimeError, match="obabel exited with code"):
         u.run_obabel(["-:C", "-onotaformat"])
+
+
+def test_strip_molfile_timestamps_zeroes_every_record_date(tmp_path):
+    from vspipeline.utils import _strip_molfile_timestamps
+    block = "mol{n}\n OpenBabel10112614273D\n\n  0  0  0  0  0  0  0  0  0  0999 V2000\nM  END\n$$$$\n"
+    p = tmp_path / "x.sdf"
+    p.write_text(block.format(n=1) + block.format(n=2).replace("1011261427", "1011261453"))
+    _strip_molfile_timestamps(str(p))
+    lines = p.read_text().split("\n")
+    assert lines[1] == " OpenBabel00000000003D"
+    assert lines[7] == " OpenBabel00000000003D"
+    assert lines[0] == "mol1" and lines[6] == "mol2"

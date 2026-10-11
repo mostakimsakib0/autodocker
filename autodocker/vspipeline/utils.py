@@ -99,12 +99,42 @@ def run_obabel(args: List[str], outputs: Iterable[str] = (),
             raise RuntimeError(
                 f"obabel exited with code {e.returncode}: {_tail(e.stderr)}") from e
         raise
+    for path in outputs:
+        if path.lower().endswith((".sdf", ".sd", ".mol")):
+            _strip_molfile_timestamps(path)
     stdout, stderr = (result[0], result[1]) if result else ("", "")
     if return_stderr:
         return stdout or "", stderr or ""
     if stderr and stderr.strip():
         logger.debug(f"obabel: {_tail(stderr)}")
     return stdout or ""
+
+
+# MDL molfile header line 2: program name followed by a MMDDYYHHmm date.
+_MOLFILE_STAMP = re.compile(r"^(\s*OpenBabel)\d{10}")
+
+
+def _strip_molfile_timestamps(path: str) -> None:
+    """Zero the date Open Babel writes into line 2 of every molfile record,
+    so identical structures written in different minutes give identical
+    files (the date carries no chemical information)."""
+    try:
+        with open(path) as fh:
+            lines = fh.read().split("\n")
+    except (FileNotFoundError, UnicodeDecodeError):
+        return
+    changed = False
+    header = 1  # line 2 of the first record
+    for i, line in enumerate(lines):
+        if i == header:
+            new = _MOLFILE_STAMP.sub(lambda m: m.group(1) + "0" * 10, line)
+            changed |= new != line
+            lines[i] = new
+        if line.strip() == "$$$$":
+            header = i + 2
+    if changed:
+        with open(path, "w") as fh:
+            fh.write("\n".join(lines))
 
 
 def ligand_name(path: str) -> str:
