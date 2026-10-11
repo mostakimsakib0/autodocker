@@ -1,40 +1,64 @@
 #!/usr/bin/env python3
-"""LIBRARY GENERATION (PubChem + ADMET).
+"""Ligand library preparation: local files and PubChem downloads.
 
-Split out of runner.py (behavior-preserving refactor). All cross-module
-references go through the ``runner`` namespace at call time so the public
-entry point and its monkeypatch surface stay unchanged.
+Local mode prepares every SDF/PDBQT/MOL2/PDB file of ``-l``; the PubChem
+modes download a fixed list of approved drugs (``--library fda``) or the same
+list filtered by a property window (``--library custom``). Every prepared
+ligand is recorded in ``ligand_metadata.json`` (source file, descriptors,
+minimization, and for PubChem compounds the CID, download URL and retrieval
+time).
+
+Cross-module references go through the ``runner`` namespace at call time so
+monkeypatching ``runner.<name>`` (e.g. ``runner.run`` in tests) keeps working.
 """
-import os
-import re
-import csv
 import json
-import math
-import time
-import shlex
-import uuid
-import shutil
-import fnmatch
-import glob
-import html
-import statistics
-import subprocess
 import logging
-from collections import defaultdict
-from datetime import datetime
+import os
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
-from multiprocessing import Pool, cpu_count as mp_cpu_count
 
-# The runner module owns the tool-path globals (OBABEL, VINA*, SMINA,
-# COMMAND_TIMEOUT) and every public name; import it lazily-safe: during the
-# initial import of runner this binds the partially-initialized module
-# object, which is fine because attributes are only accessed at call time.
-import runner  # noqa: E402
+import runner  # noqa: E402  (tool paths and shared helpers, resolved at call time)
 from vspipeline import net  # noqa: E402
+from vspipeline.admet import (  # noqa: E402
+    LIPINSKI_HBA_MAX,
+    LIPINSKI_HBD_MAX,
+    LIPINSKI_LOGP_MAX,
+    LIPINSKI_MW_MAX,
+    sdf_coordinates,
+)
 
 logger = logging.getLogger(__name__)
+
+# Local ligand formats in order of precedence: when several files share a
+# name (e.g. X.mol2 and X.pdbqt in a DUD-E folder), the first format in this
+# order is docked and the others are reported as superseded.
+FORMAT_PRECEDENCE = ("sdf", "pdbqt", "mol2", "pdb")
+_FORMAT_LABEL = {"sdf": "SDF", "pdbqt": "PDBQT", "mol2": "MOL2", "pdb": "PDB"}
+
+# An SDF atom with |z| above this (SDF coordinates have 4 decimals) makes the
+# molecule 3D; a molblock with every z at 0 is a 2D depiction.
+Z_EPSILON = 1e-4
+# A prepared ligand whose coordinates do not spread by more than this along
+# some axis (PDBQT coordinates have 3 decimals) is planar-degenerate.
+PLANAR_SPREAD_EPSILON = 1e-3
+
+DEFAULT_MINIMIZE_STEPS = 250
+DEFAULT_MAX_COMPOUNDS = 20
+
+
+class LigandRejected(Exception):
+    """A ligand that cannot or must not be docked; the message is the reason."""
+
+
+class FilterRejected(LigandRejected):
+    """A ligand removed by the property filter (not a preparation failure)."""
+
+
+class PubChemUnreachable(RuntimeError):
+    """Several PubChem requests in a row failed at the network level."""
 
 
 def _ligand_pdbqt_problem(path: str) -> Optional[str]:
@@ -83,27 +107,65 @@ def _sdf_is_usable(path: str) -> bool:
 
 
 def _sdf_has_3d_coords(sdf_file: str) -> bool:
-    """True if the first molecule in an SDF has any non-zero Z coordinate."""
+    """True if the first molecule of an SDF (V2000 or V3000) has any atom
+    with a non-zero Z coordinate, i.e. it is not a flat 2D depiction."""
+    coords = sdf_coordinates(sdf_file)
+    return bool(coords) and any(abs(z) > Z_EPSILON for _, _, z in coords)
+
+
+def _pdbqt_coordinate_spread(path: str) -> Optional[Tuple[float, float, float]]:
+    """Extent (max - min) of the atom coordinates of a PDBQT along x, y, z."""
+    xs, ys, zs = [], [], []
     try:
-        with open(sdf_file) as f:
-            lines = [next(f) for _ in range(4)]
-            n_atoms = int(lines[3][:3])
-            for _ in range(n_atoms):
-                if abs(float(next(f)[20:30])) > 1e-4:
-                    return True
-    except (OSError, StopIteration, ValueError, IndexError):
-        pass
-    return False
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                if line.startswith(("ATOM", "HETATM")):
+                    try:
+                        xs.append(float(line[30:38]))
+                        ys.append(float(line[38:46]))
+                        zs.append(float(line[46:54]))
+                    except ValueError:
+                        continue
+    except OSError:
+        return None
+    if not xs:
+        return None
+    return max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)
+
+
+def _flat_axis(path: str) -> Optional[str]:
+    """Axis along which a prepared ligand (3+ atoms) has no extent, else None."""
+    spread = _pdbqt_coordinate_spread(path)
+    if spread is None:
+        return None
+    with open(path, errors="replace") as fh:
+        n_atoms = sum(1 for line in fh if line.startswith(("ATOM", "HETATM")))
+    if n_atoms < 3:
+        return None
+    for axis, extent in zip("xyz", spread):
+        if extent <= PLANAR_SPREAD_EPSILON:
+            return axis
+    return None
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class LibraryManager:
-    """Manages compound library sourcing and preparation."""
+    """Sources ligands (local files or PubChem) and prepares docking PDBQTs."""
 
     PUBCHEM_REST = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
-    MAX_COMPOUNDS = 20
+    MAX_COMPOUNDS = DEFAULT_MAX_COMPOUNDS
+    MAX_NETWORK_FAILURES = 3
 
-    # Curated FDA-approved drug names (well-known actives) resolved through
-    # PubChem PUG REST name->CID lookup.
+    # A fixed, hand-picked list of 74 well-known approved drugs, resolved by
+    # name through PubChem PUG REST (the first CID PubChem returns for the
+    # name is used). It is NOT the FDA approved-drug list and not a
+    # representative sample of it; screens take the first --max-compounds
+    # entries that can be prepared, in this order. Ranitidine was removed in
+    # 1.2.0 (withdrawn from the US market in April 2020, NDMA contamination);
+    # the list is otherwise unchanged.
     FDA_DRUG_NAMES = [
         "aspirin", "ibuprofen", "acetaminophen", "naproxen", "diclofenac",
         "celecoxib", "atorvastatin", "simvastatin", "rosuvastatin", "lovastatin",
@@ -111,7 +173,7 @@ class LibraryManager:
         "amlodipine", "nifedipine", "verapamil", "diltiazem", "losartan",
         "valsartan", "candesartan", "furosemide", "hydrochlorothiazide", "spironolactone",
         "digoxin", "warfarin", "clopidogrel", "ticlopidine", "prasugrel",
-        "omeprazole", "lansoprazole", "pantoprazole", "ranitidine", "cimetidine",
+        "omeprazole", "lansoprazole", "pantoprazole", "cimetidine",
         "fluoxetine", "sertraline", "paroxetine", "citalopram", "escitalopram",
         "diazepam", "alprazolam", "lorazepam", "clonazepam", "zolpidem",
         "sildenafil", "tadalafil", "vardenafil", "finasteride", "dutasteride",
@@ -122,519 +184,535 @@ class LibraryManager:
         "donepezil", "rivastigmine", "memantine", "levodopa", "carbidopa",
     ]
 
+    # The custom library is the same list with a user-defined property window.
     FALLBACK_LIBRARY_NAMES = list(FDA_DRUG_NAMES)
 
-    def __init__(self, outdir: str, ligands_input_dir: str,
-                 minimize: bool = True, minimize_steps: int = 250):
+    def __init__(self, outdir: str, ligands_input_dir: Optional[str],
+                 minimize: bool = True, minimize_steps: int = DEFAULT_MINIMIZE_STEPS):
         self.outdir = outdir
         self.ligands_input_dir = ligands_input_dir
         self.lib_dir = os.path.join(outdir, "ligands")
         self.minimized_dir = os.path.join(outdir, "ligands_minimized")
         self.metadata_file = os.path.join(outdir, "ligand_metadata.json")
-        self.metadata = {}
+        self.metadata: Dict[str, Dict] = {}
         self.minimize = minimize
         self.minimize_steps = minimize_steps
+        # (name, reason) of ligands that could not be prepared, and of
+        # same-name files that were not used (see FORMAT_PRECEDENCE).
+        self.failed: List[Tuple[str, str]] = []
+        self.superseded: List[Tuple[str, str]] = []
         os.makedirs(self.lib_dir, exist_ok=True)
         os.makedirs(self.minimized_dir, exist_ok=True)
         # Allow overriding the PubChem REST base for tests/mirrors.
         self.pubchem_rest = os.environ.get('PUBCHEM_REST') or self.PUBCHEM_REST
         self._network_failures = 0
 
-    def create_fda_library(self, apply_admet: bool = True) -> List[str]:
-        """Download FDA-approved drugs from PubChem.
+    # ------------------------------------------------------------------
+    # PubChem libraries
+    # ------------------------------------------------------------------
 
-        Uses PubChem PUG REST: ``compound/name/{name}/cids`` then
-        ``compound/cid/{cid}/SDF`` (the old ZINC endpoint is dead).
+    def create_fda_library(self, apply_lipinski: bool = True, *,
+                           apply_admet: Optional[bool] = None,
+                           max_compounds: Optional[int] = None) -> List[str]:
+        """Download and prepare compounds of ``FDA_DRUG_NAMES`` from PubChem.
+
+        With ``apply_lipinski`` the Lipinski filter (zero violations) is
+        applied to each downloaded SDF. ``apply_admet`` is a deprecated alias.
+        Raises RuntimeError if no compound could be prepared; local ligands
+        are never used as a substitute.
         """
-        logger.info(
-            "[*] FDA library mode - downloading approved drugs from PubChem...")
+        if apply_admet is not None:
+            apply_lipinski = apply_admet
+        limits = ({} if not apply_lipinski else
+                  dict(mw_max=LIPINSKI_MW_MAX, logp_max=LIPINSKI_LOGP_MAX,
+                       hbd_max=LIPINSKI_HBD_MAX, hba_max=LIPINSKI_HBA_MAX))
+        logger.info("[*] FDA library mode - downloading approved drugs from PubChem...")
+        return self._build_pubchem_library("fda", self.FDA_DRUG_NAMES, limits,
+                                           max_compounds)
 
-        downloaded = []
-        for name in self.FDA_DRUG_NAMES:
-            if len(downloaded) >= self.MAX_COMPOUNDS:
-                logger.info(
-                    f"[*] Reached {self.MAX_COMPOUNDS} compounds, stopping download")
+    def create_custom_library(self, mw_min: float = 200, mw_max: float = 500,
+                              logp_max: float = 5, apply_lipinski: bool = True, *,
+                              apply_admet: Optional[bool] = None,
+                              max_compounds: Optional[int] = None) -> List[str]:
+        """Download ``FALLBACK_LIBRARY_NAMES`` from PubChem and keep the
+        compounds inside a property window.
+
+        The MW window and logP maximum REPLACE Lipinski's MW <= 500 and
+        logP <= 5 cut-offs; with ``apply_lipinski`` Lipinski's HBD <= 5 and
+        HBA <= 10 are applied as well. All four descriptors are computed by
+        Open Babel from the downloaded structure (one logP model, recorded in
+        ligand_metadata.json as ``logp_model``).
+        """
+        if apply_admet is not None:
+            apply_lipinski = apply_admet
+        limits = dict(mw_min=mw_min, mw_max=mw_max, logp_max=logp_max,
+                      hbd_max=LIPINSKI_HBD_MAX if apply_lipinski else None,
+                      hba_max=LIPINSKI_HBA_MAX if apply_lipinski else None)
+        logger.info(
+            f"[*] Custom library mode (MW {mw_min:g}-{mw_max:g}, logP <= {logp_max:g}"
+            f"{', HBD <= 5, HBA <= 10' if apply_lipinski else ''}) - PubChem")
+        return self._build_pubchem_library("custom", self.FALLBACK_LIBRARY_NAMES,
+                                           limits, max_compounds)
+
+    def _build_pubchem_library(self, mode: str, names: List[str], limits: Dict,
+                               max_compounds: Optional[int]) -> List[str]:
+        limit = self.MAX_COMPOUNDS if max_compounds is None else max_compounds
+        downloaded: List[str] = []
+        rejected: List[Tuple[str, str]] = []
+        self.failed = []
+        for name in names:
+            if len(downloaded) >= limit:
+                logger.info(f"[*] Reached {limit} compounds, stopping download")
                 break
             cids = self._pubchem_cid_for_name(name)
             if not cids:
-                logger.debug(f"  No PubChem CID for {name}")
-                continue
-            pdbqt_file = self._prepare_pubchem_compound(
-                str(cids[0]), runner._safe_ligand_id(name), apply_admet)
-            if pdbqt_file:
-                downloaded.append(pdbqt_file)
-                logger.info(f"  [+] {name} (CID {cids[0]})")
-
-        if not downloaded:
-            logger.warning(
-                "No FDA compounds could be downloaded; falling back to local SDF")
-            return self.prepare_local(apply_admet=apply_admet)
-
-        self._save_metadata()
-        logger.info(
-            f"[✔] Downloaded and prepared {len(downloaded)} FDA compounds from PubChem")
-        return downloaded
-
-    def create_custom_library(self, mw_min: int = 200, mw_max: int = 500,
-                              logp_max: float = 5, apply_admet: bool = True) -> List[str]:
-        """Download a custom library filtered by molecular properties.
-
-        PubChem computed properties (MolecularWeight, XLogP) are used for
-        the MW/LogP filters instead of the dead ZINC query API.
-        """
-        logger.info(
-            f"[*] Custom library mode (MW: {mw_min}-{mw_max}, LogP: <={logp_max}) - PubChem")
-
-        downloaded = []
-        for name in self.FALLBACK_LIBRARY_NAMES:
-            if len(downloaded) >= self.MAX_COMPOUNDS:
-                logger.info(
-                    f"[*] Reached {self.MAX_COMPOUNDS} compounds, stopping download")
-                break
-            cids = self._pubchem_cid_for_name(name)
-            if not cids:
-                continue
-            cid = str(cids[0])
-            props = self._pubchem_properties(cid)
-            if props is None:
+                self._fail(name, "no PubChem CID found for this name")
                 continue
             try:
-                mw = props.get("MolecularWeight")
-                logp = props.get("XLogP")
-                if mw is None:
-                    continue
-                if not (mw_min <= float(mw) <= mw_max):
-                    logger.info(f"  [-] {name}: MW {mw} outside range; skipping")
-                    continue
-                if logp is not None and float(logp) > logp_max:
-                    logger.info(
-                        f"  [-] {name}: XLogP3 {logp} > {logp_max}; skipping")
-                    continue
-            except (TypeError, ValueError):
+                pdbqt = self._prepare_pubchem_compound(
+                    cids[0], runner._safe_ligand_id(name), limits, query=name)
+            except PubChemUnreachable:
+                raise
+            except FilterRejected as e:
+                rejected.append((name, str(e)))
+                logger.info(f"  [-] {name} (CID {cids[0]}) rejected: {e}")
                 continue
-            pdbqt_file = self._prepare_pubchem_compound(
-                cid, runner._safe_ligand_id(name), apply_admet)
-            if pdbqt_file:
-                downloaded.append(pdbqt_file)
-                logger.info(f"  [+] {name} (CID {cid})")
-
-        if not downloaded:
-            logger.warning(
-                "No matching compounds found; falling back to local SDF")
-            return self.prepare_local(apply_admet=apply_admet)
+            except (LigandRejected, RuntimeError, OSError, ValueError) as e:
+                self._fail(name, f"CID {cids[0]}: {e}")
+                continue
+            downloaded.append(pdbqt)
+            logger.info(f"  [+] {name} (CID {cids[0]})")
 
         self._save_metadata()
-        logger.info(
-            f"[✔] Downloaded and prepared {len(downloaded)} custom compounds from PubChem")
+        self._log_failures()
+        if not downloaded:
+            raise RuntimeError(
+                f"No compound of the --library {mode} list could be prepared from "
+                f"PubChem ({len(rejected)} rejected by the property filter, "
+                f"{len(self.failed)} failed; see the warnings above). Ligands in "
+                f"-l are not used in --library {mode} mode.")
+        logger.info(f"[*] Downloaded and prepared {len(downloaded)} {mode} "
+                    f"compounds from PubChem ({len(rejected)} rejected by the "
+                    "property filter)")
         return downloaded
 
-    MAX_NETWORK_FAILURES = 3
+    def _pubchem_fetch(self, url: str) -> bytes:
+        """GET a PubChem URL, counting consecutive network-level failures.
 
-    def _pubchem_cid_for_name(self, name: str) -> List[str]:
-        """Resolve a drug name to PubChem Compound IDs (CIDs)."""
-        url = (f"{self.pubchem_rest}/compound/name/"
-               f"{quote(name)}/cids/JSON")
+        After ``MAX_NETWORK_FAILURES`` in a row (connection errors, timeouts
+        or persistent HTTP 429/5xx) PubChemUnreachable is raised instead of
+        walking the whole list offline. Other errors (e.g. HTTP 404) are
+        re-raised for the caller without changing the count.
+        """
         try:
-            data = json.loads(runner._http_get_bytes(url).decode("utf-8"))
+            content = runner._http_get_bytes(url)
         except Exception as e:
-            logger.debug(f"PubChem name lookup failed for '{name}': {e}")
-            # An HTTP status (e.g. 404 for an unknown name, or 429/5xx when
-            # PubChem is busy) means PubChem answered; anything else is a
-            # network failure. Stop after a few in a row instead of walking
-            # the whole list offline.
-            if (net._http_status(e) is None
-                    and not isinstance(e, net._RetryableHTTPError)):
+            if net.is_network_failure(e):
                 self._network_failures += 1
                 if self._network_failures >= self.MAX_NETWORK_FAILURES:
-                    raise RuntimeError(
+                    raise PubChemUnreachable(
                         f"PubChem is unreachable ({self._network_failures} failed "
                         f"requests in a row; last error: {e}). Check the network "
-                        "connection or proxy, or supply ligands in ligs/") from e
-            return []
+                        "connection or proxy, or use --library local with "
+                        "ligand files in -l") from e
+            raise
         self._network_failures = 0
+        return content
+
+    def _pubchem_cid_for_name(self, name: str) -> List[str]:
+        """Resolve a drug name to PubChem Compound IDs (CIDs); [] if unknown."""
+        url = f"{self.pubchem_rest}/compound/name/{quote(name)}/cids/JSON"
+        try:
+            data = json.loads(self._pubchem_fetch(url).decode("utf-8"))
+        except PubChemUnreachable:
+            raise
+        except Exception as e:
+            logger.warning(f"  [!] PubChem name lookup failed for '{name}': {e}")
+            return []
         cids = ((data.get("IdentifierList") or {}).get("CID")) or []
         return [str(c) for c in cids]
 
-    def _pubchem_properties(self, cid: str) -> Optional[Dict]:
-        """Fetch computed MolecularWeight and XLogP for a CID."""
-        url = (f"{self.pubchem_rest}/compound/cid/{cid}/property/"
-               f"MolecularWeight,XLogP/JSON")
-        try:
-            data = json.loads(runner._http_get_bytes(url).decode("utf-8"))
-        except Exception as e:
-            logger.debug(f"PubChem property lookup failed for CID {cid}: {e}")
-            return None
-        try:
-            props = data["PropertyTable"]["Properties"][0]
-        except (KeyError, IndexError):
-            return None
-        return props
+    def _pubchem_download_sdf(self, cid: str, outpath: str) -> Dict[str, str]:
+        """Download the SDF of a CID to ``outpath``; return its provenance.
 
-    def _pubchem_download_sdf(self, cid: str, outpath: str) -> str:
-        """Download the 3D SDF for a CID to ``outpath``.
-
-        PubChem has no 3D conformer for some compounds (large or very
-        flexible ones); their 2D record is used instead and gets 3D
-        coordinates during preparation.
+        The 3D conformer record is preferred; PubChem has none for some
+        (large or very flexible) compounds, whose 2D record is used instead
+        and gets 3D coordinates during preparation.
         """
-        url = (f"{self.pubchem_rest}/compound/cid/{cid}/SDF"
-               f"?record_type=3d")
+        url = f"{self.pubchem_rest}/compound/cid/{cid}/SDF?record_type=3d"
+        record_type = "3d"
         try:
-            content = runner._http_get_bytes(url)
+            content = self._pubchem_fetch(url)
         except Exception as e:
             if net._http_status(e) != 404:
                 raise
             logger.info(f"  [*] CID {cid}: no 3D conformer in PubChem; using the 2D record")
-            content = runner._http_get_bytes(
-                f"{self.pubchem_rest}/compound/cid/{cid}/SDF")
+            url = f"{self.pubchem_rest}/compound/cid/{cid}/SDF"
+            record_type = "2d"
+            content = self._pubchem_fetch(url)
+        retrieved_at = _utc_now()
         with open(outpath, "wb") as f:
             f.write(content)
-        return outpath
+        return {"download_url": url, "pubchem_record_type": record_type,
+                "retrieved_at": retrieved_at}
 
-    def _prepare_pubchem_compound(self, cid: str, name: str,
-                                  apply_admet: bool) -> Optional[str]:
-        """Download a PubChem SDF, apply ADMET and convert to PDBQT."""
+    def _prepare_pubchem_compound(self, cid: str, name: str, limits: Dict,
+                                  query: Optional[str] = None) -> str:
+        """Download a PubChem SDF, apply the property filter, convert to PDBQT.
+
+        Raises FilterRejected when the filter rejects the compound, and
+        LigandRejected/RuntimeError/OSError when it cannot be downloaded or
+        prepared.
+        """
         ligand_id = f"{name}_{cid}"
         sdf_file = os.path.join(self.lib_dir, f"{ligand_id}.sdf")
         pdbqt_file = os.path.join(self.lib_dir, f"{ligand_id}.pdbqt")
-
         try:
-            self._pubchem_download_sdf(cid, sdf_file)
+            provenance = self._pubchem_download_sdf(cid, sdf_file)
+        except PubChemUnreachable:
+            raise
         except Exception as e:
-            logger.info(f"  [-] {ligand_id}: PubChem SDF download failed ({e})")
-            return None
+            raise RuntimeError(f"PubChem SDF download failed ({e})") from e
 
-        if apply_admet:
+        props = None
+        if limits:
             props = runner.ADMETFilter.parse_sdf_properties(sdf_file)
-            passes, violations = runner.ADMETFilter.check_lipinski(props)
+            passes, violations = runner.ADMETFilter.check_lipinski(props, **limits)
             if not passes:
-                logger.info(
-                    f"  [-] Skipped {ligand_id} (Lipinski): {', '.join(violations)}")
                 try:
                     os.remove(sdf_file)
                 except OSError:
                     pass
-                return None
+                raise FilterRejected("property filter: " + ", ".join(violations))
 
-        try:
-            pdbqt_file = self._prepare_sdf_to_pdbqt(
-                sdf_file, pdbqt_file, ligand_id)
-        except Exception as e:
-            logger.debug(f"PDBQT preparation failed for {ligand_id}: {e}")
-            return None
-
-        self.metadata.setdefault(ligand_id, {})["source_url"] = (
-            f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}")
+        self._prepare_sdf_to_pdbqt(sdf_file, pdbqt_file, ligand_id, props=props)
+        self.metadata[ligand_id].update({
+            "source": "pubchem",
+            "pubchem_query": query or name,
+            "pubchem_cid": cid,
+            # The first CID PubChem returned for the name; records can
+            # change over time, so the retrieval time is recorded too.
+            "source_url": f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}",
+            **provenance,
+        })
         return pdbqt_file
 
     def _save_metadata(self):
         try:
             with open(self.metadata_file, "w") as f:
-                json.dump(self.metadata, f, indent=2)
-            logger.info(f"[✔] Ligand metadata saved: {self.metadata_file}")
+                json.dump(self.metadata, f, indent=2, sort_keys=True)
+            logger.info(f"[*] Ligand metadata saved: {self.metadata_file}")
         except IOError as e:
             logger.warning(f"Could not save ligand metadata: {e}")
 
-    def _prepare_sdf_to_pdbqt(self, sdf_file: str, pdbqt_file: str, ligand_id: str) -> str:
-        """Optionally minimize an SDF with MMFF94, then convert to PDBQT."""
-        source_for_conversion = sdf_file
-        minimized_file = os.path.join(self.minimized_dir, f"{ligand_id}.sdf")
+    def _fail(self, name: str, reason: str) -> None:
+        self.failed.append((name, reason))
+        logger.warning(f"  [!] {name}: {reason}")
 
-        # Parse properties to get real data
-        props = runner.ADMETFilter.parse_sdf_properties(sdf_file)
+    def _log_failures(self) -> None:
+        if self.failed:
+            logger.warning(f"[!] {len(self.failed)} ligand(s) could not be prepared:")
+            for name, reason in self.failed:
+                logger.warning(f"   - {name}: {reason}")
+
+    # ------------------------------------------------------------------
+    # Conversion
+    # ------------------------------------------------------------------
+
+    def _convert_to_pdbqt(self, fmt: str, src: str, out: str,
+                          extra_args: Tuple[str, ...] = ()) -> str:
+        """Convert ``src`` (format ``fmt``) to a ligand PDBQT with Open Babel.
+
+        A missing or empty output raises RuntimeError (and is removed). If
+        every atom of the result carries a zero charge the charges are
+        rebuilt from ``src``, which must therefore be a 3D structure.
+        """
+        if os.path.exists(out):
+            os.remove(out)
+        runner.run_obabel([f"-i{fmt}", src, "-opdbqt", "-O", out, *extra_args],
+                          outputs=[out])
+        if not os.path.exists(out) or os.path.getsize(out) == 0:
+            if os.path.exists(out):
+                os.remove(out)
+            raise RuntimeError("Open Babel produced an empty PDBQT")
+        if not runner._ensure_pdbqt_has_charges(out):
+            runner._fix_pdbqt_charges(out, src)
+        return out
+
+    def _prepare_sdf_to_pdbqt(self, sdf_file: str, pdbqt_file: str, ligand_id: str,
+                              props: Optional[Dict] = None) -> str:
+        """Prepare an SDF ligand: 3D coordinates, optional MMFF94, PDBQT.
+
+        * A 2D input (every z = 0) gets 3D coordinates from ``--gen3d``
+          (together with the minimization, or as a separate step when
+          minimization is off or fails); the planar input is never converted
+          or used as a charge source, and a result that is still planar is
+          rejected.
+        * MMFF94 minimization (``--minimize --ff MMFF94``) runs when enabled;
+          a failure is logged as a warning and recorded in the metadata.
+        * The PDBQT gets hydrogens (``-h``) and Gasteiger charges.
+
+        ``props`` are the descriptors if the caller already computed them.
+        """
         if props is None:
-            props = {}
+            props = runner.ADMETFilter.parse_sdf_properties(sdf_file) or {}
+        input_is_2d = not _sdf_has_3d_coords(sdf_file)
+        source = sdf_file
+        coordinates = "input"
+        minimized = False
+        minimization_error = None
 
-        # --gen3d rebuilds coordinates with a random conformer search, so
-        # use it only when the input has no 3D coordinates.
-        needs_3d = not _sdf_has_3d_coords(sdf_file)
         if self.minimize:
-            # Open Babel's force field is multithreaded (OpenMP) and its
-            # summation order varies between runs; one thread makes
-            # minimization repeatable.
-            cmd = [runner.OBABEL, "-isdf", sdf_file, "-osdf", "-O", minimized_file]
-            if needs_3d:
+            minimized_file = os.path.join(self.minimized_dir, f"{ligand_id}.sdf")
+            cmd = ["-isdf", sdf_file, "-osdf", "-O", minimized_file]
+            if input_is_2d:
                 cmd.append("--gen3d")
             cmd += ["--minimize", "--ff", "MMFF94", "--steps", str(self.minimize_steps)]
             try:
                 if os.path.exists(minimized_file):
                     os.remove(minimized_file)
-                runner.run(cmd, extra_env={"OMP_NUM_THREADS": "1"})
+                runner.run_obabel(cmd, outputs=[minimized_file])
                 # Open Babel exits 0 even when MMFF94 cannot be set up (e.g.
                 # boron compounds) and then writes nothing, so check the file.
                 if not _sdf_is_usable(minimized_file):
                     raise RuntimeError("Open Babel wrote no minimized molecule "
                                        "(MMFF94 setup failed?)")
-                source_for_conversion = minimized_file
-                needs_3d = False
-            except Exception as e:
-                logger.warning(
-                    f"MMFF94 minimization failed for {ligand_id}: {e}. Converting original SDF.")
+                source = minimized_file
+                minimized = True
+                if input_is_2d:
+                    coordinates = "gen3d"
+            except (RuntimeError, OSError) as e:
+                minimization_error = str(e)
+                if os.path.exists(minimized_file):
+                    os.remove(minimized_file)
+                logger.warning(f"[!] {ligand_id}: MMFF94 minimization failed ({e}); "
+                               "continuing with the unminimized structure")
 
-        # Convert to PDBQT. -h adds hydrogens (the PDBQT writer keeps the
-        # polar ones, which Vina needs for hydrogen-bond donors); a 2D input
-        # that was not minimized still needs 3D coordinates.
-        convert = [runner.OBABEL, "-isdf", source_for_conversion, "-opdbqt",
-                   "-O", pdbqt_file, "-h"]
-        if needs_3d:
-            convert.append("--gen3d")
+        if input_is_2d and coordinates != "gen3d":
+            gen3d_file = os.path.join(self.minimized_dir, f"{ligand_id}_gen3d.sdf")
             logger.warning(f"[!] {ligand_id}: input has no 3D coordinates; "
-                           "generating a conformer with --gen3d (not seeded, so "
-                           "repeated preparations can differ)")
-        try:
-            runner.run(convert)
-        except Exception as e:
-            logger.error(f"Failed to convert {ligand_id} to PDBQT: {e}")
-            # Create empty file to mark failure
-            with open(pdbqt_file, 'w') as f:
-                f.write(f"# Error converting {ligand_id}: {e}\n")
-            raise
+                           "generating a conformer with --gen3d (Open Babel's "
+                           "conformer search is not seeded by AutoDocker)")
+            runner.run_obabel(["-isdf", sdf_file, "-osdf", "-O", gen3d_file, "--gen3d"],
+                              outputs=[gen3d_file])
+            if not _sdf_has_3d_coords(gen3d_file):
+                raise LigandRejected("--gen3d produced no 3D coordinates for a 2D input")
+            source = gen3d_file
+            coordinates = "gen3d"
 
-        # Verify output file was created and has content
-        if not os.path.exists(pdbqt_file) or os.path.getsize(pdbqt_file) == 0:
-            logger.error(
-                f"PDBQT conversion failed for {ligand_id} - output file is empty")
-            raise ValueError(
-                f"PDBQT file is empty after conversion for {ligand_id}")
+        # Gasteiger charges are requested here: Open Babel's SDF reader marks
+        # charges as known, so the PDBQT writer would otherwise write 0.000
+        # everywhere (and the charge rebuild from the source would follow).
+        self._convert_to_pdbqt("sdf", source, pdbqt_file,
+                               ("-h", "--partialcharge", "gasteiger"))
+        if input_is_2d:
+            axis = _flat_axis(pdbqt_file)
+            if axis:
+                os.remove(pdbqt_file)
+                raise LigandRejected(
+                    f"prepared ligand is planar (no extent along {axis}) although "
+                    "the 2D input should have received 3D coordinates; refusing "
+                    "to dock a flat structure")
 
-        # Verify charges were computed
-        if not runner._ensure_pdbqt_has_charges(pdbqt_file):
-            logger.debug(
-                f"[*] Ligand {ligand_id} PDBQT has no charges - computing Gasteiger...")
-            runner._fix_pdbqt_charges(pdbqt_file, source_for_conversion)
-
-        # Store metadata with real values from properties
         self.metadata[ligand_id] = {
             "source_sdf": os.path.abspath(sdf_file),
-            "prepared_sdf": os.path.abspath(source_for_conversion),
+            "prepared_sdf": os.path.abspath(source),
             "pdbqt": os.path.abspath(pdbqt_file),
-            "mw": props.get("mw", 0),
-            "logp": props.get("logp", 0),
-            "tpsa": props.get("tpsa", 0),
-            "rotors": props.get("rotors", 0),
-            "hbd": props.get("hbd", 0),
-            "hba": props.get("hba", 0),
+            "input_format": "sdf",
+            "coordinates": coordinates,
+            "mw": props.get("mw"),
+            "logp": props.get("logp"),
+            "tpsa": props.get("tpsa"),
+            "rotors": props.get("rotors"),
+            "hbd": props.get("hbd"),
+            "hba": props.get("hba"),
+            "logp_model": props.get("logp_model"),
             "source_url": "",
-            "minimized": self.minimize and source_for_conversion == minimized_file,
-            "properties_source": "obabel_descriptors" if props else "default",
+            "minimized": minimized,
+            "minimization_error": minimization_error,
+            "properties_source": props.get("properties_source") or "unavailable",
         }
-
         return pdbqt_file
 
-    def prepare_local(self, apply_admet: bool = True) -> List[str]:
-        """Convert local SDF/PDBQT/MOL2/PDB files to ready docking inputs.
+    def _prepare_pdb_to_pdbqt(self, src: str, out: str) -> str:
+        """PDB ligand -> PDBQT with hydrogens added BEFORE Gasteiger charges.
 
-        Public API (formerly the private ``_prepare_local_sdf``).
+        In one ``obabel -h --partialcharge gasteiger`` call Open Babel
+        computes the charges first, so the added polar hydrogens kept 0.000.
+        Writing the protonated molecule to a temporary PDB first gives every
+        atom its charge; coordinates, atom types and the torsion tree are
+        unchanged, and ``--title`` keeps the original name record.
         """
+        with tempfile.TemporaryDirectory(prefix="autodocker_") as tmp:
+            protonated = os.path.join(tmp, "protonated.pdb")
+            runner.run_obabel(["-ipdb", src, "-opdb", "-O", protonated, "-h"],
+                              outputs=[protonated])
+            return self._convert_to_pdbqt(
+                "pdb", protonated, out, ("--partialcharge", "gasteiger", "--title", src))
 
+    # ------------------------------------------------------------------
+    # Local ligands
+    # ------------------------------------------------------------------
+
+    def _collect_local_files(self) -> List[Tuple[str, str]]:
+        """(format, path) of every ligand file of ``-l``, grouped by format
+        in FORMAT_PRECEDENCE order and sorted within each format."""
         ligands_input = self.ligands_input_dir
+        if not ligands_input or not os.path.exists(ligands_input):
+            raise FileNotFoundError(f"Ligands directory not found: {ligands_input}")
 
-        if not os.path.exists(ligands_input):
-            raise FileNotFoundError(
-                f"Ligands directory not found: {ligands_input}"
-            )
+        by_format: Dict[str, List[str]] = {fmt: [] for fmt in FORMAT_PRECEDENCE}
 
-        # -----------------------------
-        # STEP 1: COLLECT FILES
-        # -----------------------------
-        sdf_files = []
-        pdbqt_files = []
-        mol2_files = []
-        pdb_files = []
+        def add(path: str) -> None:
+            fmt = os.path.splitext(path)[1].lower().lstrip(".")
+            if fmt in by_format:
+                by_format[fmt].append(path)
 
         if os.path.isfile(ligands_input):
-            lname = ligands_input.lower()
-            if lname.endswith(".sdf"):
-                sdf_files = [ligands_input]
-            elif lname.endswith(".pdbqt"):
-                pdbqt_files = [ligands_input]
-            elif lname.endswith(".mol2"):
-                mol2_files = [ligands_input]
-            elif lname.endswith(".pdb"):
-                pdb_files = [ligands_input]
+            add(ligands_input)
+        elif os.path.realpath(ligands_input) == os.path.realpath(self.outdir):
+            raise ValueError(
+                f"The output directory ({self.outdir}) is the ligand directory; "
+                "choose a different -o (outputs would be read back as ligands)")
         else:
+            # Never prepare this run's own outputs (an -o inside -l would
+            # otherwise feed ligands/*.pdbqt and docked/*.pdbqt back in).
+            out_real = os.path.realpath(self.outdir)
+            skipped_outdir = False
             for root, dirs, files in os.walk(ligands_input):
-                dirs.sort()
+                kept = []
+                for d in sorted(dirs):
+                    if os.path.realpath(os.path.join(root, d)) == out_real:
+                        skipped_outdir = True
+                    else:
+                        kept.append(d)
+                dirs[:] = kept
                 for f in sorted(files):
-                    path = os.path.join(root, f)
+                    add(os.path.join(root, f))
+            if skipped_outdir:
+                logger.warning(
+                    f"[!] The output directory {self.outdir} is inside the ligand "
+                    f"directory {ligands_input}; its contents are not used as ligands")
+        return [(fmt, path) for fmt in FORMAT_PRECEDENCE for path in by_format[fmt]]
 
-                    if f.lower().endswith(".sdf"):
-                        sdf_files.append(path)
-                    elif f.lower().endswith(".pdbqt"):
-                        pdbqt_files.append(path)
-                    elif f.lower().endswith(".mol2"):
-                        mol2_files.append(path)
-                    elif f.lower().endswith(".pdb"):
-                        pdb_files.append(path)
+    def _prepare_local_file(self, fmt: str, path: str, apply_lipinski: bool) -> str:
+        """Prepare one local ligand file; return the PDBQT to dock.
 
-        # -----------------------------
-        # STEP 2: DECIDE MODE
-        # -----------------------------
-        # Diagnostic: log what we found to help debug empty-result cases
-        logger.info(
-            f"[DEBUG] Local ligands found - SDF: {len(sdf_files)}, PDBQT: {len(pdbqt_files)}, MOL2: {len(mol2_files)}, PDB: {len(pdb_files)}")
-        sample = (sdf_files or pdbqt_files or mol2_files or pdb_files)[:5]
-        if sample:
-            logger.info(
-                f"[DEBUG] Sample files: {', '.join([os.path.basename(s) for s in sample])}")
-        # Every format in the folder is prepared (each file by its own
-        # extension); previously only the first format found was used and the
-        # rest were skipped silently.
-        ligands = ([("sdf", f) for f in sdf_files]
-                   + [("pdbqt", f) for f in pdbqt_files]
-                   + [("mol2", f) for f in mol2_files]
-                   + [("pdb", f) for f in pdb_files])
+        Raises LigandRejected (or RuntimeError/OSError from the conversion)
+        with the reason when the file cannot be used.
+        """
+        name = Path(path).stem
+        out = os.path.join(self.lib_dir, f"{name}.pdbqt")
+
+        if fmt in ("sdf", "mol2"):
+            n_mols = _count_molecules(path, fmt)
+            if n_mols > 1:
+                raise LigandRejected(
+                    f"File holds {n_mols} molecules; Vina docks one per file (split "
+                    f"it, e.g. obabel {Path(path).name} -O {name}_.{fmt} -m)")
+
+        if fmt == "sdf":
+            props = None
+            if apply_lipinski:
+                props = runner.ADMETFilter.parse_sdf_properties(path)
+                if props is None:
+                    raise LigandRejected("Invalid SDF or incomplete descriptors")
+                ok, violations = runner.ADMETFilter.check_lipinski(props)
+                if not ok:
+                    raise LigandRejected("Lipinski: " + ", ".join(violations))
+            return self._prepare_sdf_to_pdbqt(path, out, name, props=props)
+
+        if fmt == "pdbqt":
+            problem = _ligand_pdbqt_problem(path)
+            if problem:
+                raise LigandRejected(problem)
+            out = path
+        elif fmt == "mol2":
+            self._convert_to_pdbqt("mol2", path, out, ("-h",))
+        else:  # pdb
+            self._prepare_pdb_to_pdbqt(path, out)
+
+        self.metadata[name] = {
+            "source_file": os.path.abspath(path),
+            "input_format": fmt,
+            "pdbqt": os.path.abspath(out),
+            "coordinates": "input",
+            "mw": None, "logp": None, "tpsa": None, "rotors": None,
+            "hbd": None, "hba": None, "logp_model": None,
+            "source_url": "",
+            "minimized": False,
+            "minimization_error": None,
+            "properties_source": "unavailable",
+        }
+        return out
+
+    def prepare_local(self, apply_lipinski: bool = True, *,
+                      apply_admet: Optional[bool] = None) -> List[str]:
+        """Prepare the local SDF/PDBQT/MOL2/PDB ligands of ``-l`` for docking.
+
+        Files sharing a name (stem) are resolved by FORMAT_PRECEDENCE on
+        first sight: the highest-precedence file is used (even if it then
+        fails) and the others are reported as superseded, not as failures
+        and not in the success count. The Lipinski filter and MMFF94
+        minimization apply to SDF inputs only. ``apply_admet`` is a
+        deprecated alias of ``apply_lipinski``.
+        """
+        if apply_admet is not None:
+            apply_lipinski = apply_admet
+        ligands = self._collect_local_files()
         if not ligands:
-            raise FileNotFoundError(
-                "No ligands found (.sdf/.pdbqt/.mol2/.pdb)")
-        found = [(n, len(fs)) for n, fs in (("SDF", sdf_files), ("PDBQT", pdbqt_files),
-                                            ("MOL2", mol2_files), ("PDB", pdb_files)) if fs]
-        logger.info("[*] Ligand formats detected: " +
-                    ", ".join(f"{n} {k}" for n, k in found))
-        if len(found) > 1:
-            logger.info("[*] Mixed-format ligand folder: all formats will be prepared")
+            raise FileNotFoundError("No ligands found (.sdf/.pdbqt/.mol2/.pdb)")
 
-        # -----------------------------
-        # STEP 3: PROCESS
-        # -----------------------------
-        admet = runner.ADMETFilter()
-        out_files = []
-        failed_ligands = []
-
-        logger.info(f"[*] Preparing {len(ligands)} ligands...")
-
-        if apply_admet and any(mode != "sdf" for mode, _ in ligands):
+        counts = {fmt: sum(1 for f, _ in ligands if f == fmt) for fmt in FORMAT_PRECEDENCE}
+        logger.info("[*] Ligand formats detected: " + ", ".join(
+            f"{_FORMAT_LABEL[fmt]} {n}" for fmt, n in counts.items() if n))
+        logger.debug("Sample ligand files: " + ", ".join(
+            os.path.basename(p) for _, p in ligands[:5]))
+        non_sdf = any(fmt != "sdf" for fmt, _ in ligands)
+        if apply_lipinski and non_sdf:
             logger.info("[*] The Lipinski filter applies to SDF inputs only; "
                         "PDBQT, MOL2 and PDB ligands are docked unfiltered")
+        if self.minimize and non_sdf:
+            logger.info("[*] MMFF94 minimization applies to SDF inputs only; "
+                        "PDBQT, MOL2 and PDB ligands keep their input coordinates")
 
-        seen_names = {}
-        for mode, lig in ligands:
-            stem = Path(lig).stem
-            if stem in seen_names:
-                failed_ligands.append(
-                    (lig, f"Duplicate ligand name '{stem}' (already taken by {Path(seen_names[stem]).name})"))
+        self.failed = []
+        self.superseded = []
+        out_files: List[str] = []
+        owners: Dict[str, Tuple[str, str]] = {}  # stem -> (format, path)
+        for fmt, path in ligands:
+            stem = Path(path).stem
+            if stem in owners:
+                owner_fmt, owner = owners[stem]
+                if owner_fmt == fmt:
+                    self.failed.append((path, f"Duplicate ligand name '{stem}' "
+                                              f"(already taken by {owner})"))
+                else:
+                    self.superseded.append((path, owner))
                 continue
-            n_before = len(out_files)
-
-            if mode in ("sdf", "mol2"):
-                n_mols = _count_molecules(lig, mode)
-                if n_mols > 1:
-                    reason = (f"File holds {n_mols} molecules; Vina docks one per "
-                              f"file (split it, e.g. obabel {Path(lig).name} -O "
-                              f"{stem}_.{mode} -m)")
-                    failed_ligands.append((lig, reason))
-                    logger.error(f"  [✗] {Path(lig).name}: {reason}")
-                    continue
-
+            owners[stem] = (fmt, path)
             try:
-                # -------------------------
-                # CASE A: SDF pipeline
-                # -------------------------
-                if mode == "sdf":
-                    inp = lig
-                    name = Path(lig).stem
-                    out = os.path.join(self.lib_dir, f"{name}.pdbqt")
+                out_files.append(self._prepare_local_file(fmt, path, apply_lipinski))
+            except (LigandRejected, RuntimeError, OSError, ValueError) as e:
+                self.failed.append((path, str(e)))
+                logger.error(f"  [x] {Path(path).name}: {e}")
+                continue
+            logger.info(f"  [ok] {stem} ({_FORMAT_LABEL[fmt]})")
 
-                    if apply_admet:
-                        props = admet.parse_sdf_properties(inp)
-                        if props is None:
-                            failed_ligands.append(
-                                (lig, "Invalid SDF properties"))
-                            continue
-
-                        ok, violations = admet.check_lipinski(props)
-                        if not ok:
-                            failed_ligands.append(
-                                (lig, f"ADMET: {violations}"))
-                            continue
-
-                    self._prepare_sdf_to_pdbqt(inp, out, name)
-                    out_files.append(out)
-
-                    logger.info(f"  [✓] {name} (SDF) → PDBQT")
-
-                # -------------------------
-                # CASE B: PDBQT direct
-                # -------------------------
-                elif mode == "pdbqt":
-                    problem = _ligand_pdbqt_problem(lig)
-                    if problem:
-                        failed_ligands.append((lig, problem))
-                        logger.error(f"  [✗] {Path(lig).name}: {problem}")
-                        continue
-                    out_files.append(lig)
-                    logger.info(f"  [✓] {Path(lig).stem} (PDBQT direct)")
-
-                # -------------------------
-                # CASE C: MOL2 -> convert to PDBQT
-                # -------------------------
-                elif mode == "mol2":
-                    inp = lig
-                    name = Path(lig).stem
-                    out = os.path.join(self.lib_dir, f"{name}.pdbqt")
-                    try:
-                        runner.run([runner.OBABEL, "-imol2", inp, "-opdbqt", "-O", out, "-h"])
-                        if not os.path.exists(out) or os.path.getsize(out) == 0:
-                            raise RuntimeError(
-                                "Conversion produced empty file")
-                        if not runner._ensure_pdbqt_has_charges(out):
-                            runner._fix_pdbqt_charges(out, inp)
-                        out_files.append(out)
-                        logger.info(f"  [✓] {name} (MOL2 -> PDBQT)")
-                    except Exception as e:
-                        failed_ligands.append((lig, f"Conversion failed: {e}"))
-                        logger.error(f"  [✗] {lig}: {e}")
-
-                # -------------------------
-                # CASE D: PDB -> convert to PDBQT
-                # -------------------------
-                elif mode == "pdb":
-                    inp = lig
-                    name = Path(lig).stem
-                    out = os.path.join(self.lib_dir, f"{name}.pdbqt")
-                    try:
-                        # PDB input carries no partial charges; assign Gasteiger directly.
-                        runner.run([runner.OBABEL, "-ipdb", inp, "-opdbqt", "-O", out, "-h",
-                                    "--partialcharge", "gasteiger"])
-                        if not os.path.exists(out) or os.path.getsize(out) == 0:
-                            raise RuntimeError(
-                                "Conversion produced empty file")
-                        if not runner._ensure_pdbqt_has_charges(out):
-                            runner._fix_pdbqt_charges(out, inp)
-                        out_files.append(out)
-                        logger.info(f"  [✓] {name} (PDB -> PDBQT)")
-                    except Exception as e:
-                        failed_ligands.append((lig, f"Conversion failed: {e}"))
-                        logger.error(f"  [✗] {lig}: {e}")
-
-            except Exception as e:
-                failed_ligands.append((lig, str(e)))
-                logger.error(f"  [✗] {lig}: {e}")
-
-            # Reserve the name only for a ligand that was actually prepared, so
-            # a file that fails (e.g. lig.sdf rejected by ADMET) does not block
-            # a usable file with the same stem (lig.pdbqt).
-            if len(out_files) > n_before:
-                seen_names[stem] = lig
-
-        # -----------------------------
-        # STEP 4: FINAL REPORT
-        # -----------------------------
         self._save_metadata()
-
-        logger.info(
-            f"[✔] Success: {len(out_files)}/{len(ligands)} ligands ready"
-        )
-
-        if failed_ligands:
-            logger.warning(f"[!] Skipped {len(failed_ligands)} ligands:")
-            for lig, reason in failed_ligands:
-                logger.warning(f"   - {Path(lig).name}: {reason}")
-
+        candidates = len(ligands) - len(self.superseded)
+        logger.info(f"[*] Success: {len(out_files)}/{candidates} ligands ready")
+        if self.superseded:
+            logger.warning(
+                f"[!] {len(self.superseded)} file(s) superseded by a same-name file "
+                "of higher precedence (SDF > PDBQT > MOL2 > PDB) and not used:")
+            for path, owner in self.superseded:
+                logger.info(f"   - {Path(path).name}: superseded (same name as "
+                            f"{Path(owner).name})")
+        if self.failed:
+            logger.warning(f"[!] Skipped {len(self.failed)} ligands:")
+            for path, reason in self.failed:
+                logger.warning(f"   - {Path(path).name}: {reason}")
         if not out_files:
             raise RuntimeError("No valid ligands prepared")
-
         return out_files
-
-    # Backward-compatible alias (deprecated): the former private name.
-    _prepare_local_sdf = prepare_local

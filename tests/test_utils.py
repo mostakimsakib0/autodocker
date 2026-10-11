@@ -92,3 +92,67 @@ def test_parse_chain_selection_valid():
 def test_parse_chain_selection_invalid():
     with pytest.raises(ValueError):
         u._parse_chain_selection("Z", ["A", "B"])
+
+
+def test_get_chains_unreadable_file_raises(tmp_path):
+    with pytest.raises(OSError):
+        u.get_chains(str(tmp_path / "missing.pdb"))
+
+
+def test_get_chains_blank_chain_defaults_to_A(tmp_path):
+    p = tmp_path / "c.pdb"
+    _pdb(p, ["ATOM      1  N   ALA     1      0.0 0.0 0.0"])
+    assert u.get_chains(str(p)) == [u.DEFAULT_CHAIN] == ["A"]
+
+
+def test_get_chains_is_case_sensitive(tmp_path):
+    p = tmp_path / "c.pdb"
+    _pdb(p, [
+        "ATOM      1  N   ALA A   1      0.0 0.0 0.0",
+        "ATOM      2  N   ALA a   1      0.0 0.0 0.0",
+    ])
+    assert u.get_chains(str(p)) == ["A", "a"]
+    assert u._parse_chain_selection("a", ["A", "a"]) == ["a"]
+
+
+def test_parse_chain_selection_is_exact_with_hint():
+    with pytest.raises(ValueError, match="case-sensitive; did you mean 'b' -> 'B'"):
+        u._parse_chain_selection("b", ["A", "B"])
+
+
+def test_run_obabel_sets_single_thread_env_and_logs(monkeypatch, caplog):
+    import logging
+    calls = []
+
+    def fake_run(cmd, capture=False, extra_env=None):
+        calls.append((cmd, capture, extra_env))
+        return "out", "1 molecule converted", 0
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    with caplog.at_level(logging.DEBUG, logger="vspipeline.utils"):
+        assert u.run_obabel(["-:C C", "-osmi"]) == "out"
+    cmd, capture, env = calls[0]
+    assert cmd[0] == runner.OBABEL and capture is True
+    assert env == {"OMP_NUM_THREADS": "1"}
+    assert "OMP_NUM_THREADS=1" in caplog.text and "'-:C C'" in caplog.text
+
+
+def test_run_obabel_removes_outputs_on_failure(monkeypatch, tmp_path):
+    import subprocess
+    out = tmp_path / "x.pdbqt"
+
+    def fake_run(cmd, capture=False, extra_env=None):
+        out.write_text("partial")
+        raise subprocess.TimeoutExpired(cmd, 1)
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    with pytest.raises(RuntimeError, match="timed out"):
+        u.run_obabel(["-O", str(out)], outputs=[str(out)])
+    assert not out.exists()
+
+
+def test_run_obabel_real_failure_message(tmp_path):
+    if runner.OBABEL is None:
+        pytest.skip("obabel not installed")
+    with pytest.raises(RuntimeError, match="obabel exited with code"):
+        u.run_obabel(["-:C", "-onotaformat"])

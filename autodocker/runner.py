@@ -1,53 +1,57 @@
 #!/usr/bin/env python3
-"""
-Virtual Screening Pipeline
+"""AutoDocker: structure-based virtual screening with AutoDock Vina.
 
-PHASE 1: Advanced Result Analysis
-  - HTML professional reports with charts
-  - Pose clustering (RMSD-based)
-  - Pose diversity analysis
-  - Binding mode statistics
+The pipeline runs five stages:
 
-PHASE 2: Smart Preprocessing
-  - Water molecule handling (keep strategic waters)
-  - Metal ion detection
-  - Cofactor handling
-  - Receptor protonation at a chosen pH (Open Babel -p)
+  1. Ligand library preparation: local SDF/MOL2/PDB/PDBQT files, or a fixed
+     list of approved drugs downloaded from PubChem; optional Lipinski
+     rule-of-five filter and MMFF94 minimization (SDF inputs), conversion to
+     PDBQT with Gasteiger charges (Open Babel).
+  2. Receptor preparation: chain selection, cleaning, hydrogens at a chosen
+     pH, PDBQT conversion, and a docking box from fpocket pockets, the
+     receptor centroid or explicit coordinates. Optionally keeps waters near
+     the site, metal ions and cofactors, and builds flexible side chains.
+  3. Docking with Vina (or SMINA with --smina-only), seeded and resumable;
+     optional re-docking with SMINA for a consensus ranking.
+  4. Analysis: pose-consistency metrics, optional RMSD clustering of poses.
+  5. Outputs: ranking.csv, text reports, an HTML report and
+     run_manifest.json (versions, settings and checksums of the tools used).
 
-PHASE 3: Flexible Receptor Docking
-  - Select rotatable residues in binding site
-  - Flexible side-chain docking
-  - Side-chain torsions follow AutoDock's per-residue rotatable bonds
-
-PHASE 4: Consensus Scoring
-  - Multi-engine docking (Vina + SMINA)
-  - Consensus ranking
-  - Score agreement analysis
-
-Original Features:
-  - PubChem library download (FDA & custom libraries)
-  - SimScore calculation (RMSD-based pose consistency)
-  - ADMET filtering (Lipinski's rule of five)
-  - Advanced Vina parameters
-
-Workflow:
-  1. Library preparation (PubChem download with ADMET filtering)
-  2. Protein preparation (chain selection + fpocket)
-  3. Smart preprocessing (optional: water/metal/cofactor)
-  4. Docking (flexible or rigid, single or multi-engine)
-  5. Advanced results analysis (HTML reports + clustering)
+Run ``runner.py --help`` for the options.
 """
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import os
+import platform
+import re
 import shutil
+import subprocess
 import sys
-from multiprocessing import cpu_count as mp_cpu_count
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
-__version__ = "1.1.5"
+_FALLBACK_VERSION = "1.1.5"
+
+
+def _read_version(base_dir: Optional[str] = None) -> str:
+    """Version string: autodocker/VERSION if present, else $AUTODOCKER_VERSION,
+    else the version this file was released with."""
+    base_dir = base_dir or os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base_dir, "VERSION")
+    try:
+        with open(path) as f:
+            version = f.read().strip()
+        if version:
+            return version
+    except OSError:
+        pass
+    return os.environ.get("AUTODOCKER_VERSION", "").strip() or _FALLBACK_VERSION
+
+
+__version__ = _read_version()
 
 # When executed as a script (__name__ == "__main__"), alias this module as
 # "runner" so the vspipeline submodules' ``import runner`` binds THIS running
@@ -60,6 +64,27 @@ logging.basicConfig(
     format='[%(levelname)s] %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Exit codes.
+EXIT_OK = 0
+EXIT_FAILURE = 1            # the pipeline failed
+EXIT_USAGE = 2              # invalid options/environment or missing tools
+EXIT_TOO_MANY_FAILURES = 3  # outputs written, but too many ligands failed to dock
+EXIT_INTERRUPTED = 130      # Ctrl-C (128 + SIGINT)
+
+DEFAULT_SEED = 42
+DEFAULT_COMMAND_TIMEOUT = 900  # seconds
+# Residues within this distance (Angstrom) of the box center are candidates
+# for --auto-flexible.
+AUTO_FLEX_RADIUS = 8.0
+# Box edge lengths (Angstrom) outside this range get a warning.
+TYPICAL_GRID_SIZE_RANGE = (15.0, 40.0)
+# Timeout (seconds) for the "--version" probes of the external tools.
+VERSION_PROBE_TIMEOUT = 30
+
+
+class ConfigError(ValueError):
+    """Invalid option or environment value (reported without a traceback)."""
 
 
 def find_tool(*names: str) -> Optional[str]:
@@ -78,59 +103,78 @@ def find_tool(*names: str) -> Optional[str]:
 def default_seed() -> int:
     """Seed used when --seed is not given: $VS_SEED if set, else 42.
 
-    Reading the environment here (instead of only in dock_all) keeps the
-    documented VS_SEED knob working: the parsed --seed is always passed down,
-    so a hardcoded argparse default would otherwise override it.
+    Raises ConfigError for a non-integer $VS_SEED. It is evaluated after
+    argument parsing, so a bad value never breaks --help or --version.
     """
     value = os.environ.get("VS_SEED", "").strip()
     if not value:
-        return 42
+        return DEFAULT_SEED
     try:
         return int(value)
     except ValueError:
-        raise SystemExit(f"[!] VS_SEED must be an integer, got {value!r}")
+        raise ConfigError(f"VS_SEED must be an integer, got {value!r}") from None
 
 
-# Tool paths (prefer modern Vina for consistency)
+# Problems with environment variables read at import time; reported by
+# main() after argument parsing (so --version still works).
+_ENV_ERRORS: List[str] = []
+
+
+def _env_command_timeout() -> int:
+    raw = os.environ.get("VS_COMMAND_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_COMMAND_TIMEOUT
+    try:
+        value = int(raw)
+        if value <= 0:
+            raise ValueError
+        return value
+    except ValueError:
+        _ENV_ERRORS.append(
+            f"VS_COMMAND_TIMEOUT must be a positive integer (seconds), got {raw!r}")
+        return DEFAULT_COMMAND_TIMEOUT
+
+
+# Tool paths (prefer modern Vina for consistency).
 OBABEL = find_tool("obabel", "OpenBabel", "OpenBabel.exe")
-# Prefer modern Vina for reproducibility/consistency
 VINA_PRIMARY = find_tool("vina", "vina.exe", "qvina02", "qvina2", "qvina")
 if os.environ.get("VS_ENABLE_QVINA_FALLBACK", "0") == "1":
     VINA_FALLBACK = find_tool("qvina02", "qvina2") or VINA_PRIMARY
 else:
     VINA_FALLBACK = VINA_PRIMARY
-VINA = VINA_PRIMARY  # Start with primary tool
-# Optional for consensus scoring
+# Optional engines and helpers.
 SMINA = find_tool("smina", "smina.exe")
-# Optional: protonation (reduce) and AutoDock4 grid/dock engines
 REDUCE = find_tool("reduce")
+FPOCKET = find_tool("fpocket")
+# AutoDock4/AutoGrid4 are not used by the pipeline; the paths are kept for
+# the real-tool tests that compare against them.
 AUTODOCK = find_tool("autodock4", "autodock")
 AUTOGRID = find_tool("autogrid4", "autogrid")
-COMMAND_TIMEOUT = int(os.environ.get("VS_COMMAND_TIMEOUT", "900"))
+COMMAND_TIMEOUT = _env_command_timeout()
 
 
-
-def _require_tools():
-    """STRICT validation that the critical tools exist.
+def _require_tools(smina_only: bool = False, consensus: bool = False) -> None:
+    """Fail when a tool the requested run needs is missing.
 
     Called from main() after argument parsing, so --help/--version work and
     --vina-bin can supply a docking binary that is not on PATH.
     """
-    missing = [name for name, path in (("obabel", OBABEL), ("vina", VINA_PRIMARY))
-               if path is None]
+    needed = [("obabel", OBABEL)]
+    if not smina_only:
+        needed.append(("vina", VINA_PRIMARY))
+    if smina_only or consensus:
+        needed.append(("smina", SMINA))
+    missing = [name for name, path in needed if path is None]
     if missing:
         raise RuntimeError(
-            f"Critical tool(s) not found in PATH: {', '.join(missing)}. "
-            "Ensure they are installed and in PATH.")
+            f"Required tool(s) not found in PATH: {', '.join(missing)}. "
+            "Install them or put them on PATH (Vina can also be given with --vina-bin).")
 
-if SMINA is None:
-    logger.info("SMINA not found - consensus scoring will be skipped")
-if REDUCE is None:
-    logger.info("reduce not found - will rely on OpenBabel for protonation")
-if AUTODOCK is None:
-    logger.info("AutoDock4 not found - AutoDock scoring path disabled")
-if AUTOGRID is None:
-    logger.info("AutoGrid4 not found - AutoDock scoring path disabled")
+
+def _log_tool_availability() -> None:
+    logger.debug(f"SMINA: {SMINA or 'not found (--consensus and --smina-only unavailable)'}")
+    logger.debug(f"reduce: {REDUCE or 'not found'}")
+    logger.debug(f"fpocket: {FPOCKET or 'not found'}")
 
 # ---------------------------------------------------------------------------
 # Pipeline internals (split of the former monolith into vspipeline/*).
@@ -139,8 +183,8 @@ if AUTOGRID is None:
 # time, so monkeypatching runner.<name> behaves exactly as before.
 # ---------------------------------------------------------------------------
 
-from vspipeline.net import _http_get_bytes
-from vspipeline.report import (
+from vspipeline.net import _http_get_bytes  # noqa: E402
+from vspipeline.report import (  # noqa: E402
     NGL_CDN_URL,
     _PDBQT_KEEP_PREFIXES,
     _PDBQT_STRIP_PREFIXES,
@@ -152,7 +196,7 @@ from vspipeline.report import (
     extract_coordinates_from_pdbqt,
     generate_html_report,
 )
-from vspipeline.pocket import (
+from vspipeline.pocket import (  # noqa: E402
     COFACTOR_RESNAMES,
     METAL_ELEMENTS,
     VINA_METAL_TYPE_MAP,
@@ -166,7 +210,7 @@ from vspipeline.pocket import (
     detect_metal_ions,
     detect_water_molecules,
 )
-from vspipeline.flexible import (
+from vspipeline.flexible import (  # noqa: E402
     FLEX_BACKBONE_NAMES,
     _ATOMIC_RADII,
     _BOND_TOLERANCE,
@@ -179,13 +223,13 @@ from vspipeline.flexible import (
     build_flexible_residue_pdbqt,
     detect_flexible_residues,
 )
-from vspipeline.consensus import (
+from vspipeline.consensus import (  # noqa: E402
     _run_smina_scoring,
     consensus_rank,
     run_smina_docking,
     scorer_agreement_spearman,
 )
-from vspipeline.charges import (
+from vspipeline.charges import (  # noqa: E402
     _assign_simple_charges,
     _ensure_pdbqt_has_charges,
     _extract_pdbqt_charge,
@@ -193,14 +237,15 @@ from vspipeline.charges import (
     _pdbqt_has_atoms,
     _sanitize_receptor_pdbqt,
 )
-from vspipeline.admet import (
+from vspipeline.admet import (  # noqa: E402
     ADMETFilter,
+    LipinskiFilter,
     _is_valid_sdf,
     _obabel_descriptors,
 )
-from vspipeline.checkpoint import DockingCheckpoint
-from vspipeline.library import LibraryManager
-from vspipeline.utils import (
+from vspipeline.checkpoint import DockingCheckpoint  # noqa: E402
+from vspipeline.library import LibraryManager  # noqa: E402
+from vspipeline.utils import (  # noqa: E402
     _parse_chain_selection,
     available_cpus,
     ligand_name,
@@ -208,9 +253,10 @@ from vspipeline.utils import (
     get_chains,
     parse_pdb_coords,
     run,
+    run_obabel,
 )
-from vspipeline.protein import ProteinPreparation
-from vspipeline.docking import (
+from vspipeline.protein import ProteinPreparation  # noqa: E402
+from vspipeline.docking import (  # noqa: E402
     _VINA_CPU_FLAG_CACHE,
     _build_vina_command,
     _calculate_coordinate_simscore,
@@ -229,7 +275,7 @@ from vspipeline.docking import (
     dock_all,
     dock_ligand,
 )
-from vspipeline.results import (
+from vspipeline.results import (  # noqa: E402
     ResultsAnalyzer,
     _score_csv,
     _score_sort_key,
@@ -237,577 +283,863 @@ from vspipeline.results import (
 )
 
 # =============================
+# COMMAND LINE
+# =============================
+
+DEFAULT_BINDING_MODES = 9
+DEFAULT_ENERGY_RANGE = 3.0
+DEFAULT_MAX_FAILURE_FRACTION = 0.5
+
+# Options that only apply to --library custom (or fda for --max-compounds);
+# main() detects whether they were given explicitly.
+_UNSET = object()
+_EXPLICIT_DESTS = ("mw_min", "mw_max", "logp_max", "max_compounds")
+
+
+class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
+                     argparse.RawDescriptionHelpFormatter):
+    """Keeps the description's line breaks and appends option defaults
+    (except None/False, which mean "not set")."""
+
+    def _get_help_string(self, action):
+        if (action.default is None or action.default is False or action.default == []
+                or isinstance(action, argparse._StoreFalseAction)):
+            return action.help
+        return super()._get_help_string(action)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="runner.py",
+        description=(
+            f"AutoDocker {__version__}: structure-based virtual screening with AutoDock Vina.\n"
+            "Stages: [1/5] ligand preparation, [2/5] receptor and box preparation,\n"
+            "[3/5] docking (Vina, or SMINA with --smina-only; optional SMINA consensus),\n"
+            "[4/5] pose analysis, [5/5] reports and run_manifest.json.\n"
+            "Exit codes: 0 success, 1 pipeline error, 2 invalid options/environment or\n"
+            "missing tools, 3 more ligands failed to dock than --max-failure-fraction\n"
+            "allows (outputs are still written), 130 interrupted."),
+        formatter_class=_HelpFormatter,
+    )
+
+    io = parser.add_argument_group("input/output")
+    io.add_argument("-r", "--receptor", required=True, help="Receptor (protein) PDB file")
+    io.add_argument("-l", "--ligands", default=None,
+                    help="Ligand file or directory (searched recursively) of .sdf, .mol2, "
+                    ".pdb and/or .pdbqt files; one molecule per file. Files sharing a name "
+                    "are resolved by precedence SDF > PDBQT > MOL2 > PDB (the others are "
+                    "reported as superseded). Required with --library local; not used by "
+                    "the PubChem libraries")
+    io.add_argument("-o", "--output", required=True,
+                    help="Output directory (if it lies inside -l it is skipped when "
+                    "collecting ligands)")
+
+    lib = parser.add_argument_group("ligand library")
+    lib.add_argument("--library", choices=["fda", "custom", "local"], default="local",
+                     help="local: the files of -l; fda: a fixed list of 74 well-known "
+                     "approved drugs downloaded from PubChem (not the full FDA list); "
+                     "custom: the same list filtered by --mw-min/--mw-max/--logp-max")
+    lib.add_argument("--mw-min", type=float, default=200.0,
+                     help="--library custom only: minimum molecular weight (Da)")
+    lib.add_argument("--mw-max", type=float, default=500.0,
+                     help="--library custom only: maximum molecular weight (Da); "
+                     "replaces Lipinski's MW <= 500")
+    lib.add_argument("--logp-max", type=float, default=5.0,
+                     help="--library custom only: maximum logP (Open Babel's "
+                     "Wildman-Crippen logP, the model used everywhere); replaces "
+                     "Lipinski's logP <= 5")
+    lib.add_argument("--max-compounds", type=int, default=LibraryManager.MAX_COMPOUNDS,
+                     help="--library fda/custom only: number of PubChem compounds to "
+                     "prepare (the first ones of the list that pass)")
+    lib.add_argument("--no-lipinski", action="store_true",
+                     help="Skip the Lipinski rule-of-five filter. The filter (SDF and "
+                     "PubChem inputs only) rejects a ligand with ANY violation of MW <= "
+                     "500, logP <= 5, H-bond donors <= 5, acceptors <= 10 (Open Babel "
+                     "descriptors HBD/HBA2); it is not an ADMET model")
+    lib.add_argument("--no-admet", action="store_true",
+                     help="Deprecated alias of --no-lipinski")
+    lib.add_argument("--no-minimize", action="store_true",
+                     help="Skip MMFF94 ligand minimization (applies to SDF and PubChem "
+                     "ligands only; MOL2/PDB/PDBQT keep their input coordinates)")
+    lib.add_argument("--minimize-steps", type=int, default=250,
+                     help="MMFF94 minimization steps (SDF and PubChem ligands only)")
+
+    rec = parser.add_argument_group("receptor and docking box")
+    rec.add_argument("--chain", default=None,
+                     help="Receptor chain(s), e.g. A, A,B or all; IDs are case-sensitive. "
+                     "Default: the first chain (with a warning if there are several)")
+    rec.add_argument("--ph", type=float, default=7.4,
+                     help="pH at which receptor hydrogens are added (Open Babel -p)")
+    rec.add_argument("--keep-hetero", action="store_true",
+                     help="Keep matching HETATM records during receptor cleaning")
+    rec.add_argument("--pockets",
+                     help="fpocket pocket number(s), e.g. 1 or 2,3. Default: best fpocket "
+                     "score (druggability breaks ties)")
+    rec.add_argument("--padding", type=float, default=6.0,
+                     help="Box padding around the selected pocket(s), Angstrom")
+    rec.add_argument("--no-fpocket", action="store_true",
+                     help="Skip fpocket; box around the receptor centroid")
+    rec.add_argument("--grid-center", default=None,
+                     help="Explicit box center 'X,Y,Z' (Angstrom), e.g. 12.3,4.5,6.7; "
+                     "overrides auto-detection (frame: see --grid-center-frame)")
+    rec.add_argument("--grid-center-frame", choices=["input", "docking"], default="input",
+                     help="Frame of --grid-center: 'input' (receptor PDB coordinates) or "
+                     "'docking' (the centered frame of receptor.pdbqt and grid.conf; "
+                     "versions <= 1.1.4 used this frame)")
+    rec.add_argument("--grid-size", default=None,
+                     help="Explicit box size 'SX,SY,SZ' (Angstrom), e.g. 22.5,22.5,22.5; "
+                     "overrides auto-detection")
+    rec.add_argument("--keep-waters", action="store_true",
+                     help="Keep water molecules near the binding site in the receptor")
+    rec.add_argument("--water-distance", type=float, default=4.0,
+                     help="Distance from the box center within which waters are kept (Angstrom)")
+    rec.add_argument("--detect-metals", action="store_true",
+                     help="Keep metal ions in the receptor (Vina metal atom types)")
+    rec.add_argument("--detect-cofactors", action="store_true",
+                     help="Keep known cofactors in the receptor")
+
+    flex = parser.add_argument_group("flexible receptor")
+    flex.add_argument("--flexibility", type=int, choices=range(0, 11), metavar="{0..10}",
+                      help="On/off switch kept for compatibility: any value > 0 enables "
+                      "flexible side chains (the number itself has no effect), 0 forces "
+                      "rigid docking. Implied by --flexible-residues or --auto-flexible")
+    flex.add_argument("--flexible-residues",
+                      help="Flexible residues, e.g. 'A45,A78,B102'")
+    flex.add_argument("--auto-flexible", type=int,
+                      help=f"Make the N residues closest to the box center (within "
+                      f"{AUTO_FLEX_RADIUS:g} A) flexible")
+
+    dock = parser.add_argument_group("docking")
+    dock.add_argument("-p", "--processes", type=int, default=1,
+                      help="Parallel docking processes: N > 0 uses N; 0 or -1 uses all "
+                      "available CPUs; -N (N > 1) uses available CPUs / N")
+    dock.add_argument("--exhaustiveness", type=int, default=8,
+                      help="Vina exhaustiveness (>= 1; 8 is Vina's default, higher is "
+                      "more thorough and slower)")
+    dock.add_argument("--binding-modes", type=int, default=DEFAULT_BINDING_MODES,
+                      help="Maximum number of binding modes Vina reports")
+    dock.add_argument("--energy-range", type=float, default=DEFAULT_ENERGY_RANGE,
+                      help="Vina energy range of the reported modes (kcal/mol)")
+    dock.add_argument("--seed", type=int, default=None,
+                      help=f"Random seed (default: $VS_SEED, else {DEFAULT_SEED})")
+    dock.add_argument("--threads", type=int, default=None,
+                      help="CPU threads per Vina process, passed as --cpu (default: all "
+                      "cores, or cores divided by -p when -p > 1)")
+    dock.add_argument("--min-valid-affinity", type=float, default=-1.0,
+                      help="Reject docking scores >= this threshold (kcal/mol)")
+    dock.add_argument("--vina-bin",
+                      help="Docking binary to use instead of the auto-detected Vina/QuickVina")
+    dock.add_argument("--vina-extra", action="append", default=[],
+                      help="Extra argument string passed to the docking binary; repeat as needed")
+    dock.add_argument("--timeout", type=int, default=COMMAND_TIMEOUT,
+                      help="Per-command timeout in seconds; the default is "
+                      f"$VS_COMMAND_TIMEOUT if set, else {DEFAULT_COMMAND_TIMEOUT}")
+    dock.add_argument("--no-resume", action="store_true",
+                      help="Start fresh (ignore the checkpoint)")
+    dock.add_argument("--max-failure-fraction", type=float,
+                      default=DEFAULT_MAX_FAILURE_FRACTION,
+                      help="Exit with code 3 (after writing all outputs) when more than this "
+                      "fraction of the docked ligands failed (scores outside the "
+                      "accepted window are not failures); 1.0 never fails")
+    dock.add_argument("--consensus", action="store_true",
+                      help="Also dock with SMINA and write consensus_ranking.csv")
+    dock.add_argument("--smina-only", action="store_true",
+                      help="Dock with SMINA instead of Vina (1 mode per ligand; not "
+                      "combinable with --consensus, --vina-bin, --vina-extra or "
+                      "non-default --binding-modes/--energy-range)")
+
+    out = parser.add_argument_group("analysis and reports")
+    out.add_argument("--top-n", type=int, default=20,
+                     help="Number of compounds in Top_hits.txt")
+    out.add_argument("--html-report", dest="html_report", action="store_true",
+                     default=True,
+                     help="Write results_report.html (on by default; the flag is accepted "
+                     "for compatibility)")
+    out.add_argument("--no-html-report", dest="html_report", action="store_false",
+                     help="Do not write the HTML report")
+    out.add_argument("--cluster-poses", action="store_true",
+                     help="Write pose_clusters.json (greedy RMSD clustering of each "
+                     "ligand's poses). The HTML report clusters poses with "
+                     "--rmsd-threshold whether or not this is given")
+    out.add_argument("--rmsd-threshold", type=float, default=2.0,
+                     help="RMSD clustering threshold (Angstrom)")
+
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Debug logging (all pipeline modules)")
+    parser.add_argument("--version", action="version",
+                        version=f"AutoDocker {__version__}")
+    return parser
+
+
+def _parse_args(parser: argparse.ArgumentParser, argv: List[str]):
+    """Parse ``argv``; return (args, set of _EXPLICIT_DESTS given explicitly).
+
+    argparse only fills defaults for attributes missing from the namespace,
+    so a sentinel there shows whether an option was given (abbreviations
+    such as --mw-ma included).
+    """
+    namespace = argparse.Namespace(**{dest: _UNSET for dest in _EXPLICIT_DESTS})
+    args = parser.parse_args(argv, namespace=namespace)
+    explicit = set()
+    for dest in _EXPLICIT_DESTS:
+        if getattr(args, dest) is _UNSET:
+            setattr(args, dest, parser.get_default(dest))
+        else:
+            explicit.add(dest)
+    return args, explicit
+
+
+def _validate_args(args, explicit) -> None:
+    """Check option values and combinations; raise ConfigError on the first
+    problem. Resolves --seed, --processes and the deprecated --no-admet."""
+    if _ENV_ERRORS:
+        raise ConfigError("; ".join(_ENV_ERRORS))
+    if args.seed is None:
+        args.seed = default_seed()
+    if args.no_admet:
+        logger.warning("[!] --no-admet is deprecated; use --no-lipinski")
+        args.no_lipinski = True
+
+    if not os.path.isfile(args.receptor):
+        raise ConfigError(f"-r/--receptor: no such file: {args.receptor}")
+    if args.library == "local":
+        if not args.ligands:
+            raise ConfigError("-l/--ligands is required with --library local")
+        if not os.path.exists(args.ligands):
+            raise ConfigError(f"-l/--ligands: no such file or directory: {args.ligands}")
+    custom_only = sorted(d for d in explicit if d != "max_compounds")
+    if args.library != "custom" and custom_only:
+        options = ", ".join("--" + d.replace("_", "-") for d in custom_only)
+        raise ConfigError(
+            f"{options} only apply to --library custom (with --library {args.library} "
+            "the Lipinski cut-offs are used; see --no-lipinski)")
+    if args.library == "local" and "max_compounds" in explicit:
+        raise ConfigError("--max-compounds only applies to --library fda/custom")
+    if args.mw_min < 0 or args.mw_min > args.mw_max:
+        raise ConfigError(f"--mw-min ({args.mw_min:g}) must be >= 0 and <= --mw-max "
+                          f"({args.mw_max:g})")
+
+    positive_ints = [("--exhaustiveness", args.exhaustiveness),
+                     ("--binding-modes", args.binding_modes),
+                     ("--timeout", args.timeout),
+                     ("--minimize-steps", args.minimize_steps),
+                     ("--top-n", args.top_n),
+                     ("--max-compounds", args.max_compounds)]
+    if args.threads is not None:
+        positive_ints.append(("--threads", args.threads))
+    if args.auto_flexible is not None:
+        positive_ints.append(("--auto-flexible", args.auto_flexible))
+    for option, value in positive_ints:
+        if value < 1:
+            raise ConfigError(f"{option} must be >= 1, got {value}")
+    for option, value in (("--energy-range", args.energy_range),
+                          ("--rmsd-threshold", args.rmsd_threshold),
+                          ("--water-distance", args.water_distance)):
+        if not value > 0:
+            raise ConfigError(f"{option} must be > 0, got {value:g}")
+    if args.padding < 0:
+        raise ConfigError(f"--padding must be >= 0, got {args.padding:g}")
+    if not 0.0 <= args.max_failure_fraction <= 1.0:
+        raise ConfigError("--max-failure-fraction must be between 0 and 1, got "
+                          f"{args.max_failure_fraction:g}")
+    for option, value in (("--grid-center", args.grid_center),
+                          ("--grid-size", args.grid_size)):
+        if value:
+            try:
+                triplet = _parse_grid_triplet(value, option.lstrip("-"))
+            except ValueError as e:
+                raise ConfigError(str(e)) from None
+            if option == "--grid-size" and min(triplet) <= 0:
+                raise ConfigError(f"--grid-size must be positive, got {value}")
+
+    if args.vina_bin and not shutil.which(args.vina_bin):
+        raise ConfigError(f"--vina-bin {args.vina_bin!r} does not exist or is not executable")
+
+    if args.smina_only:
+        conflicts = []
+        if args.consensus:
+            conflicts.append("--consensus (SMINA would be compared with itself)")
+        if args.vina_bin:
+            conflicts.append("--vina-bin (SMINA is taken from PATH)")
+        if args.vina_extra:
+            conflicts.append("--vina-extra")
+        if args.binding_modes != DEFAULT_BINDING_MODES:
+            conflicts.append("--binding-modes (SMINA mode reports 1 mode)")
+        if args.energy_range != DEFAULT_ENERGY_RANGE:
+            conflicts.append("--energy-range")
+        if conflicts:
+            raise ConfigError("--smina-only cannot be combined with " + ", ".join(conflicts))
+
+    if args.processes in (0, -1):
+        args.processes = available_cpus()
+    elif args.processes < -1:
+        args.processes = max(1, available_cpus() // (-args.processes))
+
+
+def _configure_logging(verbose: bool) -> None:
+    """Set the level of the CLI logger and of every vspipeline.* logger."""
+    level = logging.DEBUG if verbose else logging.INFO
+    for name in (__name__, "runner", "vspipeline"):
+        logging.getLogger(name).setLevel(level)
+
+
+# =============================
+# RUN MANIFEST
+# =============================
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+# (version flag, regular expression picking the version line or None).
+_VERSION_PROBES = {
+    "obabel": ("-V", None),
+    "fpocket": ("-h", re.compile(r"fpocket\s+\d[\w.]*")),
+    "reduce": ("-version", None),
+}
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _sha256(path: str) -> Optional[str]:
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def _probe_tool(kind: str, path: Optional[str]) -> Dict:
+    """Path, resolved path, version line and sha256 of an external tool."""
+    info = {"path": path, "resolved_path": None, "version": None, "sha256": None}
+    if not path:
+        return info
+    resolved = shutil.which(path)
+    resolved = os.path.realpath(resolved) if resolved else None
+    info["resolved_path"] = resolved
+    info["sha256"] = _sha256(resolved) if resolved else None
+    flag, pattern = _VERSION_PROBES.get(kind, ("--version", None))
+    try:
+        proc = subprocess.run([path, flag], capture_output=True, text=True,
+                              timeout=VERSION_PROBE_TIMEOUT)
+        text = _ANSI_ESCAPE.sub("", (proc.stdout or "") + "\n" + (proc.stderr or ""))
+    except (OSError, subprocess.SubprocessError) as e:
+        info["version"] = f"unknown ({type(e).__name__}: {e})"
+        return info
+    if pattern:
+        match = pattern.search(text)
+        info["version"] = match.group(0) if match else None
+    else:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        info["version"] = lines[0] if lines else None
+    return info
+
+
+def _tools_for_run(args) -> Dict[str, Optional[str]]:
+    """External tools the run invokes, by role."""
+    tools = {"obabel": OBABEL}
+    if not args.smina_only:
+        tools["vina"] = VINA_PRIMARY
+        if VINA_FALLBACK != VINA_PRIMARY:
+            tools["vina_fallback"] = VINA_FALLBACK
+    if args.smina_only or args.consensus:
+        tools["smina"] = SMINA
+    if not args.no_fpocket:
+        tools["fpocket"] = FPOCKET
+    if REDUCE:
+        # Found on PATH; whether receptor preparation used it is recorded by
+        # ProteinPreparation (attribute ``reduce_used``) when available.
+        tools["reduce"] = REDUCE
+    return tools
+
+
+def _probe_tools(args) -> Dict[str, Dict]:
+    probes = {}
+    for role, path in _tools_for_run(args).items():
+        kind = "vina" if role.startswith("vina") else role
+        probes[role] = _probe_tool(kind, path)
+        version = probes[role]["version"] or "(no version output)"
+        logger.info(f"[*] {role}: {path} - {version}")
+    return probes
+
+
+def _environment_snapshot() -> Dict[str, str]:
+    return {k: v for k, v in sorted(os.environ.items())
+            if k.startswith("VS_") or k in ("OMP_NUM_THREADS", "AUTODOCKER_VERSION",
+                                            "PUBCHEM_REST")}
+
+
+def write_run_manifest(path: str, manifest: Dict) -> None:
+    """Write run_manifest.json with sorted keys (deterministic layout)."""
+    with open(path, "w") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True, default=str)
+        f.write("\n")
+
+
+def _build_manifest(args, argv: List[str], tools: Dict, started_at: str,
+                    status: str, exit_code: int, error: Optional[str],
+                    extra: Dict) -> Dict:
+    resolved = {k: v for k, v in sorted(vars(args).items())}
+    return {
+        "autodocker_version": __version__,
+        "argv": [sys.argv[0]] + list(argv),
+        "args": resolved,
+        "seed": getattr(args, "seed", None),
+        "status": status,
+        "exit_code": exit_code,
+        "error": error,
+        "python": {"version": platform.python_version(),
+                   "implementation": platform.python_implementation(),
+                   "executable": sys.executable},
+        "platform": platform.platform(),
+        "cpu_count": {"os": os.cpu_count(), "available": available_cpus()},
+        "tools": tools,
+        "environment": _environment_snapshot(),
+        "command_timeout_s": COMMAND_TIMEOUT,
+        "started_at": started_at,
+        "finished_at": _utc_now(),
+        **extra,
+    }
+
+
+# =============================
 # MAIN PIPELINE
 # =============================
 
 
-def main():
-    global VINA, VINA_PRIMARY, VINA_FALLBACK, COMMAND_TIMEOUT
+def _keep_residue_key(residue: Dict):
+    """(chain, resnum, resname) of a detected water/metal/cofactor record."""
+    return (residue["chain"], residue["resnum"],
+            residue.get("resname") or residue.get("name"))
 
-    parser = argparse.ArgumentParser(
-        description=f"Virtual Screening Pipeline v{__version__} - ENHANCED with 4 Phases:\n"
-        "  PHASE 1: Advanced result analysis (HTML reports, clustering)\n"
-        "  PHASE 2: Smart preprocessing (water/metal/cofactor handling)\n"
-        "  PHASE 3: Flexible receptor docking\n"
-        "  PHASE 4: Consensus scoring (Vina + SMINA)\n"
-        "Original: PubChem library integration, SimScore, ADMET filtering",
-        formatter_class=argparse.RawDescriptionHelpFormatter
+
+def _failed_docking(results, metrics_dict) -> List[str]:
+    """Ligands whose docking failed (no score and not a score rejected for
+    being outside the accepted window)."""
+    failed = []
+    for name, score in results:
+        if score is not None:
+            continue
+        status = str((metrics_dict or {}).get(name, {}).get("status", "FAILED"))
+        if not status.startswith(("REJECTED", "OUT_OF_WINDOW")):
+            failed.append(name)
+    return failed
+
+
+def _failure_exit_code(n_failed: int, n_docked: int, max_fraction: float) -> int:
+    """EXIT_TOO_MANY_FAILURES if more than ``max_fraction`` of the docked
+    ligands failed, else EXIT_OK."""
+    if n_docked and n_failed / n_docked > max_fraction:
+        return EXIT_TOO_MANY_FAILURES
+    return EXIT_OK
+
+
+def write_consensus_ranking(path: str, results, smina_scores: Dict) -> Dict:
+    """Write consensus_ranking.csv (Vina, SMINA and mean score per ligand;
+    sorted by the mean; ligands only one engine scored listed with NA) and
+    return the global scorer agreement {"rho": Spearman rho, "n": pairs}.
+
+    The CSV holds data rows only; the agreement statistic is returned for
+    the reports instead of being appended as comment lines.
+    """
+    consensus_rows = []
+    unpaired = []
+    for name, vina_score in results:
+        smina_score = smina_scores.get(name)
+        if vina_score is None or smina_score is None:
+            unpaired.append((name, vina_score, smina_score))
+            continue
+        consensus_rows.append((name, consensus_rank(vina_score, smina_score)))
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Ligand", "Vina_Affinity", "SMINA_Affinity", "Consensus"])
+        for name, row in sorted(consensus_rows, key=lambda kv: (kv[1]["consensus"], kv[0])):
+            writer.writerow([name, _score_csv(row["vina"]), _score_csv(row["smina"]),
+                             _score_csv(row["consensus"])])
+        # Ligands one engine could not score are listed, not dropped.
+        for name, vina_score, smina_score in sorted(unpaired, key=lambda r: r[0]):
+            writer.writerow([name, _score_csv(vina_score), _score_csv(smina_score), "NA"])
+    rho, n_pairs = scorer_agreement_spearman(
+        [row["vina"] for _, row in consensus_rows],
+        [row["smina"] for _, row in consensus_rows])
+    if rho is not None:
+        logger.info(f"[*] Vina vs SMINA Spearman rho = {rho:.3f} (n={n_pairs})")
+    logger.info(f"[*] Consensus ranking saved: {path} ({len(consensus_rows)} ligands)")
+    return {"rho": rho, "n": n_pairs}
+
+
+def _run_pipeline(args, state: Dict) -> int:
+    """Stages 1-5. Returns the exit code; raises on pipeline errors."""
+    logger.info("=" * 70)
+    logger.info(f"AUTODOCKER VIRTUAL SCREENING PIPELINE v{__version__}")
+    logger.info("=" * 70)
+
+    # ===== [1/5] Ligand library =====
+    logger.info("[1/5] Ligand library preparation")
+    if args.library != "local" and args.ligands:
+        logger.info(f"[*] -l {args.ligands} is not used with --library {args.library}")
+    lib_manager = LibraryManager(
+        args.output,
+        args.ligands if args.library == "local" else None,
+        minimize=not args.no_minimize,
+        minimize_steps=args.minimize_steps,
     )
+    state["library"] = lib_manager
+    apply_lipinski = not args.no_lipinski
+    if args.library == "fda":
+        ligands = lib_manager.create_fda_library(
+            apply_lipinski=apply_lipinski, max_compounds=args.max_compounds)
+    elif args.library == "custom":
+        ligands = lib_manager.create_custom_library(
+            mw_min=args.mw_min, mw_max=args.mw_max, logp_max=args.logp_max,
+            apply_lipinski=apply_lipinski, max_compounds=args.max_compounds)
+    else:
+        ligands = lib_manager.prepare_local(apply_lipinski=apply_lipinski)
+    if not ligands:
+        raise ValueError("No ligands found to dock")
 
-    parser.add_argument("-r", "--receptor", required=True,
-                        help="Protein PDB file")
-    parser.add_argument("-l", "--ligands", required=True,
-                        help="Ligands .sdf file or directory with .sdf files")
-    parser.add_argument("-o", "--output", required=True,
-                        help="Output directory")
+    # ===== [2/5] Receptor and box =====
+    logger.info("[2/5] Receptor preparation and docking box")
+    protein_prep = ProteinPreparation(args.receptor, args.output)
+    state["protein"] = protein_prep
+    protein_prep.validate()
 
-    parser.add_argument("--library", choices=["fda", "custom", "local"], default="local",
-                        help="Library: fda (PubChem approved drugs), custom (PubChem filtered), local (manual SDF)")
-    parser.add_argument("--mw-min", type=int, default=200, help="Min MW")
-    parser.add_argument("--mw-max", type=int, default=500, help="Max MW")
-    parser.add_argument("--logp-max", type=float, default=5.0,
-                        help="Max LogP (drug-likeness)")
-    parser.add_argument("--no-admet", action="store_true",
-                        help="Skip ADMET (Lipinski) filtering")
-    parser.add_argument("--no-minimize", action="store_true",
-                        help="Skip MMFF94 ligand minimization")
-    parser.add_argument("--minimize-steps", type=int,
-                        default=250, help="MMFF94 minimization steps")
+    chain = args.chain or protein_prep.select_chain()
+    protein_prep.prepare_receptor(chain, keep_hetero=args.keep_hetero, ph=args.ph)
 
-    parser.add_argument(
-        "--chain", help="Protein chain(s), e.g. A, A,B, or all (auto-detect if not specified)")
-    parser.add_argument("--ph", type=float, default=7.4,
-                        help="pH at which receptor hydrogens are added (Open Babel -p; default 7.4)")
-    parser.add_argument("--keep-hetero", action="store_true",
-                        help="Keep matching HETATM records during receptor cleaning")
-    parser.add_argument(
-        "--pockets", help="Pocket number(s) from fpocket, e.g. 1 or 2,3. Default: best fpocket score (druggability breaks ties)")
-    parser.add_argument("--padding", type=float, default=6.0,
-                        help="Grid padding around selected pocket(s), Angstrom")
-    parser.add_argument("--no-fpocket", action="store_true",
-                        help="Skip fpocket, use default grid")
-    parser.add_argument("--grid-center", default=None,
-                        help="Explicit grid center 'X,Y,Z' (Angstrom) in the coordinates of the input "
-                        "receptor PDB, e.g. 12.3,4.5,6.7. Overrides auto-detection")
-    parser.add_argument("--grid-center-frame", choices=["input", "docking"], default="input",
-                        help="Frame of --grid-center: 'input' (receptor PDB coordinates, default) or "
-                        "'docking' (the centered frame of receptor.pdbqt and grid.conf; versions <= 1.1.4 "
-                        "used this frame)")
-    parser.add_argument("--grid-size", default=None,
-                        help="Explicit grid box size 'SX,SY,SZ' (Angstrom), e.g. 22.5,22.5,22.5. Overrides auto-detection")
+    if args.no_fpocket:
+        cx, cy, cz, sx, sy, sz = protein_prep.centroid_grid(padding=args.padding)
+        logger.warning("[!] Using centroid fallback grid (fpocket skipped)")
+    else:
+        cx, cy, cz, sx, sy, sz = protein_prep.detect_pocket(
+            pocket_spec=args.pockets, padding=args.padding)
 
-    parser.add_argument("-p", "--processes", type=int,
-                        default=1, help="Parallel processes")
-    parser.add_argument("--exhaustiveness", type=int, default=8,
-                        help="Vina exhaustiveness (1-32, higher=thorough)")
-    parser.add_argument("--binding-modes", type=int,
-                        default=9, help="Vina binding modes")
-    parser.add_argument("--energy-range", type=float,
-                        default=3.0, help="Vina energy range (kcal/mol)")
-    parser.add_argument("--seed", type=int, default=default_seed(),
-                        help="Random seed for reproducibility (default: $VS_SEED or 42)")
-    parser.add_argument("--threads", type=int, default=None,
-                        help="CPU threads per Vina process, passed as --cpu (default: all cores, or cores divided by -p when -p > 1)")
-    parser.add_argument("--min-valid-affinity", type=float, default=-1.0,
-                        help="Reject docking scores >= this threshold (kcal/mol)")
-    parser.add_argument(
-        "--vina-bin", help="Docking binary to use instead of auto-detected Vina/QuickVina")
-    parser.add_argument("--vina-extra", action="append", default=[],
-                        help="Extra argument string passed to the docking binary; repeat as needed")
-    parser.add_argument("--timeout", type=int, default=COMMAND_TIMEOUT,
-                        help="Per-command timeout in seconds")
-    parser.add_argument("--no-resume", action="store_true",
-                        help="Start fresh (ignore checkpoint)")
-    parser.add_argument("--top-n", type=int, default=20,
-                        help="Number of compounds in Top_hits.txt")
+    logger.info(f"[*] Grid center: {cx:.2f}, {cy:.2f}, {cz:.2f}")
+    logger.info(f"[*] Grid size: {sx:.2f}, {sy:.2f}, {sz:.2f}")
 
-    # ===== PHASE 1: Advanced Result Analysis =====
-    parser.add_argument("--html-report", dest="html_report", action="store_true",
-                        default=True,
-                        help="Generate professional HTML report with charts (default: on)")
-    parser.add_argument("--no-html-report", dest="html_report", action="store_false",
-                        help="Disable the HTML report")
-    parser.add_argument("--cluster-poses", action="store_true",
-                        help="Cluster similar poses by RMSD")
-    parser.add_argument("--rmsd-threshold", type=float,
-                        default=2.0, help="RMSD clustering threshold (Angstrom)")
+    if args.grid_center:
+        cx, cy, cz = _parse_grid_triplet(args.grid_center, "grid-center")
+        if args.grid_center_frame == "input":
+            # receptor.pdbqt and grid.conf are centered at the origin;
+            # move the user's input-PDB coordinates into that frame.
+            dx, dy, dz = protein_prep.frame_offset()
+            logger.info(f"[*] Grid center given in input-PDB coordinates: "
+                        f"{cx:.2f}, {cy:.2f}, {cz:.2f}")
+            cx, cy, cz = cx - dx, cy - dy, cz - dz
+        logger.info(f"[*] Grid center overridden (docking frame): {cx:.2f}, {cy:.2f}, {cz:.2f}")
+    if args.grid_size:
+        sx, sy, sz = _parse_grid_triplet(args.grid_size, "grid-size")
+        logger.info(f"[*] Grid size overridden: {sx:.2f}, {sy:.2f}, {sz:.2f}")
 
-    # ===== PHASE 2: Smart Preprocessing =====
-    parser.add_argument("--keep-waters", action="store_true",
-                        help="Keep water molecules near binding site")
-    parser.add_argument("--detect-metals", action="store_true",
-                        help="Detect and parameterize metal ions")
-    parser.add_argument("--detect-cofactors", action="store_true",
-                        help="Detect cofactors in protein")
-    parser.add_argument("--water-distance", type=float, default=4.0,
-                        help="Distance threshold for water detection (Å)")
+    low, high = TYPICAL_GRID_SIZE_RANGE
+    for axis, size in (("x", sx), ("y", sy), ("z", sz)):
+        if size < low or size > high:
+            logger.warning(f"[!] Grid size_{axis}={size:.2f}A outside typical range "
+                           f"({low:g}-{high:g}A)")
 
-    # ===== PHASE 3: Flexible Receptor Docking =====
-    parser.add_argument("--flexibility", type=int, choices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-                        help="Enable flexible side chains (any value > 0; 0 forces rigid docking). "
-                        "Implied by --flexible-residues or --auto-flexible")
-    parser.add_argument("--flexible-residues",
-                        help="Specify flexible residues, e.g. 'A45,A78,B102'")
-    parser.add_argument("--auto-flexible", type=int,
-                        help="Auto-select N closest residues to binding site")
+    protein_prep.write_grid(cx, cy, cz, sx, sy, sz)
 
-    # ===== PHASE 4: Consensus Scoring =====
-    parser.add_argument("--consensus", action="store_true",
-                        help="Run consensus scoring (Vina + SMINA)")
-    parser.add_argument("--smina-only", action="store_true",
-                        help="Use SMINA scoring instead of Vina")
+    if args.keep_waters or args.detect_metals or args.detect_cofactors:
+        logger.info("[2/5] Receptor waters, metals and cofactors")
+        # Detect on the ORIGINAL PDB: HETATM records (waters, metals,
+        # cofactors) are stripped from pdb_clean during receptor cleaning.
+        source = protein_prep.pdb_file
+        keep_residues = []
 
-    parser.add_argument("-v", "--verbose",
-                        action="store_true", help="Debug logging")
-    parser.add_argument("--version", action="version",
-                        version=f"AutoDocker {__version__}")
+        if args.keep_waters:
+            logger.info("[*] Detecting water molecules near binding site...")
+            # (cx, cy, cz) is in the centered receptor frame; waters are
+            # read from the original PDB, so compare in that frame.
+            dx, dy, dz = protein_prep.frame_offset()
+            waters = detect_water_molecules(source, (cx + dx, cy + dy, cz + dz),
+                                            distance_threshold=args.water_distance)
+            if waters:
+                logger.info(f"[*] Found {len(waters)} water residue(s) within "
+                            f"{args.water_distance}A of the binding site; keeping them "
+                            "in receptor")
+                keep_residues += [_keep_residue_key(w) for w in waters]
+            else:
+                logger.info("[*] No waters detected near binding site")
 
-    args = parser.parse_args()
+        if args.detect_metals:
+            logger.info("[*] Detecting metal ions...")
+            metals = detect_metal_ions(source)
+            if metals:
+                logger.info(f"[*] Found {len(metals)} metal ion(s); keeping them in receptor:")
+                for metal in metals:
+                    logger.info(f"   - {metal['name']} ({metal['element']}) chain "
+                                f"{metal['chain']} residue {metal['resnum']}")
+                keep_residues += [_keep_residue_key(m) for m in metals]
+            else:
+                logger.info("[*] No metal ions detected")
+
+        if args.detect_cofactors:
+            logger.info("[*] Detecting cofactors...")
+            cofactors = detect_cofactors(source)
+            if cofactors:
+                logger.info(f"[*] Found {len(cofactors)} cofactor(s); keeping them in receptor:")
+                for cof in cofactors:
+                    logger.info(f"   - {cof['name']} chain {cof['chain']} residue {cof['resnum']}")
+                keep_residues += [_keep_residue_key(c) for c in cofactors]
+            else:
+                logger.info("[*] No cofactors detected")
+
+        # Detection scans every chain; keep only residues in the chains
+        # that were docked (the receptor contains nothing else).
+        docked_chains = set(getattr(protein_prep, "selected_chains", None) or [])
+        if docked_chains:
+            outside = [r for r in keep_residues if (r[0] or "A") not in docked_chains]
+            if outside:
+                logger.warning(
+                    f"[!] Not keeping {len(outside)} residue(s) outside the docked "
+                    f"chain(s) {', '.join(sorted(docked_chains))}: "
+                    + ", ".join(f"{n} {c}{r}" for c, r, n in outside))
+            keep_residues = [r for r in keep_residues if r not in outside]
+        keep_residues = list(dict.fromkeys(keep_residues))
+        if keep_residues:
+            protein_prep.rebuild_receptor_keep_hetatm(keep_residues)
+
+    flexible_residues: List[str] = []
+    flex_file = None
+    rigid_receptor = None
+    if args.flexibility is None and (args.flexible_residues or args.auto_flexible):
+        args.flexibility = 1
+    if args.flexibility and args.flexibility > 0:
+        logger.info("[2/5] Flexible receptor setup")
+        if args.flexible_residues:
+            flexible_residues = [
+                r.strip() for r in args.flexible_residues.split(',') if r.strip()]
+            logger.info(f"[*] Using specified flexible residues: {', '.join(flexible_residues)}")
+        elif args.auto_flexible:
+            flexible_residues = detect_flexible_residues(
+                protein_prep.receptor_pdbqt, (cx, cy, cz),
+                radius=AUTO_FLEX_RADIUS, max_residues=args.auto_flexible)
+            logger.info(f"[*] Auto-selected {len(flexible_residues)} flexible residues "
+                        "near binding site")
+        else:
+            logger.warning("[!] Flexibility enabled but no residues specified. "
+                           "Use --flexible-residues or --auto-flexible")
+
+        if flexible_residues:
+            logger.info(f"[*] Flexible residues: {', '.join(flexible_residues)}")
+            built_residues: List[str] = []
+            flex_file = build_flexible_residue_pdbqt(
+                protein_prep.receptor_pdbqt, flexible_residues, args.output,
+                built=built_residues)
+            if not flex_file:
+                logger.warning("[!] Flexible receptor could not be built; running rigid docking")
+            else:
+                # Vina requires flexible residues to be excluded from the
+                # rigid receptor passed to --receptor.
+                flexible_residues = built_residues
+                rigid_receptor = _remove_residues_from_pdbqt(
+                    protein_prep.receptor_pdbqt, built_residues,
+                    os.path.join(args.output, "rigid.pdbqt"), flex_file=flex_file)
+
+    # ===== [3/5] Docking =====
+    logger.info("[3/5] Docking")
+    resume = not args.no_resume
+    vina_params = {
+        'exhaustiveness': args.exhaustiveness,
+        'binding_modes': args.binding_modes,
+        'energy_range': args.energy_range,
+        'seed': args.seed,
+        'min_valid_affinity': args.min_valid_affinity,
+        'extra_args': args.vina_extra,
+        'threads': args.threads,
+    }
+    dock_receptor = rigid_receptor if flex_file else protein_prep.receptor_pdbqt
+    grid_box = (cx, cy, cz, sx, sy, sz)
+
+    state["docking_started"] = True
+    if args.smina_only:
+        # SMINA replaces Vina: dock with SMINA alone, and report SMINA's
+        # own poses and failures (not Vina metadata next to SMINA scores).
+        # Ligand names are unique: LibraryManager resolves same-name files.
+        logger.info("[*] SMINA-only mode: docking with SMINA instead of Vina")
+        smina_scores = _run_smina_scoring(
+            dock_receptor, ligands, args.output, grid_box, vina_params,
+            num_processes=args.processes, flex_file=flex_file)
+        results = [(ligand_name(lig), smina_scores.get(ligand_name(lig)))
+                   for lig in ligands]
+        if not any(score is not None for _, score in results):
+            raise RuntimeError("SMINA produced no valid score for any ligand")
+        metrics_dict = {
+            name: {"status": "OK" if score is not None else "FAILED",
+                   "vina_tool": "SMINA",
+                   "dock_file": os.path.join(args.output, "docked", f"{name}_smina.pdbqt")}
+            for name, score in results}
+        checkpoint = None
+    else:
+        results, checkpoint, metrics_dict = dock_all(
+            dock_receptor, ligands, protein_prep.grid_conf,
+            args.output, num_processes=args.processes, resume=resume,
+            vina_params=vina_params, flex_file=flex_file
+        )
+
+    scorer_agreement = None
+    if args.consensus:
+        logger.info("[3/5] Consensus scoring (SMINA)")
+        smina_scores = _run_smina_scoring(
+            dock_receptor, ligands, args.output, grid_box, vina_params,
+            num_processes=args.processes, flex_file=flex_file)
+        consensus_file = os.path.join(args.output, "consensus_ranking.csv")
+        scorer_agreement = write_consensus_ranking(consensus_file, results, smina_scores)
+        state["scorer_agreement"] = scorer_agreement
+
+    # ===== [4/5] Analysis =====
+    logger.info("[4/5] Pose analysis")
+    if resume and checkpoint is not None and checkpoint.completed:
+        logger.info(f"[*] Checkpoint updated: {len(checkpoint.completed)} successful dockings")
+    html_report_file = os.path.join(args.output, "results_report.html")
+    clusters_file = os.path.join(args.output, "pose_clusters.json")
+    if args.cluster_poses:
+        logger.info("[*] Performing pose clustering...")
+        clusters = cluster_poses(
+            os.path.join(args.output, "docked"), rmsd_threshold=args.rmsd_threshold,
+            ligands=[name for name, _ in results])
+        clusters_data = {
+            ligand: [{'id': c['id'], 'pose_count': len(c['poses'])} for c in ligand_clusters]
+            for ligand, ligand_clusters in clusters.items()}
+        try:
+            with open(clusters_file, 'w') as f:
+                json.dump(clusters_data, f, indent=2, sort_keys=True)
+            logger.info(f"[*] Clustering saved to: {clusters_file}")
+        except OSError as e:
+            logger.warning(f"Could not save clustering data: {e}")
+
+    # ===== [5/5] Outputs =====
+    logger.info("[5/5] Saving results")
+    analyzer = ResultsAnalyzer(args.output, top_n=args.top_n)
+    analyzer.save_ranking(results, mode="extended", metrics_dict=metrics_dict)
+    analyzer.save_metrics_report(results, metrics_dict)
+
+    # The HTML report is generated AFTER ranking.csv exists.
+    html_ok = False
+    if args.html_report:
+        logger.info("[*] Generating HTML report...")
+        report_meta = {
+            "Protein (receptor)": os.path.basename(args.receptor),
+            "Ligand library": args.library,
+            "Ligands screened": len(results),
+            "Top N reported": args.top_n,
+            "Exhaustiveness": args.exhaustiveness,
+            "Seed": args.seed,
+        }
+        html_ok = generate_html_report(
+            os.path.join(args.output, 'ranking.csv'), os.path.join(args.output, "docked"),
+            html_report_file,
+            receptor_pdbqt=protein_prep.receptor_pdbqt,
+            meta=report_meta,
+            grid_file=protein_prep.grid_conf,
+            scorer_agreement=scorer_agreement,
+            rmsd_threshold=args.rmsd_threshold)
+
+    failed = _failed_docking(results, metrics_dict)
+    state["docking_failures"] = {"failed": len(failed), "docked": len(results)}
+    exit_code = _failure_exit_code(len(failed), len(results), args.max_failure_fraction)
+
+    logger.info("=" * 70)
+    if exit_code == EXIT_OK:
+        logger.info(f"PIPELINE COMPLETED SUCCESSFULLY (v{__version__})")
+    else:
+        logger.error(f"PIPELINE COMPLETED, BUT {len(failed)}/{len(results)} LIGANDS FAILED "
+                     f"TO DOCK (more than --max-failure-fraction "
+                     f"{args.max_failure_fraction:g})")
+    logger.info("=" * 70)
+    logger.info(f"Results saved to: {args.output}")
+    outputs = [("Ranking", analyzer.csv_file), ("Full results", analyzer.results_file),
+               ("Top hits", analyzer.top_hits_file), ("Metrics", analyzer.metrics_file),
+               ("Pocket summary", protein_prep.pocket_summary_file),
+               ("Ligand metadata", lib_manager.metadata_file),
+               ("Grid visualization", protein_prep.grid_box_script),
+               ("Docked structures", os.path.join(args.output, "docked"))]
+    if args.cluster_poses:
+        outputs.append(("Pose clusters", clusters_file))
+    if args.html_report:
+        if html_ok:
+            outputs.append(("HTML report", html_report_file))
+        else:
+            logger.warning("[!] HTML report could not be written (see warnings above)")
+    outputs.append(("Run manifest", os.path.join(args.output, "run_manifest.json")))
+    for label, path in outputs:
+        if os.path.exists(path) or label == "Run manifest":
+            logger.info(f"  - {label}: {path}")
+    if args.flexibility and args.flexibility > 0:
+        logger.info(f"  - Flexible residues: "
+                    f"{', '.join(flexible_residues) if flexible_residues else 'none'}")
+    logger.info(f"Total compounds docked: {len(results)} ({len(failed)} failed)")
+    logger.info("=" * 70)
+    return exit_code
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    global VINA_PRIMARY, VINA_FALLBACK, COMMAND_TIMEOUT
+
+    argv = sys.argv[1:] if argv is None else list(argv)
+    started_at = _utc_now()
+    parser = build_parser()
+    args, explicit = _parse_args(parser, argv)
+    _configure_logging(args.verbose)
+    _log_tool_availability()
+
+    try:
+        _validate_args(args, explicit)
+    except ConfigError as e:
+        parser.error(str(e))  # exits with EXIT_USAGE
 
     if args.vina_bin:
-        VINA = args.vina_bin
         VINA_PRIMARY = args.vina_bin
         VINA_FALLBACK = args.vina_bin
     COMMAND_TIMEOUT = args.timeout
-    _require_tools()
-
-    if args.processes in [0, -1]:
-        args.processes = available_cpus()
-    elif args.processes < -1:
-        args.processes = max(1, available_cpus() // (- args.processes))
-
-    if args.verbose:
-        logger.setLevel(logging.DEBUG)
-    else:
-        logger.setLevel(logging.INFO)
+    try:
+        _require_tools(smina_only=args.smina_only, consensus=args.consensus)
+    except RuntimeError as e:
+        logger.error(f"[!] {e}")
+        sys.exit(EXIT_USAGE)
 
     os.makedirs(args.output, exist_ok=True)
+    tools = _probe_tools(args)
 
-    _log_tool_version(VINA_PRIMARY, "Primary docking tool")
-    if VINA_FALLBACK != VINA_PRIMARY:
-        _log_tool_version(VINA_FALLBACK, "Fallback docking tool")
-    if SMINA:
-        _log_tool_version(SMINA, "SMINA")
-
+    state: Dict = {"docking_started": False}
+    status, exit_code, error = "failed", EXIT_FAILURE, None
     try:
-        logger.info("=" * 70)
-        logger.info("VIRTUAL SCREENING PIPELINE (COMPLETE)")
-        logger.info("=" * 70)
-
-        # ===== STEP 1: Library Preparation =====
-        logger.info("[1/5] Library Preparation")
-        lib_manager = LibraryManager(
-            args.output,
-            args.ligands,
-            minimize=not args.no_minimize,
-            minimize_steps=args.minimize_steps,
-        )
-        apply_admet = not args.no_admet
-
-        if args.library == "fda":
-            ligands = lib_manager.create_fda_library(apply_admet=apply_admet)
-        elif args.library == "custom":
-            ligands = lib_manager.create_custom_library(
-                mw_min=args.mw_min, mw_max=args.mw_max, logp_max=args.logp_max,
-                apply_admet=apply_admet
-            )
-        else:
-            ligands = lib_manager.prepare_local(apply_admet=apply_admet)
-
-        if not ligands:
-            raise ValueError("No ligands found to dock")
-
-        # ===== STEP 2: Protein Preparation =====
-        logger.info("[2/5] Protein Preparation + Grid")
-        protein_prep = ProteinPreparation(args.receptor, args.output)
-        protein_prep.validate()
-
-        chain = args.chain or protein_prep.select_chain()
-        protein_prep.prepare_receptor(chain, keep_hetero=args.keep_hetero, ph=args.ph)
-
-        if args.no_fpocket:
-            cx, cy, cz, sx, sy, sz = protein_prep.centroid_grid(
-                padding=args.padding)
-            logger.warning(
-                "[!] Using centroid fallback grid (fpocket skipped)")
-        else:
-            cx, cy, cz, sx, sy, sz = protein_prep.detect_pocket(
-                pocket_spec=args.pockets,
-                padding=args.padding,
-            )
-
-        logger.info(f"[*] Grid center: {cx:.2f}, {cy:.2f}, {cz:.2f}")
-        logger.info(f"[*] Grid size: {sx:.2f}, {sy:.2f}, {sz:.2f}")
-
-        if args.grid_center:
-            cx, cy, cz = _parse_grid_triplet(args.grid_center, "grid-center")
-            if args.grid_center_frame == "input":
-                # receptor.pdbqt and grid.conf are centered at the origin;
-                # move the user's input-PDB coordinates into that frame.
-                dx, dy, dz = protein_prep.frame_offset()
-                logger.info(
-                    f"[*] Grid center given in input-PDB coordinates: "
-                    f"{cx:.2f}, {cy:.2f}, {cz:.2f}")
-                cx, cy, cz = cx - dx, cy - dy, cz - dz
-            logger.info(
-                f"[*] Grid center overridden (docking frame): {cx:.2f}, {cy:.2f}, {cz:.2f}")
-        if args.grid_size:
-            sx, sy, sz = _parse_grid_triplet(args.grid_size, "grid-size")
-            logger.info(
-                f"[*] Grid size overridden: {sx:.2f}, {sy:.2f}, {sz:.2f}")
-
-        for axis, size in (("x", sx), ("y", sy), ("z", sz)):
-            if size < 15 or size > 40:
-                logger.warning(
-                    f"[!] Grid size_{axis}={size:.2f}A outside typical range (15-40A)")
-
-        protein_prep.write_grid(cx, cy, cz, sx, sy, sz)
-
-        # ===== PHASE 2: Smart Preprocessing (Optional) =====
-        if args.keep_waters or args.detect_metals or args.detect_cofactors:
-            logger.info("[PHASE 2] Smart Preprocessing")
-            # Detect on the ORIGINAL PDB: HETATM records (waters, metals,
-            # cofactors) are stripped from pdb_clean during receptor cleaning.
-            source = protein_prep.pdb_file
-
-            keep_residues = []
-            waters = metals = cofactors = []
-
-            if args.keep_waters:
-                logger.info(
-                    "[*] Detecting water molecules near binding site...")
-                # (cx, cy, cz) is in the centered receptor frame; waters are
-                # read from the original PDB, so compare in that frame.
-                dx, dy, dz = protein_prep.frame_offset()
-                waters = detect_water_molecules(source, (cx + dx, cy + dy, cz + dz),
-                                                distance_threshold=args.water_distance)
-                if waters:
-                    logger.info(
-                        f"[✔] Found {len(waters)} water residue(s) within "
-                        f"{args.water_distance}A of the binding site; keeping them in receptor")
-                    keep_residues += [
-                        (w["chain"], w["resnum"], w["resname"]) for w in waters]
-                else:
-                    logger.info("[*] No waters detected near binding site")
-
-            if args.detect_metals:
-                logger.info("[*] Detecting metal ions...")
-                metals = detect_metal_ions(source)
-                if metals:
-                    logger.info(
-                        f"[✔] Found {len(metals)} metal ion(s); keeping them in receptor:")
-                    for metal in metals:
-                        logger.info(
-                            f"   - {metal['name']} ({metal['element']}) chain {metal['chain']} residue {metal['resnum']}")
-                    keep_residues += [
-                        (m["chain"], m["resnum"], m["resname"]) for m in metals]
-                else:
-                    logger.info("[*] No metal ions detected")
-
-            if args.detect_cofactors:
-                logger.info("[*] Detecting cofactors...")
-                cofactors = detect_cofactors(source)
-                if cofactors:
-                    logger.info(
-                        f"[✔] Found {len(cofactors)} cofactor(s); keeping them in receptor:")
-                    for cof in cofactors:
-                        logger.info(
-                            f"   - {cof['name']} chain {cof['chain']} residue {cof['resnum']}")
-                    keep_residues += [
-                        (c["chain"], c["resnum"], c["name"]) for c in cofactors]
-                else:
-                    logger.info("[*] No cofactors detected")
-
-            # Detection scans every chain; keep only residues in the chains
-            # that were docked (the receptor contains nothing else).
-            docked_chains = set(getattr(protein_prep, "selected_chains", None) or [])
-            if docked_chains:
-                outside = [r for r in keep_residues if (r[0] or "A") not in docked_chains]
-                if outside:
-                    logger.warning(
-                        f"[!] Not keeping {len(outside)} residue(s) outside the docked "
-                        f"chain(s) {', '.join(sorted(docked_chains))}: "
-                        + ", ".join(f"{n} {c}{r}" for c, r, n in outside))
-                keep_residues = [r for r in keep_residues if r not in outside]
-            keep_residues = list(dict.fromkeys(keep_residues))
-            if keep_residues:
-                protein_prep.rebuild_receptor_keep_hetatm(keep_residues)
-
-        # ===== PHASE 3: Flexible Receptor Setup (Optional) =====
-        flexible_residues = []
-        flex_file = None
-        rigid_receptor = None
-        if args.flexibility is None and (args.flexible_residues or args.auto_flexible):
-            args.flexibility = 1
-        if args.flexibility and args.flexibility > 0:
-            logger.info("[PHASE 3] Flexible Receptor Setup")
-
-            if args.flexible_residues:
-                flexible_residues = [
-                    r.strip() for r in args.flexible_residues.split(',') if r.strip()]
-                logger.info(
-                    f"[*] Using specified flexible residues: {flexible_residues}")
-            elif args.auto_flexible:
-                flexible_residues = detect_flexible_residues(
-                    protein_prep.receptor_pdbqt, (cx, cy, cz),
-                    radius=8.0, max_residues=args.auto_flexible)
-                logger.info(
-                    f"[*] Auto-selected {len(flexible_residues)} flexible residues near binding site")
-            else:
-                logger.warning(
-                    "[!] Flexibility enabled but no residues specified. Use --flexible-residues or --auto-flexible")
-
-            if flexible_residues:
-                logger.info(
-                    f"[✔] Flexible residues: {', '.join(flexible_residues)}")
-                built_residues = []
-                flex_file = build_flexible_residue_pdbqt(
-                    protein_prep.receptor_pdbqt, flexible_residues, args.output,
-                    built=built_residues)
-                if not flex_file:
-                    logger.warning(
-                        "[!] Flexible receptor could not be built; running rigid docking")
-                else:
-                    # Vina requires flexible residues to be excluded from the
-                    # rigid receptor passed to --receptor.
-                    flexible_residues = built_residues
-                    rigid_receptor = _remove_residues_from_pdbqt(
-                        protein_prep.receptor_pdbqt, built_residues,
-                        os.path.join(args.output, "rigid.pdbqt"), flex_file=flex_file)
-
-        # ===== STEP 3: Docking =====
-        logger.info("[3/5] Docking with Advanced Parameters")
-        resume = not args.no_resume
-
-        vina_params = {
-            'exhaustiveness': args.exhaustiveness,
-            'binding_modes': args.binding_modes,
-            'energy_range': args.energy_range,
-            'seed': args.seed,
-            'min_valid_affinity': args.min_valid_affinity,
-            'extra_args': args.vina_extra,
-            'threads': args.threads,
-        }
-
-        dock_receptor = rigid_receptor if flex_file else protein_prep.receptor_pdbqt
-        grid_box = (cx, cy, cz, sx, sy, sz)
-
-        if args.smina_only:
-            # SMINA replaces Vina: dock with SMINA alone, and report SMINA's
-            # own poses and failures (not Vina metadata next to SMINA scores).
-            if SMINA is None:
-                raise RuntimeError(
-                    "--smina-only requested but SMINA binary not found in PATH")
-            logger.info("[*] SMINA-only mode: docking with SMINA instead of Vina")
-            names = [ligand_name(lig) for lig in ligands]
-            duplicates = sorted({n for n in names if names.count(n) > 1})
-            if duplicates:
-                raise ValueError(
-                    "Duplicate ligand names detected (would overwrite outputs): "
-                    + ", ".join(duplicates))
-            smina_scores = _run_smina_scoring(
-                dock_receptor, ligands, args.output, grid_box, vina_params,
-                num_processes=args.processes, flex_file=flex_file)
-            results = [(ligand_name(lig), smina_scores.get(ligand_name(lig)))
-                       for lig in ligands]
-            if not any(score is not None for _, score in results):
-                raise RuntimeError("SMINA produced no valid score for any ligand")
-            metrics_dict = {
-                name: {"status": "OK" if score is not None else "FAILED",
-                       "vina_tool": "SMINA",
-                       "dock_file": os.path.join(args.output, "docked",
-                                                 f"{name}_smina.pdbqt")}
-                for name, score in results}
-            checkpoint = None
-        else:
-            results, checkpoint, metrics_dict = dock_all(
-                dock_receptor, ligands, protein_prep.grid_conf,
-                args.output, num_processes=args.processes, resume=resume,
-                vina_params=vina_params, flex_file=flex_file
-            )
-
-        # ===== PHASE 4: Consensus Scoring (Optional) =====
-        scorer_agreement = None
-        if args.consensus and not args.smina_only:
-            logger.info("[PHASE 4] Consensus Scoring")
-            if SMINA is None:
-                logger.warning(
-                    "[!] SMINA not found - continuing with Vina-only ranking")
-            else:
-                smina_scores = _run_smina_scoring(
-                    dock_receptor, ligands, args.output, grid_box, vina_params,
-                    num_processes=args.processes, flex_file=flex_file)
-                consensus_rows = []
-                unpaired = []
-                for name, vina_score in results:
-                    smina_score = smina_scores.get(name)
-                    if vina_score is None or smina_score is None:
-                        unpaired.append((name, vina_score, smina_score))
-                        continue
-                    row = consensus_rank(vina_score, smina_score)
-                    consensus_rows.append((name, row))
-                consensus_file = os.path.join(
-                    args.output, "consensus_ranking.csv")
-                with open(consensus_file, "w", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(
-                        ["Ligand", "Vina_Affinity", "SMINA_Affinity",
-                         "Consensus", "Agreement (heuristic)"])
-                    for name, row in sorted(
-                            consensus_rows,
-                            key=lambda kv: (kv[1]["consensus"], kv[0])):
-                        writer.writerow([
-                            name, _score_csv(row["vina"]),
-                            _score_csv(row["smina"]),
-                            _score_csv(row["consensus"]),
-                            f"{row['agreement']:.1f}%"])
-                    # Ligands one engine could not score are listed, not dropped.
-                    for name, vina_score, smina_score in sorted(unpaired):
-                        writer.writerow([name, _score_csv(vina_score),
-                                         _score_csv(smina_score), "NA", "NA"])
-                # Global, citable scorer concordance (Spearman rank corr).
-                rho, n_agree = scorer_agreement_spearman(
-                    [row["vina"] for _, row in consensus_rows],
-                    [row["smina"] for _, row in consensus_rows])
-                scorer_agreement = {"rho": rho, "n": n_agree}
-                try:
-                    with open(consensus_file, "a", newline="") as f:
-                        f.write("\n")
-                        if rho is not None:
-                            f.write(
-                                f"# Global scorer agreement: Spearman rho "
-                                f"= {rho:.3f} (n={n_agree}); Vina vs SMINA "
-                                f"rank correlation (citable metric).\n")
-                        else:
-                            f.write(
-                                f"# Global scorer agreement: undefined "
-                                f"(n={n_agree}).\n")
-                except Exception as e:
-                    logger.warning(f"Could not append agreement summary: {e}")
-                logger.info(
-                    f"[✔] Consensus ranking saved: {consensus_file} "
-                    f"({len(consensus_rows)} ligands)")
-
-        # ===== STEP 4: Results Analysis =====
-        logger.info("[4/5] Results Analysis + Metrics")
-        if resume and checkpoint is not None and checkpoint.completed:
-            logger.info(
-                f"[✔] Checkpoint updated: {len(checkpoint.completed)} successful dockings")
-
-        # ===== PHASE 1: Advanced Result Analysis =====
-        html_report_file = os.path.join(args.output, "results_report.html")
-        if args.html_report or args.cluster_poses:
-            logger.info("[PHASE 1] Advanced Result Analysis")
-
-            # Generate clustering analysis
-            if args.cluster_poses:
-                logger.info("[*] Performing pose clustering...")
-                poses_dir = os.path.join(args.output, "docked")
-                clusters = cluster_poses(
-                    poses_dir, rmsd_threshold=args.rmsd_threshold,
-                    ligands=[name for name, _ in results])
-
-                # Save clustering data
-                clusters_file = os.path.join(args.output, "pose_clusters.json")
-                try:
-                    with open(clusters_file, 'w') as f:
-                        # Convert cluster data to serializable format
-                        clusters_data = {}
-                        for ligand, ligand_clusters in clusters.items():
-                            clusters_data[ligand] = [
-                                {'id': c['id'], 'pose_count': len(c['poses'])}
-                                for c in ligand_clusters
-                            ]
-                        json.dump(clusters_data, f, indent=2)
-                    logger.info(f"[✔] Clustering saved to: {clusters_file}")
-                except Exception as e:
-                    logger.warning(f"Could not save clustering data: {e}")
-
-        # ===== STEP 5: Save Results =====
-        logger.info("[5/5] Saving Results")
-        analyzer = ResultsAnalyzer(args.output, top_n=args.top_n)
-        analyzer.save_ranking(results, mode="extended",
-                              metrics_dict=metrics_dict)
-        analyzer.save_metrics_report(results, metrics_dict)
-
-        # Generate the HTML report AFTER ranking.csv exists.
-        html_ok = False
-        if args.html_report:
-            logger.info("[*] Generating professional HTML report...")
-            ranking_csv = os.path.join(args.output, 'ranking.csv')
-            report_meta = {
-                "Protein (receptor)": os.path.basename(args.receptor),
-                "Ligand library": args.library,
-                "Ligands screened": len(results),
-                "Top N reported": args.top_n,
-                "Exhaustiveness": args.exhaustiveness,
-                "Seed": args.seed,
-            }
-            html_ok = generate_html_report(ranking_csv, os.path.join(
-                args.output, "docked"), html_report_file,
-                receptor_pdbqt=protein_prep.receptor_pdbqt,
-                meta=report_meta,
-                grid_file=protein_prep.grid_conf,
-                scorer_agreement=scorer_agreement,
-                rmsd_threshold=args.rmsd_threshold)
-
-        logger.info("=" * 70)
-        logger.info(f"PIPELINE COMPLETED SUCCESSFULLY (v{__version__})")
-        logger.info("=" * 70)
-        logger.info(f"Results saved to: {args.output}")
-        logger.info(f"\n📊 STANDARD OUTPUT:")
-        logger.info(f"  ✓ Ranking: {analyzer.csv_file}")
-        logger.info(f"  ✓ Full results: {analyzer.results_file}")
-        logger.info(f"  ✓ Top hits: {analyzer.top_hits_file}")
-        logger.info(f"  ✓ Metrics: {analyzer.metrics_file}")
-        if os.path.exists(protein_prep.pocket_summary_file):
-            logger.info(
-                f"  ✓ Pocket summary: {protein_prep.pocket_summary_file}")
-        if os.path.exists(lib_manager.metadata_file):
-            logger.info(f"  ✓ Ligand metadata: {lib_manager.metadata_file}")
-        if os.path.exists(protein_prep.grid_box_script):
-            logger.info(
-                f"  ✓ Grid visualization: {protein_prep.grid_box_script}")
-        logger.info(
-            f"  ✓ Docked structures: {os.path.join(args.output, 'docked')}")
-
-        # Show new Phase 1 outputs
-        if args.html_report:
-            logger.info(f"\n📈 PHASE 1 (Advanced Analysis):")
-            if html_ok:
-                logger.info(f"  ✓ HTML Report: {html_report_file}")
-            else:
-                logger.warning("  ✗ HTML Report could not be written (see warnings above)")
-        if args.cluster_poses:
-            logger.info(
-                f"  ✓ Pose Clustering: {os.path.join(args.output, 'pose_clusters.json')}")
-
-        # Show Phase 2 outputs
-        if args.keep_waters or args.detect_metals or args.detect_cofactors:
-            logger.info(f"\n🔧 PHASE 2 (Smart Preprocessing):")
-            if args.detect_metals or args.detect_cofactors:
-                logger.info(f"  ✓ See above for detected metals/cofactors")
-
-        # Show Phase 3 outputs
-        if args.flexibility and args.flexibility > 0:
-            logger.info(f"\n🎯 PHASE 3 (Flexible Docking):")
-            logger.info(
-                f"  ✓ Flexible residues: {', '.join(flexible_residues) if flexible_residues else 'None'}")
-
-        logger.info(f"\n📊 Total compounds docked: {len(results)}")
-        logger.info("=" * 70)
-
+        exit_code = _run_pipeline(args, state)
+        status = "completed" if exit_code == EXIT_OK else "too_many_failures"
     except KeyboardInterrupt:
-        logger.warning(
-            "\n[!] Pipeline interrupted. Progress saved to checkpoint.")
-        logger.info("Resume next time with same command.")
-        sys.exit(1)
+        status, exit_code, error = "interrupted", EXIT_INTERRUPTED, "KeyboardInterrupt"
+        if state["docking_started"] and not args.smina_only:
+            logger.warning("[!] Pipeline interrupted. Docking progress is saved in the "
+                           "checkpoint; rerun the same command to resume.")
+        else:
+            logger.warning("[!] Pipeline interrupted before docking started.")
     except Exception as e:
-        logger.error(f"Pipeline failed: {e}")
+        error = f"{type(e).__name__}: {e}"
+        logger.error(f"Pipeline failed: {error}")
         if args.verbose:
             import traceback
             logger.error(traceback.format_exc())
-        sys.exit(1)
+    finally:
+        extra = {}
+        protein = state.get("protein")
+        if protein is not None and hasattr(protein, "reduce_used"):
+            extra["reduce_used"] = bool(protein.reduce_used)
+        library = state.get("library")
+        if library is not None:
+            extra["ligand_preparation"] = {"failed": len(library.failed),
+                                           "superseded": len(library.superseded)}
+        if "docking_failures" in state:
+            extra["docking_failures"] = state["docking_failures"]
+        manifest_file = os.path.join(args.output, "run_manifest.json")
+        try:
+            write_run_manifest(manifest_file, _build_manifest(
+                args, argv, tools, started_at, status, exit_code, error, extra))
+        except OSError as e:
+            logger.warning(f"Could not write {manifest_file}: {e}")
+    if exit_code != EXIT_OK:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":
