@@ -142,8 +142,8 @@ pipeline in five phases:
    report with affinity statistics, pose clustering, and an embedded NGL
    viewer.
 
-The Docker image is multi-stage: Vina, QuickVina 2, SMINA and fpocket are
-compiled from pinned git submodules, Open Babel and the other system
+The Docker image is multi-stage: Vina, QuickVina 2, SMINA, fpocket and Open
+Babel 3.2.1 are compiled from pinned git submodules, the other system
 packages come from a pinned Debian snapshot, and the runtime image is
 minimal and non-root. Images are published for linux/amd64 and
 linux/arm64. The design goal is that the entire pipeline — from raw receptor

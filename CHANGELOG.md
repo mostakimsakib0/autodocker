@@ -15,16 +15,17 @@ changes (below) are part of 2.0.0.
   from hydrogen positions, so re-preparing the same receptor changed scores.
   Hydrogens in the input receptor are now removed before protonation at
   `--ph` (pre-protonated inputs such as DUD-E receptors previously got an
-  extra, randomly placed hydrogen on every Lys NZ and Arg NH1), and any
-  hydrogen that still differs between two Open Babel runs is re-placed
-  deterministically from the heavy atoms. The 1HSG case-study receptor is
-  unchanged.
-- **(results)** Ligand hydrogens are deterministic: the same two-run check
-  is applied to every ligand conversion that adds or keeps hydrogens (some
-  MOL2 inputs got randomly placed amine hydrogens). When the two runs agree,
-  a third run is compared, because runs started within the same clock tick
-  share Open Babel's seed and can agree by chance; files are compared byte
-  for byte (not by `filecmp`'s size/mtime shortcut).
+  extra, randomly placed hydrogen on every Lys NZ and Arg NH1 with Open
+  Babel 3.1.1), and any hydrogen that moves between Open Babel runs with
+  different random seeds is re-placed deterministically from the heavy
+  atoms. The 1HSG case-study receptor is unchanged.
+- **(results)** Ligand hydrogens are deterministic: the same check is
+  applied to every ligand conversion that adds or keeps hydrogens (some
+  MOL2 inputs got randomly placed amine hydrogens). The probe conversions
+  use other seeds than the output (`OB_RANDOM_SEED` = seed + 1, then seed
+  + 2 when the first two agree; Open Babel 3.1, which ignores the variable,
+  can draw the same clock seed twice); files are compared byte for byte
+  (not by `filecmp`'s size/mtime shortcut).
 - **(results)** 2D ligands get 3D coordinates from RDKit ETKDGv3 seeded with
   `--seed` (Open Babel `--gen3d` gave different coordinates on every run; it
   remains a fallback without RDKit, with a warning). This includes 2D MOL2
@@ -210,6 +211,30 @@ changes (below) are part of 2.0.0.
 
 ### Changed
 
+- **(results)** Open Babel 3.2.1 replaces 3.1.1. The image builds it from
+  the pinned submodule `tools/openbabel/repo` (tag `openbabel-3-2-1`,
+  commit `0e94434f`) with `-ffp-contract=off` like the other tools, instead
+  of installing Debian's 3.1.1 package; SMINA links the same build, and the
+  CI test matrix uses the hash-pinned upstream wheel. Open Babel 3.2 makes
+  its random generator seedable through `OB_RANDOM_SEED` (upstream PR
+  #2241; issues #2420 and #1934: added hydrogens and `--gen3d` coordinates
+  differed between runs) and no longer adds a hydrogen to an already
+  protonated Lys NZ or Arg NH (PR #2380: the pH model incremented the
+  hydrogen count of charged atoms that already had their hydrogens).
+  AutoDocker sets `OB_RANDOM_SEED` to `--seed` on every Open Babel call and
+  records `openbabel_version` and `openbabel_random_seed` in
+  `run_manifest.json`. Effects on valid inputs (`docs/openbabel.md`): the
+  39 CASF-2016 and 10 DUD-E receptors keep identical atoms, coordinates,
+  charges and Vina atom types (the occupancy column now reads 1.00 and two
+  REMARK column-header lines are gone); MMFF94-minimized SDF ligands move
+  slightly (36 of 69 in the test set, heavy-atom RMSD median 0.20 Å, max
+  0.88 Å); the 1HSG case study gives the same receptor atoms, scores and
+  poses. Open Babel < 3.2.0 is still accepted for native installs, with a
+  warning: its output stays deterministic but differs from the image's.
+- Open Babel 3.2 copies PDB header records of the input (COMPND, AUTHOR,
+  REMARK, ...) into PDBQT files, which AutoDock Vina rejects ("Unknown or
+  inappropriate tag") and which carried the input path; they are removed
+  from every PDBQT Open Babel writes for the pipeline.
 - **CLI:** abbreviated long options are no longer accepted (`--lig`,
   `--out`, `--mw-ma`, ...; write `--ligands`, `--output`, `--mw-max`). The
   container entry point has to recognise `-r/-l/-o/--library` exactly as the
@@ -261,7 +286,9 @@ changes (below) are part of 2.0.0.
   unchanged. On arm64, fpocket reads PDB input only, which is all AutoDocker
   uses.
 - Reproducible image builds: base images pinned by digest, Debian packages
-  from a dated snapshot (Open Babel 3.1.1 asserted), NGL from a lockfile,
+  from a dated snapshot, Open Babel 3.2.1 built from a pinned submodule
+  (version asserted; `SOURCE_DATE_EPOCH` keeps the build time out of
+  `obabel -V`), NGL from a lockfile,
   exact Python pins (now including RDKit), and `autodocker/VERSION` as the
   single version source.
 - `--max-compounds`, `--max-failure-fraction`, `--no-lipinski`.
@@ -306,8 +333,9 @@ changes (below) are part of 2.0.0.
 
 ### CI
 
-- One workflow: Python 3.9 to 3.12 with the official Vina 1.2.7, ruff,
-  shellcheck and hadolint; on pull requests the image is built for both
+- One workflow: Python 3.9 to 3.12 with the official Vina 1.2.7 and Open
+  Babel 3.2.1 (upstream wheel pinned by SHA-256; the tests fail on Open
+  Babel < 3.2), ruff, shellcheck and hadolint; on pull requests the image is built for both
   architectures and a smoke screen must reproduce byte for byte.
 
 ## 1.1.5 (never released; superseded by 2.0.0)

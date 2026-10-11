@@ -123,11 +123,17 @@ for a MOL2 without hydrogens.
 
 ## Hydrogen placement
 
-Open Babel places some hydrogens in a random direction, seeded from the clock
-(`usec % 70092`). To make the result deterministic:
-- Each conversion runs at least twice, and hydrogens that differ between runs are
-  re-placed from heavy-atom geometry.
-- When the first two runs agree, a third is compared.
+Open Babel places some hydrogens in a random direction (waters, isolated atoms,
+two-atom fragments, some MOL2 amines). Open Babel >= 3.2 draws that direction from
+a generator seeded with `OB_RANDOM_SEED`, which AutoDocker sets to `--seed`; 3.1
+seeds it from the clock (`usec % 70092`). Either way the direction is a random
+draw, not chemistry, so:
+- Each conversion runs with the run seed S and is compared with a probe
+  conversion with seed S+1; hydrogens that move between the two are re-placed
+  from heavy-atom geometry (the result does not depend on S).
+- When the two agree, a third conversion (seed S+2) is compared. With 3.2 two
+  different seeds expose every random hydrogen already; the third run covers
+  Open Babel 3.1, where two runs can draw the same clock seed.
 
-A random hydrogen can therefore survive only if all three runs drew the same seed,
-about 1 in 70092² (about 2e-10) per conversion.
+With Open Babel 3.1 a random hydrogen can therefore survive only if all three
+runs drew the same clock seed, about 1 in 70092² (about 2e-10) per conversion.

@@ -23,8 +23,9 @@ docker pull ghcr.io/mostakimsakib0/autodocker:v2.0.0
 docker tag ghcr.io/mostakimsakib0/autodocker:v2.0.0 autodocker
 ```
 
-or build it from source (Vina, QuickVina 2, SMINA and fpocket are compiled
-from pinned submodules; Open Babel comes from a pinned Debian snapshot):
+or build it from source (Vina, QuickVina 2, SMINA, fpocket and Open Babel
+3.2.1 are compiled from pinned submodules; system libraries come from a
+pinned Debian snapshot):
 
 ```bash
 git clone --recurse-submodules https://github.com/mostakimsakib0/autodocker.git
@@ -137,7 +138,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `--mw-min/--mw-max/--logp-max` | `custom` only: replace Lipinski's MW and logP limits (Open Babel logP) | `200/500/5` |
 | `--max-compounds` | PubChem compounds to prepare | `20` |
 | `--no-lipinski` | Skip the Lipinski filter (SDF/PubChem inputs; zero violations allowed). `--no-admet` is a deprecated alias | filter on |
-| `--no-minimize` | Skip MMFF94 minimization (SDF/PubChem ligands only) | off |
+| `--no-minimize` | Skip MMFF94 minimization (SDF/PubChem ligands only). 2D inputs, also 2D MOL2/PDB, still get seeded RDKit 3D coordinates | off |
 | `--chain` | Chains to keep, e.g. `A`, `A,B`, or `all` (case-sensitive; checked against the receptor before any ligand is prepared); a blank chain ID is chain `A`; a blank chain next to a real chain `A` is refused | first chain, with a warning |
 | `--ph` | pH for receptor hydrogens (Open Babel `-p`), 0 to 14 | `7.4` |
 | `--pockets` | fpocket pocket numbers, e.g. `1` or `2,3` (not with `--no-fpocket`, or with `--grid-center` and `--grid-size` together) | best score |
@@ -195,6 +196,11 @@ options must be finite numbers. Settings are logged in `run_manifest.json`
 | `VS_SEED` | RNG seed (an explicit `--seed` takes precedence) | `42` |
 | `PUBCHEM_REST` | PubChem REST base (mirrors) | official |
 
+`OB_RANDOM_SEED` is not read from the environment: AutoDocker sets it to the
+seed on every Open Babel call (`run_manifest.json`: `openbabel_random_seed`).
+`BABEL_LIBDIR`/`BABEL_DATADIR` locate Open Babel's plugins and data (set in
+the image; recorded in `run_manifest.json` when set).
+
 ## Exit status
 
 | Code | Meaning |
@@ -221,9 +227,10 @@ argument. `--help` and `--version` work without a workspace.
 ## Reproducibility
 
 Every random step is seeded or made deterministic: Vina runs with `--seed`;
-hydrogens that Open Babel would place in random directions (receptor and
-ligand) are re-placed deterministically; 2D ligands get 3D coordinates from
-RDKit ETKDG seeded with `--seed`; Open Babel runs single-threaded. Repeating a
+every Open Babel call runs with `OB_RANDOM_SEED` set to `--seed`
+(single-threaded); hydrogens that Open Babel places in random directions
+(receptor and ligand) are re-placed deterministically from the heavy atoms;
+2D ligands get 3D coordinates from RDKit ETKDG seeded with `--seed`. Repeating a
 run with the same inputs, options and image gives byte-identical
 `ranking.csv`, summaries and poses on the same CPU architecture, for any `-p`
 or `--threads`. Whether amd64 and arm64 results are identical is measured in
@@ -240,9 +247,24 @@ bootstrap confidence intervals) with boxes from the crystal ligands, a
 raw-Vina parity check, and throughput scaling. Results for 2.0.0 are pending;
 every benchmark is reproducible from `scripts/benchmark_*.py`.
 
+## Requirements
+
+The Docker image contains everything. A native install needs Python 3.9-3.12
+with `requirements.txt` (RDKit included), AutoDock Vina 1.2.x, fpocket (unless
+`--no-fpocket` or an explicit box) and **Open Babel >= 3.2.0**; the image
+builds Open Babel 3.2.1, the release AutoDocker 2.0 is validated with.
+Open Babel 3.2 honours the `OB_RANDOM_SEED` variable AutoDocker sets and no
+longer over-protonates pre-protonated Lys/Arg. Older releases (e.g. a Linux
+distribution's 3.1.1) still give reproducible runs, with a warning, but
+results that are not comparable with the image's;
+`run_manifest.json` records `openbabel_version`. Install options (conda-forge,
+pip, source) are in [`docs/installation.md`](docs/installation.md); the
+3.1.1 -> 3.2.1 differences are in [`docs/openbabel.md`](docs/openbabel.md).
+
 ## More docs
 
 - [`docs/installation.md`](docs/installation.md) — Docker and native setup, troubleshooting
+- [`docs/openbabel.md`](docs/openbabel.md) — Open Babel version, `OB_RANDOM_SEED`, 3.1.1 -> 3.2.1 changes
 - [`docs/reproducibility.md`](docs/reproducibility.md) — determinism guarantees and how to verify
 - [`docs/input_validation.md`](docs/input_validation.md) — input checks, receptor and ligand preparation rules
 - [`docs/user_testing.md`](docs/user_testing.md) — fresh-machine testing template and bug report form
