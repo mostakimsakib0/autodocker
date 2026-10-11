@@ -136,7 +136,7 @@ def test_parse_sdf_properties(monkeypatch, tmp_path):
     p.write_text(VALID_SDF)
     monkeypatch.setattr(
         admet, "_obabel_descriptors",
-        lambda f: {"mw": 300.0, "logp": 2.0, "tpsa": 60.0,
+        lambda f, seed=None: {"mw": 300.0, "logp": 2.0, "tpsa": 60.0,
                    "rotors": 3.0, "hbd": 1.0, "hba": 2.0})
     props = admet.LipinskiFilter.parse_sdf_properties(str(p))
     assert props["mw"] == 300.0 and props["hba"] == 2.0
@@ -168,7 +168,8 @@ def test_obabel_descriptors_single_threaded(monkeypatch, tmp_path):
     props = admet._obabel_descriptors(str(p))
     assert props == {"mw": 46.07, "logp": -0.0014, "tpsa": 20.23, "rotors": 0.0,
                      "hbd": 1.0, "hba": 1.0}
-    assert calls[0][1] == {"OMP_NUM_THREADS": "1"}
+    # One thread and the default OB_RANDOM_SEED (no run seed given).
+    assert calls[0][1] == {"OMP_NUM_THREADS": "1", "OB_RANDOM_SEED": "42"}
     assert "HBA2" in calls[0][0][-1]
 
 
@@ -182,7 +183,7 @@ def test_small_valid_sdf_containing_404_is_accepted(tmp_path):
 
 
 def test_sdf_data_items_used_when_obabel_fails(tmp_path, monkeypatch):
-    monkeypatch.setattr(admet, "_obabel_descriptors", lambda p: None)
+    monkeypatch.setattr(admet, "_obabel_descriptors", lambda p, seed=None: None)
     p = tmp_path / "a.sdf"
     p.write_text("mol\n  test\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n"
                  "    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n"

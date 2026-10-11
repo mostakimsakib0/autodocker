@@ -255,7 +255,8 @@ def formula_counts(formula):
 def smiles_formula(smiles):
     """Heavy-atom element counts of a SMILES string."""
     out = subprocess.run(["obabel", f"-:{smiles}", "-d", "-otxt", "--append", "formula"],
-                         capture_output=True, text=True).stdout.strip()
+                         capture_output=True, text=True,
+                         env=_benchlib.obabel_env()).stdout.strip()
     return formula_counts(out)
 
 
@@ -364,7 +365,8 @@ def write_ligand_files(mol, sdf_path, mol2_path, name):
         f.write(Chem.MolToMolBlock(mol, kekulize=True))
         f.write("$$$$\n")
     subprocess.run(["obabel", "-isdf", sdf_path, "-omol2", "-O", mol2_path],
-                   check=True, capture_output=True, timeout=_benchlib.TOOL_TIMEOUT)
+                   check=True, capture_output=True, timeout=_benchlib.TOOL_TIMEOUT,
+                   env=_benchlib.obabel_env())
 
 
 def check_ligand_files(sdf_path, mol2_path, ref_key):

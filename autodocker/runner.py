@@ -34,7 +34,7 @@ import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from vspipeline import defaults
 from vspipeline import outputs
@@ -255,6 +255,7 @@ from vspipeline.flexible import (  # noqa: E402
     build_flexible_residue_pdbqt,
     detect_flexible_residues,
     missing_residues,
+    residue_identity,
 )
 from vspipeline.consensus import (  # noqa: E402
     _run_smina_scoring,
@@ -285,6 +286,7 @@ from vspipeline.checkpoint import (  # noqa: E402
     release_lock,
 )
 from vspipeline.library import LibraryManager  # noqa: E402
+from vspipeline.hydrogens import probe_seed  # noqa: E402
 from vspipeline.utils import (  # noqa: E402
     _parse_chain_selection,
     available_cpus,
@@ -294,6 +296,10 @@ from vspipeline.utils import (  # noqa: E402
     parse_pdb_coords,
     run,
     run_obabel,
+    OB_RANDOM_SEED_ENV,
+    OBABEL_SEEDABLE_VERSION,
+    OBABEL_VALIDATED_VERSION,
+    obabel_version,
 )
 from vspipeline.protein import ProteinPreparation  # noqa: E402
 from vspipeline import protein as protein_module  # noqa: E402
@@ -357,7 +363,8 @@ __all__ = [
     "acquire_lock", "release_lock",
     # utils
     "_parse_chain_selection", "available_cpus", "ligand_name", "_safe_ligand_id",
-    "get_chains", "parse_pdb_coords", "run", "run_obabel",
+    "get_chains", "parse_pdb_coords", "run", "run_obabel", "OB_RANDOM_SEED_ENV",
+    "OBABEL_SEEDABLE_VERSION", "OBABEL_VALIDATED_VERSION", "obabel_version",
     # docking
     "AFFINITY_FLOOR", "DockJob", "EngineConfig", "Status", "_VINA_CPU_FLAG_CACHE",
     "_build_vina_command", "_calculate_metrics", "_calculate_protocol_simscore",
@@ -926,10 +933,62 @@ def _probe_tools(args) -> Dict[str, Dict]:
     return probes
 
 
+def _version_text(version: Optional[Tuple[int, ...]]) -> Optional[str]:
+    return ".".join(str(v) for v in version) if version else None
+
+
+def _check_openbabel(seed: int) -> Dict:
+    """Open Babel version policy; returns the run_manifest.json entries.
+
+    Open Babel >= 3.2.0 is recommended and 3.2.1 is what the container image
+    builds and the 2.x results were produced with. An older Open Babel (e.g.
+    3.1.1 from a Linux distribution) is accepted with a loud warning: it
+    ignores OB_RANDOM_SEED and over-protonates pre-protonated Lys/Arg, but
+    the input-hydrogen removal and the hydrogen re-placement still make its
+    output deterministic. Results then differ from the image's (MMFF94
+    minimization), and the manifest records the version so they stay
+    traceable."""
+    version = obabel_version(OBABEL)
+    seeded = version is not None and version >= OBABEL_SEEDABLE_VERSION
+    validated = _version_text(OBABEL_VALIDATED_VERSION)
+    if version is None:
+        logger.warning(f"[!] Could not read the Open Babel version from '{OBABEL} -V'; "
+                       f"AutoDocker {__version__} is validated with Open Babel {validated}")
+    elif not seeded:
+        logger.warning("!" * 70)
+        logger.warning(
+            f"[!] Open Babel {_version_text(version)} found; AutoDocker {__version__} "
+            f"needs Open Babel >= {_version_text(OBABEL_SEEDABLE_VERSION)} for its "
+            f"published behaviour (the container image ships {validated}).")
+        logger.warning(
+            "[!] This version ignores OB_RANDOM_SEED, and its MMFF94 minimization and "
+            "PDBQT output differ: results are reproducible run to run, but NOT "
+            f"comparable with results from Open Babel {validated}. See docs/openbabel.md.")
+        logger.warning("!" * 70)
+    elif version != OBABEL_VALIDATED_VERSION:
+        logger.info(f"[*] Open Babel {_version_text(version)} (AutoDocker {__version__} "
+                    f"is validated with {validated})")
+    return {
+        "openbabel_version": _version_text(version),
+        "openbabel_random_seed": {
+            "variable": OB_RANDOM_SEED_ENV,
+            "value": seed,
+            "hydrogen_probe_values": [probe_seed(seed, 1), probe_seed(seed, 2)],
+            "honoured": seeded,
+            "policy": (
+                "Every Open Babel call runs with OB_RANDOM_SEED set to the run's --seed; "
+                "the hydrogen-placement probe conversions use the next two seeds, and "
+                "hydrogens that move between seeds are re-placed from heavy-atom "
+                "geometry. Open Babel < 3.2.0 ignores the variable (clock seed)."),
+        },
+    }
+
+
 def _environment_snapshot() -> Dict[str, str]:
     return {k: v for k, v in sorted(os.environ.items())
             if k.startswith("VS_") or k in ("OMP_NUM_THREADS", "AUTODOCKER_VERSION",
-                                            "PUBCHEM_REST")}
+                                            "PUBCHEM_REST", "BABEL_LIBDIR",
+                                            "BABEL_DATADIR")}
 
 
 def _python_packages() -> Dict[str, Optional[str]]:
@@ -1114,7 +1173,7 @@ def _run_pipeline(args, state: Dict) -> int:
 
     # ===== [2/5] Receptor and box =====
     logger.info("[2/5] Receptor preparation and docking box")
-    protein_prep = ProteinPreparation(args.receptor, args.output)
+    protein_prep = ProteinPreparation(args.receptor, args.output, seed=args.seed)
     state["protein"] = protein_prep
     protein_prep.validate()
 
@@ -1252,8 +1311,8 @@ def _run_pipeline(args, state: Dict) -> int:
         if args.flexible_residues:
             # Residues named by the user must all be built: docking with
             # fewer (or none) would not be the requested experiment.
-            built_keys = {_parse_residue_key(k) for k in built_residues}
-            not_built = [k for k in requested if _parse_residue_key(k) not in built_keys]
+            built_keys = {residue_identity(k) for k in built_residues}
+            not_built = [k for k in requested if residue_identity(k) not in built_keys]
             if not_built:
                 raise RuntimeError(
                     f"--flexible-residues: could not build {', '.join(not_built)} as "
@@ -1511,6 +1570,7 @@ def _main_locked(args, argv: List[str], started_at: str) -> int:
     try:
         try:
             tools = _probe_tools(args)
+            state["openbabel"] = _check_openbabel(args.seed)
             _remove_stale_outputs(args.output)
             exit_code = _run_pipeline(args, state)
             status = "completed" if exit_code == EXIT_OK else "too_many_failures"
@@ -1576,6 +1636,8 @@ def _write_final_manifest(args, argv, tools, started_at, status, exit_code, erro
     if "flexible_residues" in state:
         # The residues docked as flexible side chains ([] = rigid).
         extra["flexible_residues"] = list(state["flexible_residues"])
+    # Open Babel version and OB_RANDOM_SEED policy (see _check_openbabel).
+    extra.update(state.get("openbabel") or {})
     manifest_file = os.path.join(args.output, outputs.RUN_MANIFEST_JSON)
     try:
         write_run_manifest(manifest_file, _build_manifest(

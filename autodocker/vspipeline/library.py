@@ -262,10 +262,10 @@ def _same_pdbqt_atom(a: str, b: str) -> bool:
         return False
 
 
-def _unsupported_elements_hint(fmt: str, path: str) -> str:
+def _unsupported_elements_hint(fmt: str, path: str, seed: Optional[int] = None) -> str:
     """' (element(s) X have no ...)' naming the elements of ``path`` that
     Open Babel cannot assign Gasteiger charges to, or ''."""
-    bad = elements_without_gasteiger(molecule_elements(path, fmt))
+    bad = elements_without_gasteiger(molecule_elements(path, fmt, seed=seed))
     if not bad:
         return ""
     return (f" (element(s) {', '.join(bad)} have no Gasteiger charge parameters in "
@@ -526,7 +526,7 @@ class LibraryManager:
         source, removed = self._largest_fragment("sdf", sdf_file, ligand_id)
         props = None
         if limits:
-            props = runner.ADMETFilter.parse_sdf_properties(source)
+            props = runner.ADMETFilter.parse_sdf_properties(source, seed=self.seed)
             passes, violations = runner.ADMETFilter.check_lipinski(props, **limits)
             if not passes:
                 for path in {sdf_file, source}:
@@ -591,19 +591,19 @@ class LibraryManager:
             os.remove(out)
         try:
             run_obabel_deterministic([f"-i{fmt}", src, "-opdbqt", "-O", out, *extra_args],
-                                     out, kind="ligand")
+                                     out, kind="ligand", seed=self.seed)
         except RuntimeError as e:
-            raise RuntimeError(f"{e}{_unsupported_elements_hint(fmt, src)}") from e
+            raise RuntimeError(f"{e}{_unsupported_elements_hint(fmt, src, self.seed)}") from e
         if not os.path.exists(out) or os.path.getsize(out) == 0:
             if os.path.exists(out):
                 os.remove(out)
             raise RuntimeError("Open Babel produced an empty PDBQT"
-                               + _unsupported_elements_hint(fmt, src))
+                               + _unsupported_elements_hint(fmt, src, self.seed))
         if not runner._ensure_pdbqt_has_charges(out):
             try:
-                runner._fix_pdbqt_charges(out, src, gen3d=False)
+                runner._fix_pdbqt_charges(out, src, gen3d=False, seed=self.seed)
             except RuntimeError as e:
-                raise RuntimeError(f"{e}{_unsupported_elements_hint(fmt, src)}") from e
+                raise RuntimeError(f"{e}{_unsupported_elements_hint(fmt, src, self.seed)}") from e
         elif _zero_charge_polar_hydrogens(out) and fmt in ("sdf", "mol2"):
             self._charge_added_hydrogens(fmt, src, out)
         problem = _ligand_pdbqt_problem(out)
@@ -627,9 +627,10 @@ class LibraryManager:
             protonated = os.path.join(tmp, f"protonated.{fmt}")
             charged = os.path.join(tmp, "charged.pdbqt")
             runner.run_obabel([f"-i{fmt}", src, f"-o{fmt}", "-O", protonated, "-h"],
-                              outputs=[protonated])
+                              outputs=[protonated], seed=self.seed)
             runner.run_obabel([f"-i{fmt}", protonated, "-opdbqt", "-O", charged,
-                               "--partialcharge", "gasteiger"], outputs=[charged])
+                               "--partialcharge", "gasteiger"], outputs=[charged],
+                              seed=self.seed)
             with open(charged, encoding="utf-8") as f:
                 reference = [line for line in f if line.startswith(("ATOM", "HETATM"))]
         with open(out, encoding="utf-8") as f:
@@ -703,7 +704,7 @@ class LibraryManager:
         ``fragments_removed``.
         """
         if props is None:
-            props = runner.ADMETFilter.parse_sdf_properties(sdf_file) or {}
+            props = runner.ADMETFilter.parse_sdf_properties(sdf_file, seed=self.seed) or {}
         input_is_2d = not _sdf_has_3d_coords(sdf_file)
         source = sdf_file
         coordinates = "input"
@@ -725,7 +726,7 @@ class LibraryManager:
                 # Open Babel exits 0 even when MMFF94 cannot be set up (e.g.
                 # boron compounds) and then writes nothing, so check the file.
                 try:
-                    runner.run_obabel(cmd, outputs=[minimized_file])
+                    runner.run_obabel(cmd, outputs=[minimized_file], seed=self.seed)
                 except ObabelNoOutput:
                     raise RuntimeError("Open Babel wrote no minimized molecule "
                                        "(MMFF94 setup failed?)") from None
@@ -786,7 +787,7 @@ class LibraryManager:
         with tempfile.TemporaryDirectory(prefix="autodocker_") as tmp:
             protonated = os.path.join(tmp, "protonated.pdb")
             run_obabel_deterministic(["-ipdb", src, "-opdb", "-O", protonated, "-h"],
-                                     protonated, kind="ligand")
+                                     protonated, kind="ligand", seed=self.seed)
             return self._convert_to_pdbqt(
                 "pdb", protonated, out,
                 ("--partialcharge", "gasteiger", "--title",
@@ -805,7 +806,7 @@ class LibraryManager:
         flat_sdf = os.path.join(self.minimized_dir, f"{ligand_id}_2d.sdf")
         title_args = ["--title", title] if title is not None else []
         runner.run_obabel([f"-i{fmt}", src, "-osdf", "-O", flat_sdf, *title_args],
-                          outputs=[flat_sdf])
+                          outputs=[flat_sdf], seed=self.seed)
         try:
             gen3d_file, method = self._generate_3d(flat_sdf, ligand_id)
         except LigandRejected as e:
@@ -828,13 +829,13 @@ class LibraryManager:
         as there is no way to tell which one is the ligand. Fragments are
         found by Open Babel (bonds as written, or perceived for PDB).
         """
-        stdout = runner.run_obabel([f"-i{fmt}", path, "-ocan"])
+        stdout = runner.run_obabel([f"-i{fmt}", path, "-ocan"], seed=self.seed)
         first = (stdout.splitlines() or [""])[0]
         smiles, _, title = first.partition("\t")
         if "." not in smiles.strip():
             return path, []
         stdout = runner.run_obabel([f"-i{fmt}", path, "--separate", "-d", "-ocan",
-                                    "--append", "atoms"])
+                                    "--append", "atoms"], seed=self.seed)
         fragments = []
         for line in stdout.splitlines():
             tokens = line.split()
@@ -861,7 +862,7 @@ class LibraryManager:
         with tempfile.TemporaryDirectory(prefix="autodocker_") as tmp:
             base = os.path.join(tmp, f"frag.{fmt}")
             runner.run_obabel([f"-i{fmt}", path, f"-o{fmt}", "-O", base, "--separate",
-                               "-m", "--title", title.strip()])
+                               "-m", "--title", title.strip()], seed=self.seed)
             written = os.path.join(tmp, f"frag{keep + 1}.{fmt}")
             if not os.path.exists(written) or os.path.getsize(written) == 0:
                 raise LigandRejected("Open Babel could not write the largest fragment")
@@ -972,7 +973,7 @@ class LibraryManager:
         if fmt == "sdf":
             props = None
             if apply_lipinski:
-                props = runner.ADMETFilter.parse_sdf_properties(source)
+                props = runner.ADMETFilter.parse_sdf_properties(source, seed=self.seed)
                 if props is None:
                     raise LigandRejected("Invalid SDF or incomplete descriptors")
                 ok, violations = runner.ADMETFilter.check_lipinski(props)

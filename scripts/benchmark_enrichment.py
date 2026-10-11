@@ -198,7 +198,8 @@ def download(url, dest, retries=5, backoff=10.0):
 def mol2_to_pdbqt(mol2_path, pdbqt_path):
     proc = subprocess.run(
         ["obabel", "-imol2", mol2_path, "-opdbqt", "-O", pdbqt_path],
-        capture_output=True, text=True, timeout=MOL2_CONVERSION_TIMEOUT)
+        capture_output=True, text=True, timeout=MOL2_CONVERSION_TIMEOUT,
+        env=_benchlib.obabel_env())
     if (proc.returncode != 0 or not os.path.exists(pdbqt_path)
             or os.path.getsize(pdbqt_path) == 0):
         if os.path.exists(pdbqt_path):

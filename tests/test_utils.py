@@ -133,8 +133,12 @@ def test_run_obabel_sets_single_thread_env_and_logs(monkeypatch, caplog):
         assert u.run_obabel(["-:C C", "-osmi"]) == "out"
     cmd, capture, env = calls[0]
     assert cmd[0] == runner.OBABEL and capture is True
-    assert env == {"OMP_NUM_THREADS": "1"}
-    assert "OMP_NUM_THREADS=1" in caplog.text and "'-:C C'" in caplog.text
+    # One thread; OB_RANDOM_SEED defaults to defaults.SEED without a run seed.
+    assert env == {"OMP_NUM_THREADS": "1", "OB_RANDOM_SEED": "42"}
+    assert "OMP_NUM_THREADS=1 OB_RANDOM_SEED=42" in caplog.text and "'-:C C'" in caplog.text
+    calls.clear()
+    u.run_obabel(["-:C C", "-osmi"], seed=1234)
+    assert calls[0][2]["OB_RANDOM_SEED"] == "1234"
 
 
 def test_run_obabel_removes_outputs_on_failure(monkeypatch, tmp_path):

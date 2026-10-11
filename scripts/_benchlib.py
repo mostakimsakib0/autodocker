@@ -377,11 +377,19 @@ def resolve_docked_file(ranking_csv, docked_file):
 # ---------------------------------------------------------------------------
 
 
+def obabel_env(seed=None):
+    """Environment of every Open Babel call of the benchmark scripts: one
+    thread and ``OB_RANDOM_SEED`` (``BENCH_SEED`` by default), as the
+    pipeline sets them (Open Babel >= 3.2 reads the seed)."""
+    return {**os.environ, "OMP_NUM_THREADS": "1",
+            "OB_RANDOM_SEED": str(BENCH_SEED if seed is None else int(seed))}
+
+
 def obrms(ref, query, timeout=TOOL_TIMEOUT):
     """Heavy-atom, symmetry-aware RMSD (Open Babel ``obrms``) without
     superposition. Raises RuntimeError when obrms fails or prints no value."""
     proc = subprocess.run(["obrms", ref, query], capture_output=True,
-                          text=True, timeout=timeout)
+                          text=True, timeout=timeout, env=obabel_env())
     if proc.returncode != 0:
         raise RuntimeError(f"obrms failed: {proc.stderr.strip()[-300:]}")
     for line in proc.stdout.splitlines():
@@ -400,7 +408,7 @@ def inchikey(source, is_smiles=False, extra_args=(), timeout=TOOL_TIMEOUT):
     the pipeline's ``obabel -h`` conversion does."""
     args = ["obabel", f"-:{source}"] if is_smiles else ["obabel", source]
     proc = subprocess.run(args + list(extra_args) + ["-oinchikey"], capture_output=True,
-                          text=True, timeout=timeout)
+                          text=True, timeout=timeout, env=obabel_env())
     key = proc.stdout.strip().split()
     return key[0] if key and len(key[0]) == 27 else None
 
@@ -594,7 +602,7 @@ def rdkit_start_conformer(src, out_mol2, seed, mmff_iters=None):
     if not src.lower().endswith(".sdf"):
         sdf = os.path.join(tmp_dir, os.path.basename(src) + ".tmp.sdf")
         subprocess.run(["obabel", src, "-osdf", "-O", sdf], check=True,
-                       capture_output=True, timeout=TOOL_TIMEOUT)
+                       capture_output=True, timeout=TOOL_TIMEOUT, env=obabel_env(seed))
     mol = Chem.MolFromMolFile(sdf, removeHs=False, sanitize=True)
     if mol is None:
         raise RuntimeError(f"RDKit could not read {sdf}")
@@ -611,7 +619,8 @@ def rdkit_start_conformer(src, out_mol2, seed, mmff_iters=None):
         f.write("$$$$\n")
     try:
         subprocess.run(["obabel", "-isdf", tmp_sdf, "-omol2", "-O", out_mol2],
-                       check=True, capture_output=True, timeout=TOOL_TIMEOUT)
+                       check=True, capture_output=True, timeout=TOOL_TIMEOUT,
+                       env=obabel_env(seed))
     finally:
         os.remove(tmp_sdf)
         if sdf != src and os.path.exists(sdf):

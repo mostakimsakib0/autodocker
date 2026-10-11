@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import subprocess
+from functools import lru_cache
 from multiprocessing import cpu_count as mp_cpu_count
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
@@ -17,6 +18,7 @@ from typing import Dict, Iterable, List, Optional, Tuple, Union
 # partially-initialized module, which is fine because attributes are only
 # accessed at call time.
 import runner  # noqa: E402
+from vspipeline import defaults
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,23 @@ DEFAULT_CHAIN = "A"
 # Open Babel's force fields and conformer search use OpenMP; a single thread
 # keeps their floating-point summation order, and so their output, repeatable.
 OBABEL_ENV = {"OMP_NUM_THREADS": "1"}
+
+# Open Babel >= 3.2.0 seeds its random generator from this environment
+# variable (upstream PR #2241); unset, it draws a random seed. It decides the
+# hydrogens whose direction the geometry leaves free (waters, isolated atoms,
+# some -h/-p cases) and --gen3d coordinates. Every Open Babel call of the
+# pipeline sets it from the run's --seed (run_obabel). Open Babel 3.1.x
+# ignores it and seeds from the clock; hydrogens.py makes the hydrogen
+# positions deterministic with either version.
+OB_RANDOM_SEED_ENV = "OB_RANDOM_SEED"
+# First Open Babel release that honours OB_RANDOM_SEED and no longer adds a
+# second hydrogen to pre-protonated Lys/Arg (upstream PR #2380).
+OBABEL_SEEDABLE_VERSION = (3, 2, 0)
+# The release the container image builds (tools/openbabel/repo) and the 2.0
+# results were produced with.
+OBABEL_VALIDATED_VERSION = (3, 2, 1)
+
+_OBABEL_VERSION = re.compile(r"Open Babel (\d+)\.(\d+)\.(\d+)")
 
 # Lines of Open Babel stderr quoted in an error message.
 _STDERR_TAIL_LINES = 5
@@ -79,14 +98,52 @@ class ObabelNoOutput(RuntimeError):
     """Open Babel exited 0 but converted nothing or wrote no/empty output."""
 
 
+def obabel_env(seed: Optional[int] = None) -> Dict[str, str]:
+    """Environment overrides of every Open Babel call: one OpenMP thread and
+    ``OB_RANDOM_SEED`` = ``seed`` (default: ``defaults.SEED``)."""
+    value = defaults.SEED if seed is None else int(seed)
+    return {**OBABEL_ENV, OB_RANDOM_SEED_ENV: str(value)}
+
+
+def parse_obabel_version(text: Optional[str]) -> Optional[Tuple[int, int, int]]:
+    """(major, minor, patch) from ``obabel -V`` output, None if absent."""
+    match = _OBABEL_VERSION.search(text or "")
+    return tuple(int(g) for g in match.groups()) if match else None
+
+
+@lru_cache(maxsize=None)
+def _obabel_version_of(path: str) -> Optional[Tuple[int, int, int]]:
+    try:
+        proc = subprocess.run([path, "-V"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_obabel_version((proc.stdout or "") + (proc.stderr or ""))
+
+
+def obabel_version(path: Optional[str] = None) -> Optional[Tuple[int, int, int]]:
+    """Version of the Open Babel executable ``path`` (default
+    ``runner.OBABEL``), None when it cannot be run or read."""
+    path = path or runner.OBABEL
+    return _obabel_version_of(path) if path else None
+
+
+def obabel_honours_seed(path: Optional[str] = None) -> bool:
+    """True when Open Babel reads OB_RANDOM_SEED (version >= 3.2.0)."""
+    version = obabel_version(path)
+    return version is not None and version >= OBABEL_SEEDABLE_VERSION
+
+
 def run_obabel(args: List[str], outputs: Iterable[str] = (),
-               return_stderr: bool = False) -> Union[str, Tuple[str, str]]:
+               return_stderr: bool = False,
+               seed: Optional[int] = None) -> Union[str, Tuple[str, str]]:
     """Run Open Babel single-threaded and return its stdout (with
     ``return_stderr``: ``(stdout, stderr)``).
 
     Every Open Babel call of the pipeline (ligands, charges, receptor) goes
-    through here, so each one gets ``OMP_NUM_THREADS=1``, the global command
-    timeout and a DEBUG log line with the exact command. On failure the files
+    through here, so each one gets ``OMP_NUM_THREADS=1``,
+    ``OB_RANDOM_SEED=<seed>`` (the run's --seed; ``defaults.SEED`` when
+    ``seed`` is None), the global command timeout and a DEBUG log line with
+    the exact command. On failure the files
     in ``outputs`` are deleted (a partial output must never be mistaken for a
     prepared ligand or receptor) and a RuntimeError with Open Babel's last
     stderr lines is raised. Open Babel exits 0 when it skips every molecule
@@ -98,9 +155,11 @@ def run_obabel(args: List[str], outputs: Iterable[str] = (),
     if not runner.OBABEL:
         raise RuntimeError("Open Babel (obabel) not found in PATH")
     cmd = [runner.OBABEL, *args]
-    logger.debug(f"Running: OMP_NUM_THREADS=1 {shlex.join(cmd)}")
+    env = obabel_env(seed)
+    logger.debug("Running: " + " ".join(f"{k}={v}" for k, v in env.items())
+                 + f" {shlex.join(cmd)}")
     try:
-        result = runner.run(cmd, capture=True, extra_env=dict(OBABEL_ENV))
+        result = runner.run(cmd, capture=True, extra_env=env)
     except BaseException as e:
         for path in outputs:
             try:
@@ -129,6 +188,8 @@ def run_obabel(args: List[str], outputs: Iterable[str] = (),
     for path in outputs:
         if path.lower().endswith((".sdf", ".sd", ".mol")):
             _strip_molfile_timestamps(path)
+        elif path.lower().endswith(".pdbqt"):
+            _strip_pdbqt_header_records(path)
     if return_stderr:
         return stdout or "", stderr or ""
     if stderr and stderr.strip():
@@ -159,12 +220,13 @@ def elements_without_gasteiger(elements: Iterable[str]) -> List[str]:
     return sorted({e for e in elements if e and e.upper() not in GASTEIGER_ELEMENTS})
 
 
-def molecule_elements(path: str, fmt: Optional[str] = None) -> List[str]:
+def molecule_elements(path: str, fmt: Optional[str] = None,
+                      seed: Optional[int] = None) -> List[str]:
     """Element symbols of the molecule(s) in ``path`` from Open Babel's
     formula (best effort for error messages; [] when it cannot be read)."""
     args = ([f"-i{fmt}"] if fmt else []) + [path, "-osmi", "--append", "formula"]
     try:
-        stdout, _ = run_obabel(args, return_stderr=True)
+        stdout, _ = run_obabel(args, return_stderr=True, seed=seed)
     except (RuntimeError, OSError):
         return []
     elements = set()
@@ -173,6 +235,57 @@ def molecule_elements(path: str, fmt: Optional[str] = None) -> List[str]:
             # The formula is the last token (after the SMILES and the title).
             elements.update(re.findall(r"[A-Z][a-z]?", line.split()[-1]))
     return sorted(elements)
+
+
+# PDB header records the Open Babel >= 3.2 PDBQT writer copies from the input
+# molecule (src/formats/pdbqtformat.cpp) right after "REMARK  Name = ...".
+# AutoDock Vina rejects every one of them except REMARK ("Unknown or
+# inappropriate tag"); COMPND carries the input's path (the title of a PDB
+# that Open Babel wrote), and a PDBQT input gets its REMARK lines (torsion
+# list included) written twice. Open Babel 3.1 never wrote them.
+PDBQT_PASSTHROUGH_RECORDS = frozenset({
+    "HEADER", "OBSLTE", "TITLE", "SPLIT", "CAVEAT", "COMPND", "SOURCE", "KEYWDS",
+    "EXPDTA", "NUMMDL", "MDLTYP", "AUTHOR", "REVDAT", "SPRSDE", "JRNL", "REMARK",
+    "DBREF", "DBREF1", "DBREF2", "SEQADV", "SEQRES", "MODRES", "HET", "HETNAM",
+    "HETSYN", "FORMUL", "HELIX", "SHEET", "SSBOND", "LINK", "CISPEP", "SITE",
+    "ORIGX1", "ORIGX2", "ORIGX3", "SCALE1", "SCALE2", "SCALE3", "MATRIX1",
+    "MATRIX2", "MATRIX3", "MODEL",
+})
+_PDBQT_TORSIONS_REMARK = re.compile(r"^REMARK  \d+ active torsions:")
+
+
+def _strip_pdbqt_header_records(path: str) -> None:
+    """Remove the PDB header records Open Babel >= 3.2 copies into a PDBQT
+    (see PDBQT_PASSTHROUGH_RECORDS).
+
+    After each ``REMARK  Name = `` line the writer puts the copied records,
+    then (torsion-tree output) its own block starting with the *last*
+    ``REMARK  N active torsions:`` line before the first atom or ROOT
+    record; a copy of an input PDBQT's REMARK lines can contain such a line
+    too. Everything between the name line and that block (rigid output:
+    the first non-header record) is removed, so the file is laid out as
+    Open Babel 3.1 wrote it."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except (FileNotFoundError, UnicodeDecodeError):
+        return
+    kept = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        i += 1
+        if not line.startswith("REMARK  Name = "):
+            continue
+        j = i
+        while j < len(lines) and lines[j][:6].rstrip() in PDBQT_PASSTHROUGH_RECORDS:
+            j += 1
+        own = [k for k in range(i, j) if _PDBQT_TORSIONS_REMARK.match(lines[k])]
+        i = own[-1] if own else j
+    if len(kept) != len(lines):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.writelines(kept)
 
 
 # MDL molfile header line 2: program name followed by a MMDDYYHHmm date.

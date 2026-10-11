@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Deterministic 3D coordinates for 2D ligand input.
 
-Open Babel's ``--gen3d`` is not reproducible: its conformer/rotor search
-draws from a clock-seeded generator, so heavy-atom coordinates differ
-between runs of the same 2D input (hydrogen re-placement cannot fix that).
-When RDKit is importable, ``generate_3d`` embeds with ETKDGv3 using a fixed
-random seed and one thread, then relaxes with MMFF94 (UFF when MMFF has no
-parameters) for a fixed number of iterations; the output is byte-identical
-for identical input. Without RDKit it falls back to ``obabel --gen3d`` and
-logs a warning that the coordinates are not reproducible.
+Open Babel's ``--gen3d`` draws from a random generator in its
+conformer/rotor search: Open Babel 3.1 seeds it from the clock, so
+heavy-atom coordinates differ between runs of the same 2D input (hydrogen
+re-placement cannot fix that); 3.2 seeds it from OB_RANDOM_SEED, which the
+pipeline sets, but the result still depends on the seed and on the Open
+Babel build. When RDKit is importable, ``generate_3d`` embeds with ETKDGv3
+using a fixed random seed and one thread, then relaxes with MMFF94 (UFF
+when MMFF has no parameters) for a fixed number of iterations; the output
+is byte-identical for identical input. Without RDKit it falls back to
+``obabel --gen3d`` and logs a warning.
 """
 import logging
 from typing import Callable, Optional
@@ -100,9 +102,9 @@ def generate_3d(src_sdf: str, dst_sdf: str, seed: int = EMBED_SEED,
     """3D coordinates for a 2D SDF; returns the method used (``METHOD_RDKIT``
     or ``METHOD_OBABEL``) so the caller can record it.
 
-    ``run_obabel(args, outputs=[...])`` runs the Open Babel fallback
-    (default: ``runner.run_obabel`` when available, else obabel with
-    OMP_NUM_THREADS=1).
+    ``run_obabel(args, outputs=[...], seed=...)`` runs the Open Babel
+    fallback (default: ``runner.run_obabel`` when available, else obabel
+    with OMP_NUM_THREADS=1), with ``OB_RANDOM_SEED`` = ``seed``.
     """
     if rdkit_available():
         embed_3d_rdkit(src_sdf, dst_sdf, seed=seed)
@@ -111,8 +113,10 @@ def generate_3d(src_sdf: str, dst_sdf: str, seed: int = EMBED_SEED,
         return METHOD_RDKIT
     logger.warning(
         f"[!] RDKit not available: 3D coordinates for {src_sdf} come from obabel "
-        "--gen3d, which is NOT reproducible (heavy atoms differ between runs)")
+        "--gen3d, which is NOT reproducible with Open Babel < 3.2 (heavy atoms "
+        "differ between runs; 3.2+ seeds it from OB_RANDOM_SEED) and differs "
+        "from the RDKit coordinates of the container image")
     from vspipeline.hydrogens import _default_obabel
     run = run_obabel or _default_obabel
-    run(["-isdf", src_sdf, "-osdf", "-O", dst_sdf, "--gen3d"], outputs=[dst_sdf])
+    run(["-isdf", src_sdf, "-osdf", "-O", dst_sdf, "--gen3d"], outputs=[dst_sdf], seed=seed)
     return METHOD_OBABEL

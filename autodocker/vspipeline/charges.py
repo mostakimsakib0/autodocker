@@ -168,7 +168,7 @@ def _has_3d_coordinates(path: str) -> bool:
 
 
 def _fix_pdbqt_charges(pdbqt_file: str, source_file: str,
-                       gen3d: Optional[bool] = None) -> None:
+                       gen3d: Optional[bool] = None, seed: Optional[int] = None) -> None:
     """Rebuild a ligand PDBQT with Open Babel Gasteiger charges, never
     discarding 3D coordinates.
 
@@ -184,6 +184,7 @@ def _fix_pdbqt_charges(pdbqt_file: str, source_file: str,
     hydrogens are merged, e.g. benzene) are accepted with a warning: the
     Vina, Vinardo and default SMINA scoring functions do not use partial
     charges. Raises RuntimeError only when Open Babel fails or writes no atoms.
+    ``seed`` is Open Babel's OB_RANDOM_SEED (see ``utils.run_obabel``).
     """
     logger.warning(f"[!] Recomputing Gasteiger charges for: {pdbqt_file}")
 
@@ -212,12 +213,13 @@ def _fix_pdbqt_charges(pdbqt_file: str, source_file: str,
         # Single-threaded; a partial output is deleted when Open Babel fails.
         # Without --gen3d the conversion is run through the deterministic
         # hydrogen wrapper (-h places some hydrogens at random); --gen3d
-        # output differs in its heavy atoms on every run, so it runs once.
+        # output depends on the random seed in its heavy atoms (Open Babel
+        # < 3.2: on every run), so it runs once.
         if gen3d:
-            runner.run_obabel(args, outputs=[target])
+            runner.run_obabel(args, outputs=[target], seed=seed)
         else:
             from vspipeline.hydrogens import run_obabel_deterministic
-            run_obabel_deterministic(args, target, kind="ligand")
+            run_obabel_deterministic(args, target, kind="ligand", seed=seed)
         if rebuild_in_place:
             os.replace(target, pdbqt_file)
     except Exception as e:

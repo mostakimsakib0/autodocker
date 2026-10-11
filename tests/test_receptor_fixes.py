@@ -303,7 +303,7 @@ def test_hetatm_only_chain_dropped_with_a_message(tmp_path, caplog):
 
 
 # ---------------------------------------------------------------------------
-# Hydrogen check: two runs with the same clock seed
+# Hydrogen check: probes with other seeds; Open Babel 3.1 clock-seed collision
 # ---------------------------------------------------------------------------
 
 def _h_pdb(x):
@@ -313,26 +313,36 @@ def _h_pdb(x):
 
 
 def test_third_conversion_when_first_two_agree(tmp_path):
-    """Two runs with the same seed give identical random hydrogens; a third
-    run that differs exposes them, and they are re-placed."""
+    """Two runs with the same (Open Babel 3.1: clock) seed give identical
+    random hydrogens; a third run that differs exposes them, and they are
+    re-placed. The output is written with the run seed, the probes with the
+    next two seeds."""
     xs = iter([-0.240, -0.240, 0.300])
     calls = []
 
-    def fake(args, outputs=()):
-        calls.append(list(args))
+    def fake(args, outputs=(), seed=None):
+        calls.append((list(args), seed))
         with open(outputs[0], "w", encoding="utf-8") as f:
             f.write(_h_pdb(next(xs)))
 
     out = str(tmp_path / "w.pdb")
-    moved = hyd.run_obabel_deterministic(["-O", out], out, run_obabel=fake)
+    moved = hyd.run_obabel_deterministic(["-O", out], out, run_obabel=fake, seed=7)
     assert len(calls) == 3 and moved == 2
+    assert [seed for _, seed in calls] == [7, 8, 9]
     assert not os.path.exists(hyd._probe_path(out))
+
+
+def test_probe_seeds_differ_from_the_run_seed():
+    assert [hyd.probe_seed(42, k) for k in (1, 2)] == [43, 44]
+    top = 2 ** 31 - 1  # largest --seed: the probes wrap to 1 and 2
+    assert [hyd.probe_seed(top, k) for k in (1, 2)] == [1, 2]
+    assert hyd.probe_seed(None, 1) == runner.DEFAULT_SEED + 1
 
 
 def test_three_identical_conversions_are_kept_unchanged(tmp_path):
     calls = []
 
-    def fake(args, outputs=()):
+    def fake(args, outputs=(), seed=None):
         calls.append(list(args))
         with open(outputs[0], "w", encoding="utf-8") as f:
             f.write(_h_pdb(-0.240))
@@ -349,8 +359,8 @@ def test_receptor_protonation_compares_a_third_run(tmp_path, monkeypatch):
     xs = iter([-0.240, -0.240, 0.300])
     calls = []
 
-    def fake(args, outputs=(), log_stderr=True):
-        calls.append(list(args))
+    def fake(args, outputs=(), log_stderr=True, seed=None):
+        calls.append((list(args), seed))
         with open(outputs[0], "w", encoding="utf-8") as f:
             x = next(xs)
             f.write(f"ATOM      1  O   HOH A   1       0.000   0.000   0.000  0.00  0.00"
@@ -362,9 +372,9 @@ def test_receptor_protonation_compares_a_third_run(tmp_path, monkeypatch):
         return ""
 
     monkeypatch.setattr(prot, "_run_obabel", fake)
-    pp = prot.ProteinPreparation(str(tmp_path / "in.pdb"), str(tmp_path))
+    pp = prot.ProteinPreparation(str(tmp_path / "in.pdb"), str(tmp_path), seed=11)
     pp._protonate(7.4, source=str(tmp_path / "in.pdb"))
-    assert len(calls) == 3
+    assert [seed for _, seed in calls] == [11, 12, 13]
     lines = _atoms(pp.receptor_pdbqt)
     assert lines[2][30:38] != "  -0.240"  # re-placed deterministically
     assert not os.path.exists(pp.receptor_pdbqt + ".probe")

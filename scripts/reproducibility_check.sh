@@ -10,6 +10,9 @@
 #     normalised away (versions that write absolute Docked_File paths)
 #   * the same set of docked pose files exists and each one is
 #     byte-identical (docked/*_out.pdbqt, docked/*_smina.pdbqt)
+#   * results_report.html is byte-identical (it holds no timestamp; the NGL
+#     viewer it embeds must come from the same source in every run, e.g. the
+#     image's /ngl/ngl.js)
 #
 # Usage:
 #   scripts/reproducibility_check.sh <protein.pdb> <ligand_dir> [output_dir] [-- runner args...]
@@ -66,7 +69,7 @@ run_pipeline() {  # run_pipeline <outdir> <processes>
     if ! "$PYTHON" "$RUNNER" -r "$PDB" -l "$LIGS" -o "$out" \
             --exhaustiveness "$EXH" \
             --binding-modes 1 --energy-range 1.0 --processes "$procs" \
-            --no-resume --no-html-report ${EXTRA[@]+"${EXTRA[@]}"} \
+            --no-resume ${EXTRA[@]+"${EXTRA[@]}"} \
             >"$out.log" 2>&1; then
         echo "[!] pipeline run failed: $out (log: $out.log)" >&2
         tail -20 "$out.log" >&2
@@ -90,6 +93,18 @@ def ranking(run):
 
 if ranking(ref) != ranking(other):
     problems.append("ranking.csv differs")
+
+def report(run):
+    path = os.path.join(run, "results_report.html")
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as f:
+        return f.read()
+
+if report(ref) is None and report(other) is None:
+    pass  # --no-html-report given after "--"
+elif report(ref) != report(other):
+    problems.append("results_report.html differs")
 
 def poses(run):
     files = []
@@ -118,7 +133,7 @@ run_pipeline "$ROOT/runN" "$PROCS"
 
 status=0
 for other in run2 runN; do
-    echo "[*] comparing run1 vs $other (ranking.csv + docked poses) ..."
+    echo "[*] comparing run1 vs $other (ranking.csv, docked poses, results_report.html) ..."
     if compare_runs "$ROOT/run1" "$ROOT/$other"; then
         echo "[ok] run1 and $other are identical"
     else
@@ -128,7 +143,7 @@ for other in run2 runN; do
 done
 
 if [ "$status" -eq 0 ]; then
-    echo "DETERMINISTIC: ranking.csv and all docked poses identical (-p 1, -p 1, -p $PROCS)"
+    echo "DETERMINISTIC: ranking.csv, all docked poses and the HTML report identical (-p 1, -p 1, -p $PROCS)"
 else
     echo "NON-DETERMINISTIC: see differences above" >&2
 fi

@@ -38,6 +38,13 @@ def test_main_end_to_end_writes_manifest(tmp_path, protein_pdb, caplog):
     assert "Vina" in manifest["tools"]["vina"]["version"]
     assert len(manifest["tools"]["vina"]["sha256"]) == 64
     assert manifest["ligand_preparation"] == {"failed": 0, "superseded": 0}
+    # Open Babel version and OB_RANDOM_SEED policy (docs/openbabel.md).
+    version = runner.obabel_version()
+    assert manifest["openbabel_version"] == ".".join(map(str, version))
+    ob_seed = manifest["openbabel_random_seed"]
+    assert ob_seed["variable"] == "OB_RANDOM_SEED" and ob_seed["value"] == 3
+    assert ob_seed["hydrogen_probe_values"] == [4, 5]
+    assert ob_seed["honoured"] is (version >= runner.OBABEL_SEEDABLE_VERSION)
     assert (out / "ranking.csv").exists()
     meta = json.loads((out / "ligand_metadata.json").read_text())
     assert meta["ethanol"]["minimized"] is True
@@ -61,6 +68,50 @@ def _base_argv(tmp_path, protein_pdb, modes=True):
             str(tmp_path / "out"), "--exhaustiveness", "1", "--seed", "3",
             "--minimize-steps", "20"]
     return argv + (["--binding-modes", "1"] if modes else [])
+
+
+# Run records excluded from the byte comparison of two runs: the manifest
+# (times, paths), logs, the fpocket output and the docking bookkeeping.
+_RUN_RECORDS = ("run_manifest.json", "pocket_summary.csv")
+
+
+def _output_bytes(out):
+    """{relative path: bytes} of every output of a run except _RUN_RECORDS,
+    *.log, protein_clean_out/ and .docking* files."""
+    files = {}
+    for root, dirs, names in os.walk(out):
+        dirs[:] = [d for d in dirs if d != "protein_clean_out" and not d.startswith(".docking")]
+        for name in names:
+            if name in _RUN_RECORDS or name.endswith(".log") or name.startswith(".docking"):
+                continue
+            path = os.path.join(root, name)
+            with open(path, "rb") as f:
+                files[os.path.relpath(path, out)] = f.read()
+    return files
+
+
+@pytest.mark.slow
+def test_runs_are_byte_identical_including_the_html_report(tmp_path, protein_pdb,
+                                                          monkeypatch):
+    """Two runs with -p 1 and one with -p 2 write the same bytes in every
+    output, results_report.html included (it has no timestamp)."""
+    monkeypatch.setattr(runner, "_fetch_ngljs", lambda: b"/* fake ngl */")
+    ligs = _ethanol_dir(tmp_path)
+    subprocess.run([shutil.which("obabel"), "-:CC(=O)NCCO acetamide", "--gen3d", "-osdf",
+                    "-O", str(ligs / "acetamide.sdf")], check=True, capture_output=True,
+                   env={**os.environ, "OMP_NUM_THREADS": "1", "OB_RANDOM_SEED": "1"})
+    runs = []
+    for name, procs in (("a", "1"), ("b", "1"), ("p2", "2")):
+        out = str(tmp_path / name)
+        argv = ["-r", protein_pdb, "-l", str(ligs), "-o", out, "--no-fpocket",
+                "--exhaustiveness", "1", "--binding-modes", "2", "--seed", "3",
+                "--minimize-steps", "20", "-p", procs]
+        assert _main(argv) == runner.EXIT_OK
+        runs.append(_output_bytes(out))
+    assert "results_report.html" in runs[0] and "receptor.pdbqt" in runs[0]
+    for other in runs[1:]:
+        assert sorted(other) == sorted(runs[0])
+        assert [k for k in runs[0] if runs[0][k] != other[k]] == []
 
 
 def _main(argv):

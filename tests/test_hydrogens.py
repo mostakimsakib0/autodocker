@@ -12,8 +12,9 @@ import vspipeline.conformers as conf
 import vspipeline.hydrogens as hyd
 
 DATA = os.path.join(os.path.dirname(__file__), "data", "hydrogens")
-# CASF-2016 1nc3 ligand: Open Babel 3.1.1 (-h, MOL2 input) puts the two
-# hydrogens of its amino N (atoms 23-24 in the PDBQT) at random.
+# CASF-2016 1nc3 ligand: Open Babel (-h, MOL2 input) puts the two hydrogens
+# of its amino N (atoms 23-24 in the PDBQT) at random: clock-seeded in 3.1.1,
+# from OB_RANDOM_SEED in 3.2 (a different seed moves them).
 LIGAND_1NC3 = os.path.join(DATA, "1nc3_ligand.mol2")
 LIGAND_2D = os.path.join(DATA, "ligand_2d.sdf")
 
@@ -26,10 +27,10 @@ def _single_thread(monkeypatch):
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
 
 
-def _prepare_1nc3(out):
+def _prepare_1nc3(out, seed=None):
     args = ["-imol2", LIGAND_1NC3, "-opdbqt", "-O", out, "-h",
             "--partialcharge", "gasteiger"]
-    hyd.run_obabel_deterministic(args, out, kind="ligand")
+    hyd.run_obabel_deterministic(args, out, kind="ligand", seed=seed)
     return open(out, "rb").read()
 
 
@@ -38,6 +39,16 @@ def test_1nc3_ligand_preparation_is_byte_identical(tmp_path):
     outputs = {_prepare_1nc3(str(tmp_path / f"lig{i}.pdbqt")) for i in range(10)}
     assert len(outputs) == 1
     assert not list(tmp_path.glob("*probe*"))
+
+
+@needs_obabel
+def test_1nc3_ligand_does_not_depend_on_the_seed(tmp_path):
+    """The amino hydrogens move with OB_RANDOM_SEED (Open Babel >= 3.2), so
+    the probes with other seeds expose them and they are re-placed from the
+    heavy atoms: every seed gives the same PDBQT."""
+    outputs = {_prepare_1nc3(str(tmp_path / f"lig{seed}.pdbqt"), seed=seed)
+               for seed in (1, 42, 1000, 2 ** 31 - 1)}
+    assert len(outputs) == 1
 
 
 @needs_obabel
@@ -94,7 +105,7 @@ def test_stabilize_sdf_replaces_only_differing_hydrogens(tmp_path):
 def test_run_obabel_deterministic_rejects_heavy_atom_differences(tmp_path):
     calls = []
 
-    def fake_obabel(args, outputs=()):
+    def fake_obabel(args, outputs=(), seed=None):
         out = args[args.index("-O") + 1]
         calls.append(out)
         x = 0.0 if len(calls) == 1 else 0.5  # a --gen3d-like heavy-atom change
@@ -112,7 +123,7 @@ def test_run_obabel_deterministic_rejects_heavy_atom_differences(tmp_path):
 def test_run_obabel_deterministic_identical_runs_untouched(tmp_path):
     text = _sdf([("C", (0.0, 0.0, 0.0)), ("O", (1.4, 0.0, 0.0))], [(1, 2)])
 
-    def fake_obabel(args, outputs=()):
+    def fake_obabel(args, outputs=(), seed=None):
         with open(args[args.index("-O") + 1], "w", encoding="utf-8") as f:
             f.write(text)
 
@@ -145,11 +156,13 @@ def test_generate_3d_falls_back_to_obabel_with_warning(tmp_path, monkeypatch, ca
     monkeypatch.setattr(conf, "rdkit_available", lambda: False)
     seen = []
 
-    def fake_obabel(args, outputs=()):
-        seen.append(args)
+    def fake_obabel(args, outputs=(), seed=None):
+        seen.append((args, seed))
         shutil.copy(LIGAND_2D, args[args.index("-O") + 1])
 
     out = str(tmp_path / "lig.sdf")
     with caplog.at_level(logging.WARNING):
-        assert conf.generate_3d(LIGAND_2D, out, run_obabel=fake_obabel) == conf.METHOD_OBABEL
-    assert "--gen3d" in seen[0] and "NOT reproducible" in caplog.text
+        assert conf.generate_3d(LIGAND_2D, out, seed=5,
+                                run_obabel=fake_obabel) == conf.METHOD_OBABEL
+    assert "--gen3d" in seen[0][0] and "NOT reproducible" in caplog.text
+    assert seen[0][1] == 5  # OB_RANDOM_SEED = the run seed (Open Babel >= 3.2)

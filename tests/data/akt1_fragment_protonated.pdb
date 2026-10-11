@@ -1,7 +1,7 @@
 REMARK AutoDocker test fixture: residues 1-12 of the DUD-E AKT1 receptor (with
 REMARK hydrogens, no chain IDs or element columns) plus a broken lysine (CE-NZ),
-REMARK an isolated arginine NH1 and a water: Open Babel 3.1.1 places hydrogens on
-REMARK these at random.
+REMARK an isolated arginine NH1 and a water: Open Babel places hydrogens on
+REMARK these at random (3.1.1: clock seed; 3.2: OB_RANDOM_SEED).
 ATOM      1  N   ARG     1      -2.419  -7.160  -1.307
 ATOM      2  CA  ARG     1      -1.648  -7.209  -2.588
 ATOM      3  C   ARG     1      -0.462  -6.222  -2.441

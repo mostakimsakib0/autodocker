@@ -4,13 +4,16 @@
 Open Babel adds each hydrogen along ``OBBuilder::GetNewBondVector``. When
 the local geometry does not fix that direction (no reference atom two bonds
 away, or a hybridisation/degree combination the builder has no rule for) it
-calls ``vector3::randomUnitVector()``, whose generator is seeded from the
-clock (``OBRandom::TimeSeed``: ``srand(usec % 70092)``). The hydrogen then
-lands elsewhere on every run, although heavy atoms, atom order, types and
-charges are identical. Seen with ``obabel -p`` on receptors (waters, atoms of
-broken residues, two-atom fragments, over-protonated pre-protonated groups)
-and with ``obabel -h`` on ligands read from MOL2 (e.g. the amino N of the
-CASF-2016 1nc3 ligand).
+calls ``vector3::randomUnitVector()``. Open Babel 3.1 seeds that generator
+from the clock (``OBRandom::TimeSeed``: ``srand(usec % 70092)``), so the
+hydrogen lands elsewhere on every run although heavy atoms, atom order,
+types and charges are identical. Open Babel >= 3.2 seeds it from the
+environment variable ``OB_RANDOM_SEED`` (random when unset; upstream PR
+#2241): with a fixed seed the output is repeatable, but such a hydrogen is
+still placed by a random draw, not by the geometry, and moves with the seed.
+Seen with ``obabel -p`` on receptors (waters, atoms of broken residues,
+two-atom fragments) and with ``obabel -h`` on ligands read from MOL2 (e.g.
+the amino N of the CASF-2016 1nc3 ligand).
 
 ``stabilize_hydrogens`` compares two conversions of the same input, finds the
 hydrogens that differ (plus the structurally undefined groups) and re-places
@@ -19,8 +22,12 @@ each one within AutoDock Vina's bond distance of its own heavy atom and of no
 other. Only coordinates change: atom order, serials, names, types, charges
 and PDBQT torsion-tree records are untouched, so a ligand hydrogen stays in
 the branch of its heavy atom. ``run_obabel_deterministic`` wraps an Open
-Babel call with this check (and compares a third conversion when the first
-two agree, in case both runs drew the same clock seed).
+Babel call with this check. The main conversion runs with the run's seed S
+and the probe conversions with *different* seeds (S+1, then S+2 when the
+first two agree; see ``probe_seed``): a hydrogen that moves when only the
+seed changes was placed at random. (Two conversions with the same seed
+would agree on Open Babel >= 3.2 and hide it.) With Open Babel 3.1, which
+ignores the variable, the probes differ by their clock seeds instead.
 
 Supported files: PDB/PDBQT (ATOM/HETATM records) and V2000 SDF/MOL. Other
 formats are accepted only if the conversions are byte-identical.
@@ -32,6 +39,7 @@ from collections import defaultdict
 from typing import Callable, List, Optional, Sequence, Tuple
 
 import runner  # noqa: E402  (tool paths and run helpers, resolved at call time)
+from vspipeline import defaults
 
 logger = logging.getLogger(__name__)
 
@@ -536,6 +544,17 @@ def stabilize_hydrogens(path: str, probe_path: Optional[str] = None,
 
 OBABEL_ENV = {"OMP_NUM_THREADS": "1"}
 
+# Seeds are positive 32-bit integers (see runner.SEED_RANGE); the probe seeds
+# wrap around inside that range.
+_SEED_MAX = 2 ** 31 - 1
+
+
+def probe_seed(seed: Optional[int], k: int) -> int:
+    """OB_RANDOM_SEED of the k-th probe conversion (k >= 1): ``seed + k``,
+    wrapped into 1..2**31-1, so never equal to ``seed`` for k < 2**31-1."""
+    base = defaults.SEED if seed is None else int(seed)
+    return (base - 1 + k) % _SEED_MAX + 1
+
 
 def same_bytes(a: str, b: str) -> bool:
     """Byte-for-byte comparison of two files. (filecmp.cmp caches results by
@@ -550,35 +569,44 @@ def _probe_path(output: str) -> str:
     return f"{root}.h-probe{ext}"
 
 
-def _default_obabel(args: Sequence[str], outputs: Sequence[str] = ()) -> None:
+def _default_obabel(args: Sequence[str], outputs: Sequence[str] = (),
+                    seed: Optional[int] = None) -> None:
     if getattr(runner, "run_obabel", None) is not None:
-        runner.run_obabel(list(args), outputs=list(outputs))
+        runner.run_obabel(list(args), outputs=list(outputs), seed=seed)
         return
     if not runner.OBABEL:
         raise RuntimeError("Open Babel (obabel) not found in PATH")
-    runner.run([runner.OBABEL, *args], capture=True, extra_env=dict(OBABEL_ENV))
+    value = defaults.SEED if seed is None else int(seed)
+    runner.run([runner.OBABEL, *args], capture=True,
+               extra_env={**OBABEL_ENV, "OB_RANDOM_SEED": str(value)})
 
 
 def run_obabel_deterministic(args: Sequence[str], output: str, kind: str = "ligand",
-                             run_obabel: Optional[Callable] = None) -> int:
+                             run_obabel: Optional[Callable] = None,
+                             seed: Optional[int] = None) -> int:
     """Run an Open Babel conversion two or three times and make ``output``'s
     hydrogen positions deterministic.
 
     ``args`` are Open Babel arguments (without the executable) that write
     ``output``; the path must appear in ``args`` exactly once (after -O).
-    ``run_obabel(args, outputs=[...])`` performs one conversion (default:
-    ``runner.run_obabel`` when it exists, else obabel with
-    OMP_NUM_THREADS=1). The second (and third) conversion writes a
-    temporary sibling file (the probe).
+    ``run_obabel(args, outputs=[...], seed=...)`` performs one conversion
+    with ``OB_RANDOM_SEED`` = ``seed`` (default: ``runner.run_obabel`` when
+    it exists, else obabel with OMP_NUM_THREADS=1). ``output`` is written
+    with ``seed`` (default ``defaults.SEED``); the second (and third)
+    conversion writes a temporary sibling file (the probe) with the seed
+    ``probe_seed(seed, 1)`` (and ``probe_seed(seed, 2)``).
 
-    Open Babel seeds its random generator from the clock (``usec % 70092``),
-    so two runs can draw the same seed and place a random hydrogen
-    identically. When the first two files are identical a third conversion
-    is therefore compared as well; only if it is identical too is the output
-    accepted as it is. A randomly placed hydrogen can then survive only if
-    all three runs drew the same seed: with run-to-run timing jitter far
-    above one microsecond, about 1 in 70092**2 (~2e-10) per conversion,
-    against ~1.4e-5 with two runs. If the files differ, ``stabilize_hydrogens``
+    Open Babel >= 3.2 draws a different random direction for each seed, so
+    a randomly placed hydrogen differs between the output and the first
+    probe. Open Babel 3.1 ignores OB_RANDOM_SEED and seeds from the clock
+    (``usec % 70092``), so two runs can draw the same seed and place a
+    random hydrogen identically. When the first two files are identical a
+    third conversion is therefore compared as well; only if it is identical
+    too is the output accepted as it is. With Open Babel 3.1 a randomly
+    placed hydrogen can then survive only if all three runs drew the same
+    clock seed: with run-to-run timing jitter far above one microsecond,
+    about 1 in 70092**2 (~2e-10) per conversion, against ~1.4e-5 with two
+    runs. If the files differ, ``stabilize_hydrogens``
     re-places the hydrogens that differ (and the structurally undefined
     groups); if anything else differs (heavy atoms, e.g. from ``--gen3d``)
     ``output`` is deleted and RuntimeError raised. Returns the number of
@@ -593,14 +621,16 @@ def run_obabel_deterministic(args: Sequence[str], output: str, kind: str = "liga
     if args.count(output) != 1:
         raise ValueError(f"Output path {output!r} must appear exactly once in {args}")
     run = run_obabel or _default_obabel
+    seed = defaults.SEED if seed is None else int(seed)
     probe = _probe_path(output)
     probe_args = [probe if a == output else a for a in args]
-    run(args, outputs=[output])
+    run(args, outputs=[output], seed=seed)
     try:
-        run(probe_args, outputs=[probe])
+        run(probe_args, outputs=[probe], seed=probe_seed(seed, 1))
         if same_bytes(output, probe):
-            # Same seed twice is possible (see above); compare a third run.
-            run(probe_args, outputs=[probe])
+            # Open Babel 3.1 can draw the same clock seed twice (see above);
+            # compare a third run.
+            run(probe_args, outputs=[probe], seed=probe_seed(seed, 2))
             if same_bytes(output, probe):
                 return 0
         fmt = file_format(output)
@@ -608,7 +638,8 @@ def run_obabel_deterministic(args: Sequence[str], output: str, kind: str = "liga
             if os.path.exists(output):
                 os.remove(output)
             raise RuntimeError(
-                f"Open Babel wrote a different {output} in two identical runs; "
+                f"Open Babel wrote a different {output} in two runs with different "
+                "random seeds; "
                 "its format is not supported for hydrogen re-placement")
         try:
             moved = stabilize_hydrogens(output, probe, kind=kind, fmt=fmt)

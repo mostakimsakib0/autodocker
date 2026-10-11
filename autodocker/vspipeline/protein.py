@@ -44,6 +44,7 @@ from vspipeline.hydrogens import (  # noqa: E402,F401  (some re-exported)
     VINA_METAL_COVALENT_RADIUS,
     SpatialHash as _SpatialHash,
     pdbqt_element as _pdbqt_element,
+    probe_seed,
     same_bytes,
     stabilize_hydrogens,
     vina_bond_cutoff as _vina_bond_cutoff,
@@ -448,11 +449,13 @@ def _run_tool(cmd: List[str], tool: str, log_stderr: bool = True) -> str:
     return stdout or ""
 
 
-def _run_obabel(args: List[str], outputs: Sequence[str] = (), log_stderr: bool = True) -> str:
-    """Open Babel through ``runner.run_obabel`` (single-threaded, partial
-    outputs removed on failure); its stderr goes to the log unless
-    ``log_stderr`` is False. Returns stdout."""
-    stdout, stderr = runner.run_obabel(list(args), outputs=outputs, return_stderr=True)
+def _run_obabel(args: List[str], outputs: Sequence[str] = (), log_stderr: bool = True,
+                seed: Optional[int] = None) -> str:
+    """Open Babel through ``runner.run_obabel`` (single-threaded,
+    OB_RANDOM_SEED = ``seed``, partial outputs removed on failure); its
+    stderr goes to the log unless ``log_stderr`` is False. Returns stdout."""
+    stdout, stderr = runner.run_obabel(list(args), outputs=outputs, return_stderr=True,
+                                       seed=seed)
     if log_stderr:
         _log_tool_stderr("obabel", stderr)
     return stdout
@@ -507,9 +510,11 @@ class ProteinPreparation:
     """Receptor preparation: chain selection, cleaning, protonation, pocket
     detection and the docking box."""
 
-    def __init__(self, pdb_file: str, outdir: str):
+    def __init__(self, pdb_file: str, outdir: str, seed: int = defaults.SEED):
         self.pdb_file = pdb_file
         self.outdir = outdir
+        # OB_RANDOM_SEED of the receptor conversion (the run's --seed).
+        self.seed = seed
         self.pdb_clean = os.path.join(outdir, outputs.PROTEIN_CLEAN_PDB)
         self.receptor_pdbqt = os.path.join(outdir, outputs.RECEPTOR_PDBQT)
         self.grid_conf = os.path.join(outdir, outputs.GRID_CONF)
@@ -669,16 +674,20 @@ class ProteinPreparation:
         try:
             try:
                 _run_obabel(base + [self.receptor_pdbqt] + options,
-                            outputs=[self.receptor_pdbqt])
+                            outputs=[self.receptor_pdbqt], seed=self.seed)
             except RuntimeError as e:
                 raise RuntimeError(f"{e}{_unsupported_elements_hint(source)}") from e
-            # A second conversion exposes every hydrogen Open Babel placed at
-            # random (see stabilize_hydrogens). Open Babel seeds its generator
-            # from the clock (usec % 70092), so two runs can draw the same
-            # seed; when the two files are identical a third run is compared.
-            _run_obabel(base + [probe] + options, outputs=[probe], log_stderr=False)
+            # A second conversion with a different OB_RANDOM_SEED exposes
+            # every hydrogen Open Babel placed at random (see
+            # stabilize_hydrogens and run_obabel_deterministic). Open Babel
+            # 3.1 ignores the seed and seeds from the clock (usec % 70092),
+            # so two runs can draw the same seed; when the two files are
+            # identical a third run (another seed) is compared.
+            _run_obabel(base + [probe] + options, outputs=[probe], log_stderr=False,
+                        seed=probe_seed(self.seed, 1))
             if same_bytes(self.receptor_pdbqt, probe):
-                _run_obabel(base + [probe] + options, outputs=[probe], log_stderr=False)
+                _run_obabel(base + [probe] + options, outputs=[probe], log_stderr=False,
+                            seed=probe_seed(self.seed, 2))
             moved = stabilize_hydrogens(self.receptor_pdbqt, probe)
         finally:
             if os.path.exists(probe):

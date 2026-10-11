@@ -146,9 +146,10 @@ class LipinskiFilter:
     """Lipinski rule-of-five filter (zero violations allowed)."""
 
     @staticmethod
-    def parse_sdf_properties(sdf_file: str) -> Optional[Dict]:
+    def parse_sdf_properties(sdf_file: str, seed: Optional[int] = None) -> Optional[Dict]:
         """Descriptors of an SDF ligand, or None if it is invalid or the
-        four Lipinski descriptors cannot all be determined.
+        four Lipinski descriptors cannot all be determined. ``seed`` is
+        Open Babel's OB_RANDOM_SEED (see ``utils.run_obabel``).
 
         ``properties_source`` records where they came from and
         ``logp_model`` which logP model produced the logP value.
@@ -171,7 +172,7 @@ class LipinskiFilter:
             'logp_model': None,
         }
 
-        obabel_props = _obabel_descriptors(sdf_file)
+        obabel_props = _obabel_descriptors(sdf_file, seed=seed)
         if obabel_props:
             props.update(obabel_props)
             props['properties_source'] = "obabel_descriptors"
@@ -248,12 +249,12 @@ _OBABEL_DESCRIPTORS = ("MW", "logP", "TPSA", "rotors", "HBD", "HBA2")
 _OBABEL_KEYS = ("mw", "logp", "tpsa", "rotors", "hbd", "hba")
 
 
-def _obabel_descriptors(sdf_file: str) -> Optional[Dict]:
+def _obabel_descriptors(sdf_file: str, seed: Optional[int] = None) -> Optional[Dict]:
     """Descriptors of the first molecule computed by Open Babel, or None."""
     name = os.path.basename(sdf_file)
     try:
         stdout = runner.run_obabel(
-            [sdf_file, "-osmi", "--append", " ".join(_OBABEL_DESCRIPTORS)])
+            [sdf_file, "-osmi", "--append", " ".join(_OBABEL_DESCRIPTORS)], seed=seed)
     except (RuntimeError, OSError) as e:
         logger.debug(f"Open Babel descriptor calculation failed for {name}: {e}")
         return None

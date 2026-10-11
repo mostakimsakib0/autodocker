@@ -82,7 +82,7 @@ def _fake_obabel(calls=None, pdbqt=_LIGAND_PDBQT_3D, fail_on=None):
 def _lipinski_ok(monkeypatch):
     monkeypatch.setattr(
         runner.ADMETFilter, "parse_sdf_properties",
-        staticmethod(lambda f: {"mw": 300.0, "logp": 2.0, "hba": 2.0, "hbd": 1.0,
+        staticmethod(lambda f, seed=None: {"mw": 300.0, "logp": 2.0, "hba": 2.0, "hbd": 1.0,
                                 "tpsa": 60.0, "rotors": 3.0,
                                 "properties_source": "obabel_descriptors",
                                 "logp_model": "Open Babel logP"}))
@@ -224,7 +224,7 @@ def test_pubchem_preparation_failures_are_warnings_with_summary(monkeypatch, tmp
 
 
 def _custom_props(mw, logp, hbd=1.0, hba=2.0):
-    return staticmethod(lambda f: {"mw": mw, "logp": logp, "hbd": hbd, "hba": hba,
+    return staticmethod(lambda f, seed=None: {"mw": mw, "logp": logp, "hbd": hbd, "hba": hba,
                                    "tpsa": 1.0, "rotors": 1.0,
                                    "properties_source": "obabel_descriptors",
                                    "logp_model": "Open Babel logP"})
@@ -265,7 +265,7 @@ def test_pubchem_parses_properties_once(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "run", _fake_obabel())
     calls = []
 
-    def props(f):
+    def props(f, seed=None):
         calls.append(f)
         return {"mw": 300.0, "logp": 2.0, "hbd": 1.0, "hba": 2.0}
 
@@ -434,7 +434,7 @@ def test_local_sdf_properties_parsed_once(tmp_path, monkeypatch):
     (indir / "a.sdf").write_text(_molblock(0.8))
     calls = []
 
-    def props(f):
+    def props(f, seed=None):
         calls.append(f)
         return {"mw": 300.0, "logp": 2.0, "hbd": 1.0, "hba": 2.0}
 
@@ -448,7 +448,7 @@ def test_local_sdf_properties_parsed_once(tmp_path, monkeypatch):
 def test_missing_descriptors_are_none_not_zero(tmp_path, monkeypatch):
     """Missing descriptors are stored as None (blank in ranking.csv), never 0."""
     monkeypatch.setattr(runner, "run", _fake_obabel())
-    monkeypatch.setattr(runner.ADMETFilter, "parse_sdf_properties", staticmethod(lambda f: None))
+    monkeypatch.setattr(runner.ADMETFilter, "parse_sdf_properties", staticmethod(lambda f, seed=None: None))
     sdf = tmp_path / "a.sdf"
     sdf.write_text(_molblock(0.8))
     lm = library.LibraryManager(str(tmp_path / "out"), str(tmp_path))
@@ -516,8 +516,9 @@ def test_minimize_keeps_3d_input_and_runs_single_threaded(tmp_path, monkeypatch)
         if expect_gen3d:
             assert minimize[0][minimize[0].index("-isdf") + 1].endswith(f"{name}_gen3d.sdf")
         # Every Open Babel call (descriptors, minimization, conversion) is
-        # single-threaded.
-        assert obabel_calls and all(env == {"OMP_NUM_THREADS": "1"} for _, env in obabel_calls)
+        # single-threaded and seeded (see _assert_obabel_env).
+        assert obabel_calls
+        _assert_obabel_env(obabel_calls, lm.seed)
 
 
 def test_sdf_conversion_requests_gasteiger_charges(tmp_path, monkeypatch):
@@ -587,7 +588,7 @@ def test_unminimized_2d_sdf_gets_3d_intermediate(tmp_path, monkeypatch):
     fixes = []
     monkeypatch.setattr(runner, "_ensure_pdbqt_has_charges", lambda p: False)
     monkeypatch.setattr(runner, "_fix_pdbqt_charges",
-                        lambda p, src, gen3d=None: fixes.append((src, gen3d)))
+                        lambda p, src, gen3d=None, seed=None: fixes.append((src, gen3d)))
     sdf = tmp_path / "flat.sdf"
     sdf.write_text(_molblock(0.0))
     lm = library.LibraryManager(str(tmp_path / "out"), str(tmp_path), minimize=False)
@@ -664,7 +665,31 @@ def test_every_obabel_call_is_single_threaded(tmp_path, monkeypatch):
     # (run_obabel_deterministic: the faked outputs of the first two agree),
     # so (1 + 3 + 3) + (1 + 3) + (1 + 3 + 3) = 18.
     assert len(obabel_calls) == 18
-    assert all(env == {"OMP_NUM_THREADS": "1"} for _, env in obabel_calls)
+    _assert_obabel_env(obabel_calls, lm.seed)
+
+
+def test_obabel_calls_use_the_run_seed(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(runner, "run", _fake_obabel(calls))
+    indir = tmp_path / "in"
+    indir.mkdir()
+    (indir / "a.sdf").write_text(_molblock(0.8))
+    lm = library.LibraryManager(str(tmp_path / "out"), str(indir), seed=1234)
+    lm.prepare_local(apply_lipinski=False)
+    obabel_calls = [(c, env) for c, env in calls if c[0] == runner.OBABEL]
+    assert obabel_calls
+    _assert_obabel_env(obabel_calls, 1234)
+
+
+def _assert_obabel_env(obabel_calls, seed):
+    """One OpenMP thread and OB_RANDOM_SEED on every Open Babel call: the run
+    seed, except on the hydrogen probes of run_obabel_deterministic, which
+    use the next two seeds."""
+    for cmd, env in obabel_calls:
+        probe = any(".h-probe." in a for a in cmd)
+        allowed = {str(seed + 1), str(seed + 2)} if probe else {str(seed)}
+        assert env["OMP_NUM_THREADS"] == "1" and set(env) == {"OMP_NUM_THREADS", "OB_RANDOM_SEED"}
+        assert env["OB_RANDOM_SEED"] in allowed, (cmd, env)
 
 
 def test_minimization_scope_is_logged_once(tmp_path, monkeypatch, caplog):
@@ -761,6 +786,10 @@ def test_pdb_ligand_gets_charged_polar_hydrogens_with_real_obabel(tmp_path):
     subprocess.run(["obabel", "-ipdb", str(pdb), "-opdbqt", "-O", str(single), "-h",
                     "--partialcharge", "gasteiger", "--title", "acetamide.pdb"],
                    check=True, capture_output=True, env=env)
+    # Open Babel >= 3.2 copies the PDB header records (COMPND, AUTHOR) of the
+    # input into the PDBQT; the pipeline removes them (Vina rejects them).
+    from vspipeline.utils import _strip_pdbqt_header_records
+    _strip_pdbqt_header_records(str(single))
 
     def mask(path):
         return [line[:70] + line[76:] if line.startswith(("ATOM", "HETATM")) else line
