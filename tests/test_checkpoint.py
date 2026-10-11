@@ -21,7 +21,7 @@ def test_checkpoint_roundtrip(outdir):
 
 
 def test_checkpoint_corrupt_json(outdir):
-    with open(runner.DockingCheckpoint(outdir).checkpoint_file, "w") as f:
+    with open(runner.DockingCheckpoint(outdir).checkpoint_file, "w", encoding="utf-8") as f:
         f.write("{this is not json")
     cp = runner.DockingCheckpoint(outdir)
     assert cp.completed == {}
@@ -142,7 +142,7 @@ def test_checkpoint_rechecks_edited_ligand_and_drops_removed_ones(
     monkeypatch.setattr(docking, "dock_ligand", _ok_run)
     runner.dock_all(charged_pdbqt, [charged_pdbqt, other], str(grid), outdir,
                     vina_params={"seed": 42})
-    with open(other, "a") as f:
+    with open(other, "a", encoding="utf-8") as f:
         f.write("REMARK edited\n")
     docked = []
 
@@ -193,7 +193,7 @@ def test_failed_redock_of_edited_ligand_drops_stale_score(
     shutil.copy(charged_pdbqt, keep)
     monkeypatch.setattr(docking, "dock_ligand", _ok_run)
     runner.dock_all(charged_pdbqt, [lig, keep], str(grid), outdir, vina_params={"seed": 42})
-    with open(lig, "a") as f:
+    with open(lig, "a", encoding="utf-8") as f:
         f.write("REMARK edited\n")
     monkeypatch.setattr(docking, "dock_ligand",
                         lambda a: ("x", None, {"status": "FAILED"}))
@@ -298,7 +298,7 @@ def test_checkpoint_flush_is_atomic_and_truncates_journal(outdir, monkeypatch):
     assert os.path.getsize(cp.journal_file) > 0
     cp.flush()
     assert os.path.getsize(cp.journal_file) == 0
-    with open(cp.checkpoint_file) as f:
+    with open(cp.checkpoint_file, encoding="utf-8") as f:
         assert set(json.load(f)) == {"a", "b"}
     assert not [p for p in os.listdir(outdir) if ".tmp." in p]
     # A crash during the write leaves the previous checkpoint intact.
@@ -311,7 +311,7 @@ def test_checkpoint_flush_is_atomic_and_truncates_journal(outdir, monkeypatch):
     monkeypatch.setattr(ckpt.json, "dump", boom)
     cp.flush()
     monkeypatch.undo()
-    with open(cp.checkpoint_file) as f:
+    with open(cp.checkpoint_file, encoding="utf-8") as f:
         assert set(json.load(f)) == {"a", "b"}
     assert os.path.getsize(cp.journal_file) > 0  # not truncated after a failed write
     assert set(runner.DockingCheckpoint(outdir).completed) == {"a", "b", "c"}

@@ -26,6 +26,7 @@ from typing import List, Tuple, Optional, Dict
 # initial import of runner this binds the partially-initialized module
 # object, which is fine because attributes are only accessed at call time.
 from vspipeline import defaults  # noqa: E402
+from vspipeline.docking import Status  # noqa: E402
 import runner  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ def extract_coordinates_from_pdbqt(pdbqt_file: str) -> Tuple[str, List[Tuple[flo
     name = os.path.basename(pdbqt_file).replace('.pdbqt', '')
 
     try:
-        with open(pdbqt_file, 'r') as f:
+        with open(pdbqt_file, 'r', encoding='utf-8') as f:
             for line in f:
                 if line.startswith('ATOM') or line.startswith('HETATM'):
                     try:
@@ -134,7 +135,7 @@ def _models_from_vina_output(path: str) -> List[Dict]:
     poses = []
     current, model, in_flex = [], 0, False
     try:
-        with open(path) as f:
+        with open(path, encoding='utf-8') as f:
             for line in f:
                 # Flexible side chains (BEGIN_RES..END_RES) are receptor atoms.
                 if line.startswith('BEGIN_RES'):
@@ -220,7 +221,7 @@ def _pdbqt_to_pdb_string(pdbqt_path: str, first_model_only: bool = False) -> Opt
     try:
         lines = []
         written = False
-        with open(pdbqt_path) as src:
+        with open(pdbqt_path, encoding='utf-8') as src:
             for line in src:
                 s = line.strip()
                 if first_model_only and s.startswith("ENDMDL"):
@@ -324,15 +325,21 @@ AFFINITY_BANDS = (
 # report (a common rule of thumb; the number itself is always shown).
 # Seconds allowed for downloading the NGL viewer when no local copy exists.
 NGL_DOWNLOAD_TIMEOUT = 60
+# Ligands shown in the report's 3D viewer and top-hits table (the full
+# ranking is in the sortable all-results table and in ranking.csv).
+REPORT_TOP_LIGANDS = 10
 RHO_STRENGTH_BANDS = ((0.7, "strong"), (0.4, "moderate"), (0.2, "weak"))
 STRONG_BINDER_CUTOFF = -6.0  # "Good" or better
 
 # Status values of ranking.csv rows that carry no usable score
 # (OUT_OF_WINDOW rows have a score, but it is outside the accepted window and
-# is not ranked; REJECTED is the pre-2.0 name of OUT_OF_WINDOW).
-_UNSCORED_STATUS = ("FAILED", "REJECTED", "ERROR", "OUT_OF_WINDOW")
+# is not ranked). The last two are not produced by this version: REJECTED is
+# the pre-2.0 name of OUT_OF_WINDOW, ERROR may come from other tools' CSVs.
+_LEGACY_OUT_OF_WINDOW = "REJECTED"
+_UNSCORED_STATUS = (Status.FAILED.value, _LEGACY_OUT_OF_WINDOW, "ERROR",
+                    Status.OUT_OF_WINDOW.value)
 # Status values of in-window results.
-_SCORED_STATUS = ("OK", "WEAK")
+_SCORED_STATUS = (Status.OK.value, Status.WEAK.value)
 
 
 def _confidence(affinity: float):
@@ -380,7 +387,7 @@ def _valid_score(row: Dict) -> Optional[float]:
 
 def _is_out_of_window(row: Dict) -> bool:
     status = str(row.get('Status', '') or '').strip().upper()
-    return status.startswith(("OUT_OF_WINDOW", "REJECTED"))
+    return status.startswith((Status.OUT_OF_WINDOW.value, _LEGACY_OUT_OF_WINDOW))
 
 
 def _template(name: str) -> str:
@@ -531,7 +538,7 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
     ``_fetch_ngljs``); when no verified NGL copy is available the viewer is
     omitted and replaced by a notice. Returns "" when there are no hits.
     """
-    top = ranked_ligands[:10]
+    top = ranked_ligands[:REPORT_TOP_LIGANDS]
     if not top:
         return ""
 
@@ -600,7 +607,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
 
     ligands = []
     try:
-        with open(results_csv, 'r') as f:
+        with open(results_csv, 'r', encoding='utf-8') as f:
             ligands = list(csv.DictReader(f))
     except Exception as e:
         logger.warning(f"Could not parse results CSV: {e}")
@@ -664,7 +671,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
     # Top hits rows
     top_rows = ""
     top_names = set()
-    for i, (lig, affinity) in enumerate(ranked_ligands[:10], 1):
+    for i, (lig, affinity) in enumerate(ranked_ligands[:REPORT_TOP_LIGANDS], 1):
         top_names.add(str(lig.get('Ligand', 'Unknown')))
         conf_class, conf_text = _confidence(affinity)
         top_rows += f"""
@@ -859,7 +866,7 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
 """
 
     try:
-        with open(output_file, 'w') as f:
+        with open(output_file, 'w', encoding='utf-8') as f:
             f.write(html_content)
         logger.info(f"[*] HTML report generated: {output_file}")
         return True

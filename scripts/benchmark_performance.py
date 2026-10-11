@@ -87,7 +87,7 @@ def _proc_tree_pids(root):
         if not entry.isdigit():
             continue
         try:
-            with open(f"/proc/{entry}/stat") as f:
+            with open(f"/proc/{entry}/stat", encoding="utf-8") as f:
                 stat = f.read()
             ppid = int(stat.rsplit(")", 1)[1].split()[1])
         except (OSError, ValueError, IndexError):
@@ -103,7 +103,7 @@ def _proc_tree_pids(root):
 
 def _proc_kb(path, field):
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 if line.startswith(field + ":"):
                     return int(line.split()[1])
@@ -209,8 +209,8 @@ def time_run(receptor, lig_dir, outdir, processes, exhaustive, seed, runner,
 
 def vina_threads(dock_dir):
     """``--cpu`` value of the first logged Vina command (None if absent)."""
-    for log in sorted(glob.glob(os.path.join(dock_dir, "docked", "*_vina.log"))):
-        with open(log) as f:
+    for log in sorted(glob.glob(os.path.join(dock_dir, _benchlib.DOCKED_DIR, "*_vina.log"))):
+        with open(log, encoding="utf-8") as f:
             for line in f:
                 m = re.search(r"--cpu\s+(\d+)", line) if line.startswith("# Command:") else None
                 if m:
@@ -219,7 +219,7 @@ def vina_threads(dock_dir):
 
 
 def count_docked(dock_dir):
-    ranking = os.path.join(dock_dir, "ranking.csv")
+    ranking = os.path.join(dock_dir, _benchlib.RANKING_CSV)
     if not os.path.exists(ranking):
         return 0
     return sum(1 for r in _benchlib.read_ranking(ranking) if r["affinity"] is not None)
@@ -299,7 +299,7 @@ def host_info(vina_bin=None):
         pass
     if info["cpu_model"] is None:
         try:
-            with open("/proc/cpuinfo") as f:
+            with open("/proc/cpuinfo", encoding="utf-8") as f:
                 m = re.search(r"^model name\s*:\s*(.+)$", f.read(), re.M)
             info["cpu_model"] = m.group(1).strip() if m else None
         except OSError:
@@ -361,16 +361,16 @@ def main(argv=None):
                       f"threads={r['vina_threads']} exit={r['exit']}", flush=True)
 
     rows = aggregate(runs)
-    with open(os.path.join(args.outdir, "runs.csv"), "w", newline="") as f:
+    with open(os.path.join(args.outdir, "runs.csv"), "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(runs[0].keys()))
         writer.writeheader()
         writer.writerows(runs)
     rows_path = os.path.join(args.outdir, "performance.csv")
-    with open(rows_path, "w", newline="") as f:
+    with open(rows_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
-    with open(os.path.join(args.outdir, "summary.json"), "w") as f:
+    with open(os.path.join(args.outdir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump({"seed": args.seed, "exhaustiveness": args.exhaustiveness,
                    "repeats": args.repeats, "threads_option": args.threads,
                    "mem_interval_s": args.mem_interval,

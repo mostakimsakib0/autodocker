@@ -198,7 +198,7 @@ def detect_cofactors(pdb_file: str) -> List[Dict]:
 def _max_pdbqt_serial(pdbqt_file: str) -> int:
     """Return the largest atom serial in a PDBQT file (0 if none)."""
     max_serial = 0
-    with open(pdbqt_file, "r") as f:
+    with open(pdbqt_file, "r", encoding="utf-8") as f:
         for line in f:
             if line.startswith(("ATOM", "HETATM")):
                 try:
@@ -292,7 +292,7 @@ def _residue_atom_types(atoms: List[Dict]) -> List[Optional[str]]:
 
 def _pdbqt_residue_atoms(pdbqt_file: str) -> set:
     """(resname, coordinate columns) of every atom of a PDBQT file."""
-    with open(pdbqt_file) as f:
+    with open(pdbqt_file, encoding="utf-8") as f:
         return {(line[17:20].strip(), line[30:54]) for line in f
                 if line.startswith(("ATOM", "HETATM"))}
 
@@ -346,6 +346,6 @@ def _append_hetatm_to_receptor(pdbqt_file: str, pdb_file: str,
             f"[*] {len(skipped)} requested HETATM residue(s) are already in the "
             "receptor (e.g. kept by --keep-hetero); not added twice: "
             + ", ".join(f"{n} {c}{r}" for c, r, n in skipped))
-    with open(pdbqt_file, "a") as dst:
+    with open(pdbqt_file, "a", encoding="utf-8") as dst:
         dst.writelines(records)
     return len(records)

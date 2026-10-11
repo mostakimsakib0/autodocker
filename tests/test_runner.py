@@ -230,7 +230,7 @@ def test_verbose_flag_in_main(cli, fake_tools, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _manifest(out):
-    with open(out / "run_manifest.json") as f:
+    with open(out / "run_manifest.json", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -319,11 +319,11 @@ def test_consensus_csv_has_only_data_rows(tmp_path):
     agreement = runner.write_consensus_outputs(
         str(tmp_path), [("a", -8.0), ("b", -6.0), ("c", -7.0), ("d", None)],
         {"a": -7.5, "b": -6.5, "c": -7.2, "d": -5.0}, "vinardo")
-    rows = list(csv.reader(open(path)))
+    rows = list(csv.reader(open(path, encoding="utf-8")))
     assert rows[0] == ["Ligand", "Vina_Affinity", "SMINA_Affinity", "Consensus"]
     assert [r[0] for r in rows[1:]] == ["a", "c", "b", "d"]
     assert rows[-1] == ["d", "FAILED", "-5.0", "NA"]
-    assert not any(line.startswith("#") for line in open(path))
+    assert not any(line.startswith("#") for line in open(path, encoding="utf-8"))
     assert agreement["n"] == 3 and agreement["rho"] == pytest.approx(1.0)
 
 

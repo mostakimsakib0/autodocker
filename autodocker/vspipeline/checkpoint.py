@@ -71,7 +71,7 @@ def _atomic_write_json(path: str, data) -> None:
     (insertion order is kept)."""
     tmp = f"{path}.tmp.{os.getpid()}"
     try:
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
@@ -106,7 +106,7 @@ class DockingCheckpoint:
         stored = None
         if os.path.exists(self.meta_file):
             try:
-                with open(self.meta_file) as f:
+                with open(self.meta_file, encoding="utf-8") as f:
                     stored = json.load(f).get("fingerprint")
             except Exception:
                 stored = None
@@ -140,7 +140,7 @@ class DockingCheckpoint:
         data: Dict = {}
         if os.path.exists(self.checkpoint_file):
             try:
-                with open(self.checkpoint_file, "r") as f:
+                with open(self.checkpoint_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
             except Exception as e:
                 logger.warning(
@@ -148,7 +148,7 @@ class DockingCheckpoint:
                 data = {}
         if os.path.exists(self.journal_file):
             try:
-                with open(self.journal_file, "r") as f:
+                with open(self.journal_file, "r", encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
                         if not line:
@@ -193,7 +193,7 @@ class DockingCheckpoint:
             "ligand_hash": ligand_hash,
         }
         try:
-            with open(self.journal_file, "a") as f:
+            with open(self.journal_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps({
                     "name": ligand_name,
                     "score": score,
@@ -226,7 +226,7 @@ class DockingCheckpoint:
         disk, truncate the journal it now contains (call at run end)."""
         if self._persist() and os.path.exists(self.journal_file):
             try:
-                with open(self.journal_file, "w"):
+                with open(self.journal_file, "w", encoding="utf-8"):
                     pass
             except Exception as e:
                 logger.warning(f"Could not truncate checkpoint journal: {e}")

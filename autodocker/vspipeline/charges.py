@@ -41,7 +41,7 @@ def _pdbqt_has_nonzero_charges(pdbqt_file: str) -> bool:
     unreadable file.
     """
     try:
-        with open(pdbqt_file, 'r') as f:
+        with open(pdbqt_file, 'r', encoding='utf-8') as f:
             for line in f:
                 if line.startswith(("ATOM", "HETATM")):
                     charge = _extract_pdbqt_charge(line)
@@ -60,7 +60,7 @@ _ensure_pdbqt_has_charges = _pdbqt_has_nonzero_charges
 def _pdbqt_has_atoms(pdbqt_file: str) -> bool:
     """Return True when a PDBQT contains at least one ATOM/HETATM record."""
     try:
-        with open(pdbqt_file, 'r') as f:
+        with open(pdbqt_file, 'r', encoding='utf-8') as f:
             for line in f:
                 if line.startswith('ATOM') or line.startswith('HETATM'):
                     return True
@@ -77,7 +77,7 @@ def _sanitize_receptor_pdbqt(pdbqt_file: str) -> None:
     kept = []
 
     try:
-        with open(pdbqt_file, "r") as f:
+        with open(pdbqt_file, "r", encoding='utf-8') as f:
             for line in f:
                 stripped = line.lstrip()
                 if stripped.startswith(("ROOT", "ENDROOT", "BRANCH", "ENDBRANCH", "TORSDOF")):
@@ -90,7 +90,7 @@ def _sanitize_receptor_pdbqt(pdbqt_file: str) -> None:
                 if line.strip():
                     kept.append("REMARK " + line)
 
-        with open(pdbqt_file, "w") as f:
+        with open(pdbqt_file, "w", encoding='utf-8') as f:
             f.writelines(kept)
 
         if removed:
@@ -115,7 +115,7 @@ def _read_coordinates(path: str) -> List[Tuple[float, float, float]]:
     ext = os.path.splitext(path)[1].lower().lstrip(".")
     coords: List[Tuple[float, float, float]] = []
     try:
-        with open(path) as f:
+        with open(path, encoding='utf-8') as f:
             lines = f.read().splitlines()
     except OSError:
         return coords

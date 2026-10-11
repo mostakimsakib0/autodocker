@@ -84,7 +84,7 @@ def test_all_tools_failed_is_fatal(tmp_path, charged_pdbqt, monkeypatch, outdir)
 def test_duplicate_ligand_names_rejected(tmp_path, outdir, charged_pdbqt):
     lig_dir = tmp_path / "ligs"
     lig_dir.mkdir()
-    (lig_dir / "dup.pdbqt").write_text(open(charged_pdbqt).read())
+    (lig_dir / "dup.pdbqt").write_text(open(charged_pdbqt, encoding="utf-8").read())
     (lig_dir / "dup.pdbqt").touch()
     ligs = [str(lig_dir / "dup.pdbqt")] * 3
     with pytest.raises(ValueError, match="Duplicate ligand names"):

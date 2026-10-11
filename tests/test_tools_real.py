@@ -27,7 +27,7 @@ def _run_ok(cmd):
 
 def _has_real_charges(pdbqt):
     # charge lives in cols 71-77 of the AutoDock PDBQT layout
-    for line in open(pdbqt):
+    for line in open(pdbqt, encoding="utf-8"):
         if line.startswith(("ATOM", "HETATM")):
             chunk = line[70:77].strip()
             try:
@@ -84,7 +84,7 @@ def _make_pdbqt(smiles, path, charged=False):
             f"{pos.x:8.3f}{pos.y:8.3f}{pos.z:8.3f}"
             f"  0.00  0.00    {charges[i]:7.4f}{t:>2s}\n")
     lines.append("ENDROOT\nTORSDOF 0\n")
-    open(str(path), "w").writelines(lines)
+    open(str(path), "w", encoding="utf-8").writelines(lines)
     return _has_real_charges(str(path))
 
 

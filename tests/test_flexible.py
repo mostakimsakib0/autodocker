@@ -125,7 +125,7 @@ def test_build_flexible_residue_pdbqt(tmp_path):
     assert out is not None
     assert built == ["A45"]  # GLY cannot be flexible and stays rigid
     assert os.path.exists(out)
-    assert "BEGIN_RES" in open(out).read()
+    assert "BEGIN_RES" in open(out, encoding="utf-8").read()
 
 
 def test_build_flexible_residue_pdbqt_empty(tmp_path):
@@ -237,10 +237,10 @@ def test_flex_files_are_accepted_by_vina(tmp_path):
     rigid = fl._remove_residues_from_pdbqt(str(rec), built, str(tmp_path / "rigid.pdbqt"),
                                            flex_file=flex)
     # Every atom is in exactly one of the two files.
-    n_atoms = lambda p: sum(1 for l in open(p) if l.startswith(("ATOM", "HETATM")))
+    n_atoms = lambda p: sum(1 for l in open(p, encoding="utf-8") if l.startswith(("ATOM", "HETATM")))
     assert n_atoms(rigid) + n_atoms(flex) == n_atoms(rec)
     # The serine hydroxyl hydrogen (named just "H" by Open Babel) moves with OG.
-    ser_block = open(flex).read().split("BEGIN_RES")[2]
+    ser_block = open(flex, encoding="utf-8").read().split("BEGIN_RES")[2]
     assert " SER " in ser_block
     assert any(l[77:79].strip() == "HD" for l in ser_block.splitlines()
                if l.startswith("ATOM"))
@@ -277,7 +277,7 @@ def test_build_flexible_duplicate_keys_built_once(tmp_path):
     built = []
     flex = fl.build_flexible_residue_pdbqt(str(rec), ["A45", "A45", "A99"], str(tmp_path),
                                            built=built)
-    text = open(flex).read()
+    text = open(flex, encoding="utf-8").read()
     assert built == ["A45"]
     assert text.count("BEGIN_RES") == 1
     assert text.splitlines()[0] == "REMARK flexible residues: A45"

@@ -247,7 +247,7 @@ class TestBootstrap:
 # ---------------------------------------------------------------------------
 
 def _write_csv(path, header, rows):
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(header)
         w.writerows(rows)
@@ -326,9 +326,9 @@ class TestLigandPrep:
             f.write(blocks)
 
         def fake_convert(mol2, pdbqt):
-            if "mol2" in open(mol2).read():   # 'mol2' name fails
+            if "mol2" in open(mol2, encoding="utf-8").read():   # 'mol2' name fails
                 raise RuntimeError("boom")
-            open(pdbqt, "w").write("ATOM\n")
+            open(pdbqt, "w", encoding="utf-8").write("ATOM\n")
 
         monkeypatch.setattr(be, "mol2_to_pdbqt", fake_convert)
         lig_dir, scratch = tmp_path / "ligands", tmp_path / "scratch"
@@ -440,7 +440,7 @@ THREE_MODES = "".join(
 
 
 def _atom_x(path):
-    line = next(ln for ln in open(path) if ln.startswith("ATOM"))
+    line = next(ln for ln in open(path, encoding="utf-8") if ln.startswith("ATOM"))
     return float(line.split()[5])
 
 
@@ -508,7 +508,7 @@ class TestRedock:
         meta = bl.rdkit_start_conformer(mol2_file, str(a), seed=42)
         bl.rdkit_start_conformer(mol2_file, str(b), seed=42)
         assert meta["seed"] == 42 and meta["method"].startswith("ETKDGv3")
-        strip = lambda p: [ln for ln in open(p) if not ln.startswith("#")]
+        strip = lambda p: [ln for ln in open(p, encoding="utf-8") if not ln.startswith("#")]
         assert strip(a) == strip(b)
 
 
@@ -532,7 +532,7 @@ class TestParity:
     @staticmethod
     def _fake_vina(text):
         def run(cmd, timeout):
-            open(cmd[cmd.index("--out") + 1], "w").write(text)
+            open(cmd[cmd.index("--out") + 1], "w", encoding="utf-8").write(text)
         return run
 
     def test_pass(self, tmp_path):
@@ -697,3 +697,11 @@ class TestPerformance:
     def test_build_library_requires_pdbqt(self, tmp_path):
         with pytest.raises(RuntimeError, match="no \\*.pdbqt"):
             bperf.build_library(str(tmp_path), 5, 42, str(tmp_path))
+
+
+def test_script_output_names_match_the_pipeline():
+    """scripts/_benchlib.py mirrors vspipeline/outputs.py; they must agree."""
+    from vspipeline import outputs
+    assert bl.RANKING_CSV == outputs.RANKING_CSV
+    assert bl.DOCKED_DIR == outputs.DOCKED_DIR
+    assert bl.FRAME_OFFSET_TXT == outputs.FRAME_OFFSET_TXT

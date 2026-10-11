@@ -118,7 +118,7 @@ def _capture_run(monkeypatch, write=None):
     def fake_run(cmd, capture=False, **kwargs):
         calls.append(cmd)
         target = cmd[cmd.index("-O") + 1]
-        with open(target, "w") as f:
+        with open(target, "w", encoding="utf-8") as f:
             f.write(write or "ATOM      1  C   LIG A   1       1.000   2.000   3.000  0.00  0.00    -0.250 C \n")
         return ("", "", 0)
 

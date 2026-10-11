@@ -31,7 +31,7 @@ def test_all_fail_raises_with_pointer(tmp_path, empty_pdbqt):
     outdir = str(tmp_path / "out")
     os.makedirs(outdir, exist_ok=True)
     receptor = str(tmp_path / "rec.pdbqt")
-    with open(receptor, "w") as f:
+    with open(receptor, "w", encoding="utf-8") as f:
         f.write("END\n")
     with pytest.raises(RuntimeError, match="vina.log"):
         runner.dock_all(
@@ -209,7 +209,7 @@ def _job(tmp_path, primary, fallback=None, receptor=None, ligand=None, flex=None
     grid.write_text("center_x=0\ncenter_y=0\ncenter_z=0\nsize_x=20\nsize_y=20\nsize_z=20\n")
     if receptor is None:
         receptor = str(tmp_path / "rec.pdbqt")
-        with open(receptor, "w") as f:
+        with open(receptor, "w", encoding="utf-8") as f:
             f.write("ATOM      1  N   LYS A   1       5.000   0.000   0.000  0.00  0.00    -0.300 N \n")
     dock_dir = tmp_path / "docked"
     dock_dir.mkdir(exist_ok=True)
@@ -268,7 +268,7 @@ def test_out_of_window_result_is_reported_not_failed(tmp_path, monkeypatch):
     assert metrics["status"] == "OUT_OF_WINDOW"
     assert metrics["raw_score"] == -0.512
     assert "outside the accepted window" in metrics["error"]
-    log = open(metrics["log_file"]).read()
+    log = open(metrics["log_file"], encoding="utf-8").read()
     assert "# Result: OUT_OF_WINDOW" in log
 
 
@@ -281,7 +281,7 @@ def test_affinity_window_bounds(score, inside):
 def test_command_logged_before_running_and_stderr_kept(tmp_path, monkeypatch):
     eng = _fake_engine(tmp_path)
     _, _, metrics = docking.dock_ligand(_job(tmp_path, eng))
-    log = open(metrics["log_file"]).read().splitlines()
+    log = open(metrics["log_file"], encoding="utf-8").read().splitlines()
     assert log[0] == "# Attempt: Vina (primary)"
     assert log[1].startswith("# Command: " + eng + " --receptor ")
     # plain paths: identical to the old ' '.join() text the parity script splits
@@ -291,7 +291,7 @@ def test_command_logged_before_running_and_stderr_kept(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_MODE_vina", "crash")
     _, score, metrics = docking.dock_ligand(_job(tmp_path, eng))
     assert score is None and metrics["status"] == "FAILED"
-    text = open(metrics["log_file"]).read()
+    text = open(metrics["log_file"], encoding="utf-8").read()
     assert "# Command: " in text and "simulated crash" in text
 
 
@@ -304,7 +304,7 @@ def test_traceback_is_real(tmp_path, monkeypatch):
     monkeypatch.setattr(docking, "_build_metrics", boom)
     _, score, metrics = docking.dock_ligand(_job(tmp_path, eng))
     assert metrics["status"] == "FAILED"
-    text = open(metrics["log_file"]).read()
+    text = open(metrics["log_file"], encoding="utf-8").read()
     assert "# Traceback:\nTraceback (most recent call last):" in text
     assert "KeyError" in text
 
@@ -339,7 +339,7 @@ def test_qvina_flexible_docking_passes_flex(tmp_path, monkeypatch):
     flex.write_text("BEGIN_RES LYS A   1\nEND_RES LYS A   1\n")
     _, score, metrics = docking.dock_ligand(_job(tmp_path, eng, flex=str(flex)))
     assert score is not None, metrics
-    calls = open(os.path.join(os.path.dirname(eng), "calls.log")).read()
+    calls = open(os.path.join(os.path.dirname(eng), "calls.log"), encoding="utf-8").read()
     assert "--flex " + str(flex) in calls
 
 

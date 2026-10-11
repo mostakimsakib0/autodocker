@@ -34,7 +34,7 @@ def test_run_smina_docking_real(tiny_system):
     )
     assert isinstance(aff, float)
     assert os.path.exists(out)
-    assert any(line.startswith("MODEL") for line in open(out))
+    assert any(line.startswith("MODEL") for line in open(out, encoding="utf-8"))
 
 
 @pytest.mark.skipif(not SMINA_AVAILABLE, reason="smina binary not installed")

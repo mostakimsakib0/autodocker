@@ -23,6 +23,14 @@ import re
 import shutil
 import subprocess
 
+# Names of AutoDocker's output files read by the benchmarks. They mirror
+# autodocker/vspipeline/outputs.py (the scripts also run outside the package,
+# e.g. from /repo/scripts in the container); tests/test_benchmarks.py checks
+# that the two agree.
+RANKING_CSV = "ranking.csv"
+DOCKED_DIR = "docked"
+FRAME_OFFSET_TXT = "frame_offset.txt"
+
 # Timeouts (seconds) for the external helpers and downloads used by the
 # benchmark scripts.
 TOOL_TIMEOUT = 120          # obrms, obabel conversions
@@ -52,9 +60,9 @@ def read_frame_offset(path):
     Poses are in the docking frame; input frame = docking frame + offset.
     """
     if os.path.isdir(path):
-        path = os.path.join(path, "frame_offset.txt")
+        path = os.path.join(path, FRAME_OFFSET_TXT)
     values = {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             if "=" in line and not line.lstrip().startswith("#"):
                 key, val = line.split("=", 1)
@@ -74,7 +82,7 @@ def parse_mol2_atoms(mol2_path):
     (SYBYL type) and ``element`` (the part of the type before the dot).
     """
     atoms, in_atoms, n_molecules = [], False, 0
-    with open(mol2_path) as f:
+    with open(mol2_path, encoding="utf-8") as f:
         for line in f:
             stripped = line.strip()
             if stripped.startswith("@<TRIPOS>MOLECULE"):
@@ -117,7 +125,7 @@ def shift_mol2(mol2_path, shift, out_path):
 
     Used to bring a crystal ligand (input frame) into the docking frame.
     """
-    with open(mol2_path) as src, open(out_path, "w") as dst:
+    with open(mol2_path, encoding="utf-8") as src, open(out_path, "w", encoding="utf-8") as dst:
         in_atoms = False
         for line in src:
             stripped = line.strip()
@@ -213,7 +221,7 @@ def parse_vina_models(pdbqt_path):
         model.pop("_minimized", None)
         models.append(model)
 
-    with open(pdbqt_path) as f:
+    with open(pdbqt_path, encoding="utf-8") as f:
         for raw in f:
             line = raw.rstrip("\n")
             if line.startswith("MODEL"):
@@ -273,7 +281,7 @@ def first_vina_result(pdbqt_path):
 
 def write_model(model, path):
     """Write one parsed model as a standalone PDBQT file."""
-    with open(path, "w") as out:
+    with open(path, "w", encoding="utf-8") as out:
         out.write("\n".join(model["lines"]) + "\n")
     return path
 
@@ -309,7 +317,7 @@ def read_ranking(ranking_csv):
     ``docked_file`` and ``engine``.
     """
     rows = []
-    with open(ranking_csv, newline="") as f:
+    with open(ranking_csv, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         fields = reader.fieldnames or []
         key = next((k for k in AFFINITY_COLUMNS if k in fields), None)
@@ -345,7 +353,7 @@ def resolve_docked_file(ranking_csv, docked_file):
     path = docked_file if os.path.isabs(docked_file) else os.path.join(base, docked_file)
     if os.path.exists(path):
         return path
-    alt = os.path.join(base, "docked", os.path.basename(docked_file))
+    alt = os.path.join(base, DOCKED_DIR, os.path.basename(docked_file))
     return alt if os.path.exists(alt) else path
 
 
@@ -466,7 +474,7 @@ def rdkit_start_conformer(src, out_mol2, seed, mmff_iters=ETKDG_MMFF_ITERS):
         status = AllChem.UFFOptimizeMolecule(mol, maxIters=mmff_iters)
         ff = "UFF"
     tmp_sdf = out_mol2 + ".tmp.sdf"
-    with open(tmp_sdf, "w") as f:
+    with open(tmp_sdf, "w", encoding="utf-8") as f:
         f.write(Chem.MolToMolBlock(mol))
         f.write("$$$$\n")
     try:

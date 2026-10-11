@@ -63,7 +63,7 @@ def _fake_obabel(calls=None, pdbqt=_LIGAND_PDBQT_3D, fail_on=None):
             raise subprocess.CalledProcessError(1, cmd, output="", stderr="boom")
         if "-O" in cmd:
             out = cmd[cmd.index("-O") + 1]
-            with open(out, "w") as f:
+            with open(out, "w", encoding="utf-8") as f:
                 if out.endswith(".sdf"):
                     f.write(_molblock(0.8, 0.3))
                 elif out.endswith(".pdb"):
@@ -117,7 +117,7 @@ def test_save_metadata(tmp_path):
     lm = library.LibraryManager(str(tmp_path), str(tmp_path / "in"))
     lm.metadata["x_1"] = {"a": 1}
     lm._save_metadata()
-    assert json.load(open(lm.metadata_file))["x_1"]["a"] == 1
+    assert json.load(open(lm.metadata_file, encoding="utf-8"))["x_1"]["a"] == 1
 
 
 def test_create_fda_library_records_pubchem_provenance(monkeypatch, tmp_path):
@@ -127,7 +127,7 @@ def test_create_fda_library_records_pubchem_provenance(monkeypatch, tmp_path):
     lm = library.LibraryManager(str(tmp_path), str(tmp_path / "in"))
     out = lm.create_fda_library(apply_lipinski=True, max_compounds=2)
     assert len(out) == 2  # --max-compounds is honoured
-    meta = json.load(open(lm.metadata_file))
+    meta = json.load(open(lm.metadata_file, encoding="utf-8"))
     entry = meta["aspirin_12345"]
     assert entry["pubchem_cid"] == "12345"
     assert entry["pubchem_query"] == "aspirin"
@@ -457,7 +457,7 @@ def test_missing_descriptors_are_none_not_zero(tmp_path, monkeypatch):
     analyzer.save_ranking([("a", -6.5)], mode="extended",
                           metrics_dict={"a": {"status": "OK"}})
     import csv
-    row = next(csv.DictReader(open(analyzer.csv_file)))
+    row = next(csv.DictReader(open(analyzer.csv_file, encoding="utf-8")))
     assert row["MW"] == "" and row["LogP"] == "" and row["HBA"] == ""
 
 
@@ -537,9 +537,9 @@ def test_failed_minimization_falls_back_to_input(tmp_path, monkeypatch, caplog):
         if "-O" in cmd:
             out = cmd[cmd.index("-O") + 1]
             if "--minimize" in cmd:
-                open(out, "w").close()
+                open(out, "w", encoding="utf-8").close()
             else:
-                with open(out, "w") as f:
+                with open(out, "w", encoding="utf-8") as f:
                     f.write(_LIGAND_PDBQT_3D)
         return ("", "", 0) if capture else None
 
@@ -622,7 +622,7 @@ def test_planar_result_of_2d_input_is_rejected(tmp_path, monkeypatch):
 def test_failed_conversion_removes_partial_output(tmp_path, monkeypatch):
     def fake_run(cmd, capture=False, extra_env=None, **kw):
         out = cmd[cmd.index("-O") + 1]
-        with open(out, "w") as f:
+        with open(out, "w", encoding="utf-8") as f:
             f.write("partial")
         raise subprocess.CalledProcessError(1, cmd, output="", stderr="kekulize error")
 
@@ -737,7 +737,7 @@ def test_pdb_ligand_gets_charged_polar_hydrogens_with_real_obabel(tmp_path):
                     "-O", str(pdb)], check=True, capture_output=True, env=env)
     lm = library.LibraryManager(str(tmp_path / "out"), str(indir))
     (out,) = lm.prepare_local(apply_lipinski=False)
-    atoms = [line for line in open(out) if line.startswith(("ATOM", "HETATM"))]
+    atoms = [line for line in open(out, encoding="utf-8") if line.startswith(("ATOM", "HETATM"))]
     hd = [line for line in atoms if line[77:79].strip() == "HD"]
     assert len(hd) == 2  # amide N-H and hydroxyl O-H
     assert all(float(line[70:76]) > 0.1 for line in hd)
@@ -750,7 +750,7 @@ def test_pdb_ligand_gets_charged_polar_hydrogens_with_real_obabel(tmp_path):
 
     def mask(path):
         return [line[:70] + line[76:] if line.startswith(("ATOM", "HETATM")) else line
-                for line in open(path)]
+                for line in open(path, encoding="utf-8")]
 
     assert mask(out) == mask(str(single))
 

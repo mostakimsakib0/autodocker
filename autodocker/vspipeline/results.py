@@ -17,6 +17,7 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 from vspipeline import defaults  # noqa: E402
+from vspipeline import outputs  # noqa: E402
 from vspipeline.docking import (SIMSCORE_RMSD_LB_CUTOFF, SIMSCORE_RMSD_UB_CUTOFF,
                                  Status)
 
@@ -37,11 +38,11 @@ def _score_sort_key(result: Tuple[str, Optional[float]]) -> Tuple[bool, float, s
 
 
 def _score_csv(score: Optional[float]):
-    return "FAILED" if score is None else score
+    return Status.FAILED.value if score is None else score
 
 
 def _score_text(score: Optional[float]) -> str:
-    return "FAILED" if score is None else f"{score:.2f}"
+    return Status.FAILED.value if score is None else f"{score:.2f}"
 
 
 def _blank_if_none(value):
@@ -63,18 +64,18 @@ class ResultsAnalyzer:
     def __init__(self, outdir: str, top_n: int = defaults.TOP_N):
         self.outdir = outdir
         self.top_n = top_n
-        self.results_file = os.path.join(outdir, "Results_full.txt")
-        self.top_hits_file = os.path.join(outdir, "Top_hits.txt")
-        self.csv_file = os.path.join(outdir, "ranking.csv")
-        self.metrics_file = os.path.join(outdir, "metrics.txt")
-        self.metadata_file = os.path.join(outdir, "ligand_metadata.json")
+        self.results_file = os.path.join(outdir, outputs.RESULTS_FULL_TXT)
+        self.top_hits_file = os.path.join(outdir, outputs.TOP_HITS_TXT)
+        self.csv_file = os.path.join(outdir, outputs.RANKING_CSV)
+        self.metrics_file = os.path.join(outdir, outputs.METRICS_TXT)
+        self.metadata_file = os.path.join(outdir, outputs.LIGAND_METADATA_JSON)
         self.metadata = self._load_metadata()
 
     def _load_metadata(self) -> Dict:
         if not os.path.exists(self.metadata_file):
             return {}
         try:
-            with open(self.metadata_file) as f:
+            with open(self.metadata_file, encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
             logger.warning(f"Could not load ligand metadata: {e}")
@@ -119,15 +120,15 @@ class ResultsAnalyzer:
 
     def _dock_file(self, name: str, metrics: Dict) -> str:
         return self._relative_path(metrics.get(
-            "dock_file", os.path.join(self.outdir, "docked", f"{name}_out.pdbqt")))
+            "dock_file", os.path.join(self.outdir, outputs.DOCKED_DIR, f"{name}_out.pdbqt")))
 
     @staticmethod
     def _affinity_csv(status: Status, affinity: Optional[float]):
-        return "FAILED" if status is Status.FAILED or affinity is None else affinity
+        return Status.FAILED.value if status is Status.FAILED or affinity is None else affinity
 
     @staticmethod
     def _affinity_text(status: Status, affinity: Optional[float]) -> str:
-        return "FAILED" if status is Status.FAILED or affinity is None else f"{affinity:.2f}"
+        return Status.FAILED.value if status is Status.FAILED or affinity is None else f"{affinity:.2f}"
 
     # -- writers -----------------------------------------------------------
 
@@ -141,7 +142,7 @@ class ResultsAnalyzer:
         rows = self._rows(results, metrics_dict)
 
         try:
-            with open(self.csv_file, "w", newline="") as f:
+            with open(self.csv_file, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 if metrics_dict:
                     writer.writerow([
@@ -183,7 +184,7 @@ class ResultsAnalyzer:
     def _save_full_results(self, rows: List[Tuple[str, Status, Optional[float]]]):
         """Write Results_full.txt (every ligand, in ranking order)."""
         try:
-            with open(self.results_file, "w") as f:
+            with open(self.results_file, "w", encoding="utf-8") as f:
                 f.write("=" * 70 + "\n")
                 f.write("VIRTUAL SCREENING RESULTS\n")
                 f.write("=" * 70 + "\n")
@@ -225,7 +226,7 @@ class ResultsAnalyzer:
                        metrics_dict: Optional[Dict] = None):
         """Write Top_hits.txt: the first ``top_n`` rows of the ranking."""
         try:
-            with open(self.top_hits_file, "w") as f:
+            with open(self.top_hits_file, "w", encoding="utf-8") as f:
                 f.write("=" * 70 + "\n")
                 f.write(f"TOP {self.top_n} HITS\n")
                 f.write("=" * 70 + "\n\n")
@@ -281,7 +282,7 @@ class ResultsAnalyzer:
         out_of_window = sum(1 for _, s, _ in rows if s is Status.OUT_OF_WINDOW)
         failed = sum(1 for _, s, _ in rows if s is Status.FAILED)
         try:
-            with open(self.metrics_file, "w") as f:
+            with open(self.metrics_file, "w", encoding="utf-8") as f:
                 f.write("=" * 70 + "\n")
                 f.write("METRICS SUMMARY\n")
                 f.write("=" * 70 + "\n\n")

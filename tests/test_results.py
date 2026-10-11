@@ -73,7 +73,7 @@ def test_save_metrics_report(tmp_path):
 
 def _rows(path):
     import csv
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 

@@ -157,7 +157,12 @@ def _cone(axis, half_angle, n, spin_degrees):
     return out
 
 
-def _fibonacci_sphere(n=256):
+# Directions sampled on the unit sphere when searching free space around an
+# isolated atom for its hydrogens.
+_SPHERE_POINTS = 256
+
+
+def _fibonacci_sphere(n=_SPHERE_POINTS):
     golden = math.pi * (3.0 - math.sqrt(5.0))
     points = []
     for i in range(n):
@@ -268,7 +273,7 @@ class _Atoms:
 
     def __init__(self, path: str, fmt: str):
         self.fmt = fmt
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             self.lines = f.readlines()
         self.records = []
         if fmt in ("pdbqt", "pdb"):
@@ -320,7 +325,7 @@ class _Atoms:
             self.lines[line_index] = f"{line[:30]}{x:8.3f}{y:8.3f}{z:8.3f}{line[54:]}"
 
     def write(self, path: str) -> None:
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.writelines(self.lines)
 
 

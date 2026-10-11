@@ -29,6 +29,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # partially-initialized module object, which is fine because attributes are
 # only accessed at call time.
 from vspipeline import defaults  # noqa: E402
+from vspipeline import outputs  # noqa: E402
 import runner  # noqa: E402
 from vspipeline.hydrogens import (  # noqa: E402,F401  (some re-exported)
     H_PARENT_MAX_DISTANCE,
@@ -122,7 +123,7 @@ def _first_model_lines(pdb_file: str) -> List[str]:
     receptor.
     """
     lines = []
-    with open(pdb_file) as f:
+    with open(pdb_file, encoding="utf-8") as f:
         for line in f:
             if line.startswith("ENDMDL"):
                 break
@@ -194,7 +195,7 @@ def _heavy_atom_coords(path: str) -> Tuple[List[float], List[float], List[float]
     """Coordinates of the non-hydrogen ATOM/HETATM records of a PDB/PDBQT."""
     pdbqt = path.lower().endswith(".pdbqt")
     xs, ys, zs = [], [], []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             if not line.startswith(("ATOM", "HETATM")):
                 continue
@@ -220,7 +221,7 @@ def _translate_pdbqt(path: str, offset: Tuple[float, float, float]) -> None:
     """Subtract ``offset`` from every ATOM/HETATM coordinate of a PDBQT file."""
     dx, dy, dz = offset
     out = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             if line.startswith(("ATOM", "HETATM")) and len(line) >= 54:
                 x = float(line[30:38]) - dx
@@ -228,19 +229,19 @@ def _translate_pdbqt(path: str, offset: Tuple[float, float, float]) -> None:
                 z = float(line[46:54]) - dz
                 line = f"{line[:30]}{x:8.3f}{y:8.3f}{z:8.3f}{line[54:]}"
             out.append(line)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.writelines(out)
 
 
 def _strip_remark_name_paths(path: str) -> None:
     """Reduce Open Babel's ``REMARK  Name = <input path>`` to the file name,
     so the receptor PDBQT does not depend on the output directory."""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         lines = f.readlines()
     prefix = "REMARK  Name = "
     lines = [prefix + os.path.basename(l[len(prefix):].rstrip("\n")) + "\n"
              if l.startswith(prefix) else l for l in lines]
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
 
@@ -264,7 +265,7 @@ def _restore_residue_labels(pdbqt_file: str, pdb_file: str) -> int:
     labels = {}
     duplicates = 0
     n_input_heavy = 0
-    with open(pdb_file) as f:
+    with open(pdb_file, encoding="utf-8") as f:
         for line in f:
             if line.startswith(("ATOM", "HETATM")) and len(line) >= 54:
                 if is_hydrogen_record(line):
@@ -279,7 +280,7 @@ def _restore_residue_labels(pdbqt_file: str, pdb_file: str) -> int:
             f"[!] {duplicates} atom(s) in {pdb_file} share coordinates with an "
             "earlier atom; their PDBQT records take the earlier atom's labels")
 
-    with open(pdbqt_file) as f:
+    with open(pdbqt_file, encoding="utf-8") as f:
         lines = f.readlines()
     atoms = [(i, l) for i, l in enumerate(lines) if l.startswith(("ATOM", "HETATM"))]
     n_output_heavy = sum(1 for _, l in atoms if not _is_pdbqt_hydrogen(l))
@@ -319,7 +320,7 @@ def _restore_residue_labels(pdbqt_file: str, pdb_file: str) -> int:
         new = record + line[6:17] + label[5:] + line[27:]
         changed += new != line
         lines[i] = new
-    with open(pdbqt_file, "w") as f:
+    with open(pdbqt_file, "w", encoding="utf-8") as f:
         f.writelines(lines)
     return changed
 
@@ -327,7 +328,7 @@ def _restore_residue_labels(pdbqt_file: str, pdb_file: str) -> int:
 def _count_polar_atoms(pdbqt_file: str) -> Tuple[int, int]:
     """(polar hydrogens, N/O heavy atoms) in a PDBQT file."""
     hd = no = 0
-    with open(pdbqt_file) as f:
+    with open(pdbqt_file, encoding="utf-8") as f:
         for line in f:
             if line.startswith(("ATOM", "HETATM")):
                 t = line[77:79].strip()
@@ -441,11 +442,11 @@ class ProteinPreparation:
     def __init__(self, pdb_file: str, outdir: str):
         self.pdb_file = pdb_file
         self.outdir = outdir
-        self.pdb_clean = os.path.join(outdir, "protein_clean.pdb")
-        self.receptor_pdbqt = os.path.join(outdir, "receptor.pdbqt")
-        self.grid_conf = os.path.join(outdir, "grid.conf")
-        self.grid_box_script = os.path.join(outdir, "grid_box.pml")
-        self.pocket_summary_file = os.path.join(outdir, "pocket_summary.csv")
+        self.pdb_clean = os.path.join(outdir, outputs.PROTEIN_CLEAN_PDB)
+        self.receptor_pdbqt = os.path.join(outdir, outputs.RECEPTOR_PDBQT)
+        self.grid_conf = os.path.join(outdir, outputs.GRID_CONF)
+        self.grid_box_script = os.path.join(outdir, outputs.GRID_BOX_PML)
+        self.pocket_summary_file = os.path.join(outdir, outputs.POCKET_SUMMARY_CSV)
 
     def validate(self):
         """Validate protein PDB file."""
@@ -456,7 +457,7 @@ class ProteinPreparation:
             raise PermissionError(f"Cannot read protein file: {self.pdb_file}")
 
         try:
-            with open(self.pdb_file) as f:
+            with open(self.pdb_file, encoding="utf-8") as f:
                 count = sum(1 for line in f if line.startswith("ATOM"))
         except IOError as e:
             raise IOError(f"Error reading protein file: {e}")
@@ -528,7 +529,7 @@ class ProteinPreparation:
                 f"Selected chain(s) '{', '.join(selected_chains)}' have no atoms "
                 f"in {self.pdb_file}")
         try:
-            with open(self.pdb_clean, "w") as dst:
+            with open(self.pdb_clean, "w", encoding="utf-8") as dst:
                 dst.writelines(out)
         except IOError as e:
             raise IOError(
@@ -771,10 +772,10 @@ class ProteinPreparation:
 
     def write_frame_offset(self) -> Optional[str]:
         """Record the frame offset in ``frame_offset.txt`` next to grid.conf."""
-        path = os.path.join(self.outdir, "frame_offset.txt")
+        path = os.path.join(self.outdir, outputs.FRAME_OFFSET_TXT)
         try:
             dx, dy, dz = self.frame_offset()
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 f.write(
                     "# receptor.pdbqt, grid.conf and docked poses are translated so\n"
                     "# the mean of the receptor heavy atoms is at the origin. Add this\n"
@@ -807,7 +808,7 @@ class ProteinPreparation:
         info = {}
         current = None
         try:
-            with open(info_file) as f:
+            with open(info_file, encoding="utf-8") as f:
                 for line in f:
                     pocket_match = re.match(
                         r"Pocket\s+(\d+)\s*:", line.strip())
@@ -833,7 +834,7 @@ class ProteinPreparation:
 
     def _write_pocket_summary(self, pockets: List[Dict]):
         try:
-            with open(self.pocket_summary_file, "w", newline="") as f:
+            with open(self.pocket_summary_file, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow([
                     "Pocket", "Score", "Druggability_Score", "Volume",
@@ -897,7 +898,7 @@ class ProteinPreparation:
                    sx: float, sy: float, sz: float):
         """Write AutoDock Vina grid configuration."""
         try:
-            with open(self.grid_conf, "w") as f:
+            with open(self.grid_conf, "w", encoding="utf-8") as f:
                 f.write(f"""center_x = {cx}
 center_y = {cy}
 center_z = {cz}
@@ -955,7 +956,7 @@ size_z = {sz}
         )
 
         try:
-            with open(self.grid_box_script, "w") as f:
+            with open(self.grid_box_script, "w", encoding="utf-8") as f:
                 f.write('\n'.join(pml_lines))
                 logger.info(
                     f"[*] Grid visualization script saved: {self.grid_box_script}")

@@ -126,7 +126,7 @@ def docking_params(opts):
 
 def params_match(work, params):
     try:
-        with open(os.path.join(work, "params.json")) as f:
+        with open(os.path.join(work, "params.json"), encoding="utf-8") as f:
             return json.load(f).get("docking") == params
     except (OSError, ValueError):
         return False
@@ -153,7 +153,7 @@ def prepare_start_ligand(pdbid, complex_dir, work, opts):
     # No RDKit here (e.g. inside the AutoDocker image): use the conformer
     # fetch_casf_rcsb.py generated, if it was made with the same seed.
     if os.path.exists(pre) and os.path.exists(pre_meta):
-        with open(pre_meta) as f:
+        with open(pre_meta, encoding="utf-8") as f:
             meta = json.load(f)
         if meta.get("seed") == opts["conformer_seed"]:
             shutil.copy(pre, out)
@@ -185,16 +185,16 @@ def run_docking(pdbid, complex_dir, work, opts):
         cmd.extend(["--threads", str(opts["threads"])])
     proc = subprocess.run(cmd, capture_output=True, text=True,
                           timeout=opts["timeout"])
-    with open(os.path.join(work, "runner.log"), "w") as f:
+    with open(os.path.join(work, "runner.log"), "w", encoding="utf-8") as f:
         f.write(" ".join(cmd) + "\n")
         f.write(proc.stdout or "")
         f.write(proc.stderr or "")
-    out_pdbqt = os.path.join(work, "docked", f"{pdbid}_ligand_out.pdbqt")
+    out_pdbqt = os.path.join(work, _benchlib.DOCKED_DIR, f"{pdbid}_ligand_out.pdbqt")
     if proc.returncode != 0 or not os.path.exists(out_pdbqt):
         raise RuntimeError(
             f"docking failed (rc={proc.returncode}): "
             f"{(proc.stdout or '')[-300:]} {(proc.stderr or '')[-300:]}")
-    with open(os.path.join(work, "params.json"), "w") as f:
+    with open(os.path.join(work, "params.json"), "w", encoding="utf-8") as f:
         json.dump({"docking": docking_params(opts), "start_conformer": conf_meta,
                    "box": {"center_input_frame": [cx, cy, cz], "edge": size}},
                   f, indent=2)
@@ -210,14 +210,14 @@ def process_complex(job):
     protein = os.path.join(complex_dir, f"{pdbid}_protein.pdb")
     crystal = os.path.join(complex_dir, f"{pdbid}_ligand.mol2")
     work = os.path.join(workroot, pdbid)
-    out_pdbqt = os.path.join(work, "docked", f"{pdbid}_ligand_out.pdbqt")
+    out_pdbqt = os.path.join(work, _benchlib.DOCKED_DIR, f"{pdbid}_ligand_out.pdbqt")
     try:
         if not (os.path.exists(protein) and os.path.exists(crystal)):
             rec["status"] = "missing"
             rec["error"] = opts["manifest"].get(pdbid) or "not in --data-dir"
             return rec
         if opts["max_receptor_atoms"]:
-            with open(protein) as f:
+            with open(protein, encoding="utf-8") as f:
                 n_atom = sum(1 for ln in f if ln.startswith("ATOM"))
             if n_atom > opts["max_receptor_atoms"]:
                 rec["status"] = "skipped"
@@ -236,7 +236,7 @@ def process_complex(job):
         shift = _benchlib.read_frame_offset(work)
         crystal_ref = os.path.join(work, f"{pdbid}_crystal_centered.mol2")
         _benchlib.shift_mol2(crystal, shift, crystal_ref)
-        rec["affinity"], _ = ranking_affinity(os.path.join(work, "ranking.csv"),
+        rec["affinity"], _ = ranking_affinity(os.path.join(work, _benchlib.RANKING_CSV),
                                               f"{pdbid}_ligand")
         _, rec["affinity_mode1"] = _benchlib.first_vina_result(out_pdbqt)
         apply_rmsds(rec, *mode_rmsds(crystal_ref, out_pdbqt))
@@ -287,7 +287,7 @@ def read_manifest(data_dir):
     path = os.path.join(data_dir, "manifest.csv")
     reasons = {}
     if os.path.exists(path):
-        with open(path, newline="") as f:
+        with open(path, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 if row.get("status") != "ok":
                     reasons[row["pdbid"]] = f"fetch skipped: {row.get('reason', '')}"
@@ -300,7 +300,7 @@ def select_ids(args):
     if args.first:
         return sorted(d for d in os.listdir(args.data_dir)
                       if os.path.isdir(os.path.join(args.data_dir, d)))[:args.first]
-    with open(args.ids_csv, newline="") as f:
+    with open(args.ids_csv, newline="", encoding="utf-8") as f:
         ids = [row["pdbid"].strip().lower() for row in csv.DictReader(f)]
     return _benchlib.select_sample(ids, args.sample, args.sample_seed)
 
@@ -372,7 +372,7 @@ def main(argv=None):
                   f"rmsd_best={rec['rmsd_best']} err={rec['error']}", flush=True)
 
     results.sort(key=lambda r: r["pdbid"])
-    with open(os.path.join(args.outdir, "results.csv"), "w", newline="") as f:
+    with open(os.path.join(args.outdir, "results.csv"), "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["pdbid", "status", "affinity", "affinity_mode1",
                          "rmsd_top1", "rmsd_best", "rmsd_modes",
@@ -400,7 +400,7 @@ def main(argv=None):
         "top1": "mode 1 (first MODEL)",
         "vina_version": _benchlib.tool_version("vina"),
     }
-    with open(os.path.join(args.outdir, "summary.json"), "w") as f:
+    with open(os.path.join(args.outdir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     print("\n=== SUMMARY ===")

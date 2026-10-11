@@ -47,7 +47,7 @@ def extract_command(log_path):
     """The last ``# Command:`` recorded in a *_vina.log (the attempt that
     wrote the output when a fallback binary was used)."""
     cmd = None
-    with open(log_path) as f:
+    with open(log_path, encoding="utf-8") as f:
         for line in f:
             if line.startswith("# Command:"):
                 # The pipeline logs shlex.join(cmd); shlex.split inverts it
@@ -82,7 +82,7 @@ def check_complex(workdir, pdbid, tmpdir, timeout, vina_bin=None, runner=run_vin
            "max_diff": None, "ranking_affinity": None, "raw_mode1": None,
            "ranking_numeric_match": None, "ranking_string_match": None,
            "output_identical": None, "binary": None, "error": None}
-    logs = sorted(glob.glob(os.path.join(workdir, "docked", "*_vina.log")))
+    logs = sorted(glob.glob(os.path.join(workdir, _benchlib.DOCKED_DIR, "*_vina.log")))
     if not logs:
         rec["error"] = "no *_vina.log found"
         return rec
@@ -100,7 +100,7 @@ def check_complex(workdir, pdbid, tmpdir, timeout, vina_bin=None, runner=run_vin
     for i, c in enumerate(cmd):
         if c == "--out" and i + 1 < len(cmd):
             pipeline_out = cmd[i + 1]
-    local_out = os.path.join(workdir, "docked", f"{ligand}_out.pdbqt")
+    local_out = os.path.join(workdir, _benchlib.DOCKED_DIR, f"{ligand}_out.pdbqt")
     if not pipeline_out or not os.path.exists(pipeline_out):
         pipeline_out = local_out
     if not os.path.exists(pipeline_out):
@@ -143,7 +143,7 @@ def check_complex(workdir, pdbid, tmpdir, timeout, vina_bin=None, runner=run_vin
     rec["raw_mode1"] = raw_aff[0][0]
     rec["output_identical"] = filecmp.cmp(pipeline_out, raw_out, shallow=False)
 
-    ranking_csv = os.path.join(workdir, "ranking.csv")
+    ranking_csv = os.path.join(workdir, _benchlib.RANKING_CSV)
     row = None
     if os.path.exists(ranking_csv):
         row = next((r for r in _benchlib.read_ranking(ranking_csv)
@@ -203,7 +203,7 @@ def main(argv=None):
     cols = ["pdbid", "status", "modes", "matched", "max_diff", "ranking_affinity",
             "raw_mode1", "ranking_numeric_match", "ranking_string_match",
             "output_identical", "binary", "error"]
-    with open(os.path.join(args.outdir, "parity.csv"), "w", newline="") as f:
+    with open(os.path.join(args.outdir, "parity.csv"), "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(results)
@@ -221,7 +221,7 @@ def main(argv=None):
         "binaries": {b: _benchlib.tool_version(b) for b in binaries},
         "result": "PASS" if ok else "FAIL",
     }
-    with open(os.path.join(args.outdir, "summary.json"), "w") as f:
+    with open(os.path.join(args.outdir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     print("\n=== VINA PARITY ===")
     for k, v in summary.items():

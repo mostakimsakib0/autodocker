@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 from vspipeline import defaults  # noqa: E402
+from vspipeline import outputs  # noqa: E402
 import runner  # noqa: E402  (tool paths and shared helpers, resolved at call time)
 from vspipeline import conformers, net  # noqa: E402
 from vspipeline.admet import (  # noqa: E402
@@ -74,7 +75,7 @@ def _ligand_pdbqt_problem(path: str) -> Optional[str]:
     so it is caught here with a clear reason instead.
     """
     try:
-        with open(path, errors="replace") as fh:
+        with open(path, errors="replace", encoding="utf-8") as fh:
             tags = {line.split()[0] for line in fh if line.strip()}
     except OSError as e:
         return f"Unreadable PDBQT: {e}"
@@ -94,7 +95,7 @@ def _count_molecules(path: str, fmt: str) -> int:
     """Number of molecule records in an SDF ($$$$) or MOL2 (@<TRIPOS>MOLECULE) file."""
     marker = "$$$$" if fmt == "sdf" else "@<TRIPOS>MOLECULE"
     try:
-        with open(path, errors="replace") as fh:
+        with open(path, errors="replace", encoding="utf-8") as fh:
             n = sum(1 for line in fh if line.strip() == marker)
     except OSError:
         return 0
@@ -105,7 +106,7 @@ def _count_molecules(path: str, fmt: str) -> int:
 def _sdf_is_usable(path: str) -> bool:
     """True if ``path`` exists and holds at least one complete molblock."""
     try:
-        with open(path, errors="replace") as fh:
+        with open(path, errors="replace", encoding="utf-8") as fh:
             return "M  END" in fh.read()
     except OSError:
         return False
@@ -122,7 +123,7 @@ def _pdbqt_coordinate_spread(path: str) -> Optional[Tuple[float, float, float]]:
     """Extent (max - min) of the atom coordinates of a PDBQT along x, y, z."""
     xs, ys, zs = [], [], []
     try:
-        with open(path, errors="replace") as fh:
+        with open(path, errors="replace", encoding="utf-8") as fh:
             for line in fh:
                 if line.startswith(("ATOM", "HETATM")):
                     try:
@@ -143,7 +144,7 @@ def _flat_axis(path: str) -> Optional[str]:
     spread = _pdbqt_coordinate_spread(path)
     if spread is None:
         return None
-    with open(path, errors="replace") as fh:
+    with open(path, errors="replace", encoding="utf-8") as fh:
         n_atoms = sum(1 for line in fh if line.startswith(("ATOM", "HETATM")))
     if n_atoms < 3:
         return None
@@ -198,9 +199,9 @@ class LibraryManager:
         self.outdir = outdir
         self.seed = seed
         self.ligands_input_dir = ligands_input_dir
-        self.lib_dir = os.path.join(outdir, "ligands")
-        self.minimized_dir = os.path.join(outdir, "ligands_minimized")
-        self.metadata_file = os.path.join(outdir, "ligand_metadata.json")
+        self.lib_dir = os.path.join(outdir, outputs.LIGANDS_DIR)
+        self.minimized_dir = os.path.join(outdir, outputs.LIGANDS_MINIMIZED_DIR)
+        self.metadata_file = os.path.join(outdir, outputs.LIGAND_METADATA_JSON)
         self.metadata: Dict[str, Dict] = {}
         self.minimize = minimize
         self.minimize_steps = minimize_steps
@@ -418,7 +419,7 @@ class LibraryManager:
 
     def _save_metadata(self):
         try:
-            with open(self.metadata_file, "w") as f:
+            with open(self.metadata_file, "w", encoding="utf-8") as f:
                 json.dump(self.metadata, f, indent=2, sort_keys=True)
             logger.info(f"[*] Ligand metadata saved: {self.metadata_file}")
         except IOError as e:

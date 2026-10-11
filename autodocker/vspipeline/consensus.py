@@ -31,6 +31,7 @@ from multiprocessing import Pool
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from vspipeline import defaults  # noqa: E402
+from vspipeline import outputs  # noqa: E402
 from vspipeline.docking import (
     runner,  # lazily imported runner module (see docking._LazyRunner)
     DEFAULT_MIN_VALID_AFFINITY,
@@ -115,7 +116,7 @@ def scorer_agreement_spearman(vina_scores: List[Optional[float]],
 def _write_log(log_file: Optional[str], text: str, mode: str = "a") -> None:
     if not log_file:
         return
-    with open(log_file, mode) as f:
+    with open(log_file, mode, encoding="utf-8") as f:
         f.write(text)
 
 
@@ -141,7 +142,7 @@ def _first_pdbqt_affinity(path: str) -> str:
     (``REMARK minimizedAffinity``). Raises RuntimeError when absent."""
     if not os.path.exists(path):
         raise RuntimeError("SMINA did not produce output file")
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         if not any(line.startswith("MODEL") for line in f):
             raise RuntimeError("SMINA produced no docking poses")
     tokens = _parse_pdbqt_result_tokens(path)
@@ -318,13 +319,13 @@ def smina_dock_all(receptor: str, ligands: List[str], outdir: str,
     consensus scoring use :func:`rescore_with_smina` instead.
     """
     vina_params = vina_params or {}
-    exhaustiveness = int(vina_params.get('exhaustiveness', 8))
+    exhaustiveness = int(vina_params.get('exhaustiveness', defaults.EXHAUSTIVENESS))
     seed = vina_params.get('seed')
     min_valid = float(vina_params.get('min_valid_affinity', DEFAULT_MIN_VALID_AFFINITY))
     cpu = vina_params.get('threads')
     if not cpu and num_processes > 1:
         cpu = max(1, runner.available_cpus() // num_processes)
-    dock_dir = os.path.join(outdir, "docked")
+    dock_dir = os.path.join(outdir, outputs.DOCKED_DIR)
     os.makedirs(dock_dir, exist_ok=True)
     smina = runner.SMINA
     timeout = int(runner.COMMAND_TIMEOUT)
@@ -435,7 +436,7 @@ def _extract_top_pose(dock_file: str, ligand_out: str, flex_out: str) -> bool:
     ligand_lines: List[str] = []
     flex_lines: List[str] = []
     in_model = in_res = False
-    with open(dock_file) as f:
+    with open(dock_file, encoding="utf-8") as f:
         for line in f:
             if line.startswith("MODEL"):
                 if in_model:
@@ -453,10 +454,10 @@ def _extract_top_pose(dock_file: str, ligand_out: str, flex_out: str) -> bool:
                 in_res = False
     if not ligand_lines:
         raise RuntimeError(f"No pose in {dock_file}")
-    with open(ligand_out, "w") as f:
+    with open(ligand_out, "w", encoding="utf-8") as f:
         f.writelines(ligand_lines)
     if flex_lines:
-        with open(flex_out, "w") as f:
+        with open(flex_out, "w", encoding="utf-8") as f:
             f.writelines(flex_lines)
         return True
     return False
@@ -535,7 +536,7 @@ def rescore_with_smina(receptor: str, results: List[Tuple[str, Optional[float]]]
         raise RuntimeError("SMINA binary not available for consensus rescoring")
     timeout = int(timeout or runner.COMMAND_TIMEOUT)
     metrics_dict = metrics_dict or {}
-    dock_dir = os.path.join(outdir, "docked")
+    dock_dir = os.path.join(outdir, outputs.DOCKED_DIR)
     os.makedirs(dock_dir, exist_ok=True)
 
     names = sorted(name for name, score in results if score is not None)
@@ -586,10 +587,10 @@ def write_consensus_outputs(outdir: str, results: List[Tuple[str, Optional[float
             paired.append((name, vina_score, smina_score, (vina_score + smina_score) / 2))
 
     def fmt(v):
-        return "FAILED" if v is None else v
+        return Status.FAILED.value if v is None else v
 
-    consensus_file = os.path.join(outdir, "consensus_ranking.csv")
-    with open(consensus_file, "w", newline="") as f:
+    consensus_file = os.path.join(outdir, outputs.CONSENSUS_RANKING_CSV)
+    with open(consensus_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["Ligand", "Vina_Affinity", "SMINA_Affinity", "Consensus"])
         for name, v, s, c in sorted(paired, key=lambda r: (r[3], r[0])):
@@ -606,7 +607,7 @@ def write_consensus_outputs(outdir: str, results: List[Tuple[str, Optional[float
         "scorer_a": "AutoDock Vina docking score (top pose)",
         "scorer_b": f"smina --score_only --scoring {scoring} (Vina top pose)",
     }
-    with open(os.path.join(outdir, "consensus_summary.json"), "w") as f:
+    with open(os.path.join(outdir, outputs.CONSENSUS_SUMMARY_JSON), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, sort_keys=True)
         f.write("\n")
     logger.info(f"[*] Consensus ranking saved: {consensus_file} ({len(paired)} paired ligands; "

@@ -37,7 +37,7 @@ def main():
     ap.add_argument("--pdb", help="local copy of 2FXS (else downloaded)")
     args = ap.parse_args()
     if args.pdb:
-        text = open(args.pdb).read()
+        text = open(args.pdb, encoding="utf-8").read()
     else:
         text = urllib.request.urlopen(
             "https://files.rcsb.org/download/2FXS.pdb", timeout=120).read().decode()
@@ -65,14 +65,14 @@ def main():
             near.add((ln[21], ln[22:27]))
     pocket = [ln for ln in records if ln.startswith("ATOM") and (ln[21], ln[22:27]) in near]
     pdb = os.path.join(OUT, "pocket_2fxs.pdb")
-    with open(pdb, "w") as f:
+    with open(pdb, "w", encoding="utf-8") as f:
         f.write("REMARK binding-site residues of RCSB 2FXS (8 A around RDA A1001)\n")
         f.write("\n".join(pocket) + "\nEND\n")
     # Relative names and cwd=OUT keep local paths out of the REMARK lines.
     subprocess.run(["obabel", "-ipdb", "pocket_2fxs.pdb", "-xr", "-h",
                     "--partialcharge", "gasteiger", "-opdbqt", "-O", "receptor.pdbqt"],
                    check=True, capture_output=True, cwd=OUT)
-    with open(os.path.join(OUT, "box.json"), "w") as f:
+    with open(os.path.join(OUT, "box.json"), "w", encoding="utf-8") as f:
         json.dump({"center": [round(c, 3) for c in center], "size": 16.0}, f, indent=2)
 
     from rdkit import Chem
@@ -85,7 +85,7 @@ def main():
         assert AllChem.EmbedMolecule(mol, params) == 0
         AllChem.MMFFOptimizeMolecule(mol, maxIters=2000)
         sdf = os.path.join(OUT, name + ".tmp.sdf")
-        with open(sdf, "w") as f:
+        with open(sdf, "w", encoding="utf-8") as f:
             f.write(Chem.MolToMolBlock(mol) + "$$$$\n")
         subprocess.run(["obabel", "-isdf", name + ".tmp.sdf", "-opdbqt", "-O",
                         name + ".pdbqt", "--partialcharge", "gasteiger"],

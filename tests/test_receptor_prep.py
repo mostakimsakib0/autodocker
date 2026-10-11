@@ -33,7 +33,7 @@ def _protein(n=120, chain="A"):
 
 def _atoms(path):
     out = []
-    for line in open(path):
+    for line in open(path, encoding="utf-8"):
         if line.startswith(("ATOM", "HETATM")):
             out.append((line[77:79].strip(),
                         (float(line[30:38]), float(line[38:46]), float(line[46:54])),
@@ -86,7 +86,7 @@ def test_input_hydrogens_are_replaced_not_stacked(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         pp.prepare_receptor("all")
     assert "Removed" in caplog.text and "hydrogen records" in caplog.text
-    assert not any(prot.is_hydrogen_record(l) for l in open(pp.pdb_clean)
+    assert not any(prot.is_hydrogen_record(l) for l in open(pp.pdb_clean, encoding="utf-8")
                    if l.startswith(("ATOM", "HETATM")))
     atoms = _atoms(pp.receptor_pdbqt)
     nz = [a for a in atoms if a[2][12:16] == " NZ " and a[2][22:26] == "  11"][0]
@@ -201,7 +201,7 @@ def test_clean_pdb_first_model_selected_chain_ter(tmp_path):
     pp = prot.ProteinPreparation(str(p), str(tmp_path / "out"))
     os.makedirs(pp.outdir)
     pp._write_clean_pdb(["A"], keep_hetero=False)
-    clean = open(pp.pdb_clean).read().splitlines()
+    clean = open(pp.pdb_clean, encoding="utf-8").read().splitlines()
     assert sum(1 for l in clean if l.startswith("ATOM")) == 60
     assert sum(1 for l in clean if l.startswith("TER")) == 1
 
@@ -236,7 +236,7 @@ def test_restore_labels_hydrogen_search_radius(tmp_path):
     q.write_text(_pdbqt_line(1, "N", 0.0, 0.0, 0.0, "N")
                  + _pdbqt_line(2, "H", 1.0, 0.0, 0.0, "HD"))
     assert prot._restore_residue_labels(str(q), str(pdb)) == 2
-    h = [l for l in open(q) if l[77:79] == "HD"][0]
+    h = [l for l in open(q, encoding="utf-8") if l[77:79] == "HD"][0]
     assert h[17:26] == "ALA A   1"
 
 
@@ -315,13 +315,13 @@ def _fake_fpocket(pockets, info=True):
         os.makedirs(os.path.join(root, "pockets"), exist_ok=True)
         text = []
         for number, score, drug, coords in pockets:
-            with open(os.path.join(root, "pockets", f"pocket{number}_atm.pdb"), "w") as f:
+            with open(os.path.join(root, "pockets", f"pocket{number}_atm.pdb"), "w", encoding="utf-8") as f:
                 for i, (x, y, z) in enumerate(coords, 1):
                     f.write(_pdb_atom(i, "C", "ALA", "A", "1", x, y, z, "C"))
             text.append(f"Pocket {number} :\n\tScore : \t{score}\n"
                         f"\tDruggability Score : \t{drug}\n\tVolume : \t{100 * number}\n\n")
         if info:
-            with open(os.path.join(root, os.path.basename(root[:-4]) + "_info.txt"), "w") as f:
+            with open(os.path.join(root, os.path.basename(root[:-4]) + "_info.txt"), "w", encoding="utf-8") as f:
                 f.write("".join(text))
         return ("", "", 0) if capture else None
     return fake_run
@@ -347,7 +347,7 @@ def test_detect_pocket_tie_break_and_symmetric_box(tmp_path, monkeypatch):
     dx, dy, dz = pp._receptor_centroid()
     assert (cx + dx, cy + dy, cz + dz) == pytest.approx((5.0, 1.0, 2.0))
     assert (sx, sy, sz) == pytest.approx((14.0, 6.0, 8.0))
-    rows = open(pp.pocket_summary_file).read().splitlines()
+    rows = open(pp.pocket_summary_file, encoding="utf-8").read().splitlines()
     assert rows[1].startswith("1,") and rows[1].split(",")[5] == "YES"
 
 
@@ -399,7 +399,7 @@ def _parse_cgo(pml_text):
 def test_grid_box_cgo_is_well_formed(tmp_path):
     pp = prot.ProteinPreparation("x.pdb", str(tmp_path))
     pp.write_grid_box_script(1.0, 2.0, 3.0, 20.0, 22.0, 24.0)
-    tokens = _parse_cgo(open(pp.grid_box_script).read())
+    tokens = _parse_cgo(open(pp.grid_box_script, encoding="utf-8").read())
     # Each CGO opcode takes a fixed number of floats.
     arity = {"COLOR": 3, "LINEWIDTH": 1, "BEGIN": 1, "VERTEX": 3, "END": 0}
     ops, i, vertices = [], 0, []

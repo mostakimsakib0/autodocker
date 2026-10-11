@@ -302,7 +302,7 @@ def build(pdbid, smiles, outdir, hetatm="metals", conformer_seed=42):
         sdf = fetch(LIGAND_URL.format(pdbid=pdbid.lower(), comp=comp, chain=chain,
                                       resnum=resnum)).decode()
         sdf = normalize_sdf_elements(sdf.split("$$$$")[0] + "$$$$\n")
-        with open(sdf_path, "w") as f:
+        with open(sdf_path, "w", encoding="utf-8") as f:
             f.write(sdf)
         last_key = inchikey(sdf_path)
         if same_connectivity(last_key, ref_key):
@@ -319,7 +319,7 @@ def build(pdbid, smiles, outdir, hetatm="metals", conformer_seed=42):
     mol2 = os.path.join(cdir, f"{pdbid}_ligand.mol2")
     subprocess.run(["obabel", sdf_path, "-omol2", "-O", mol2],
                    check=True, capture_output=True)
-    with open(os.path.join(cdir, f"{pdbid}_protein.pdb"), "w") as f:
+    with open(os.path.join(cdir, f"{pdbid}_protein.pdb"), "w", encoding="utf-8") as f:
         for line in receptor_records(records, hetatm, ligand_key=chosen):
             f.write(line + "\n")
         f.write("END\n")
@@ -331,7 +331,7 @@ def build(pdbid, smiles, outdir, hetatm="metals", conformer_seed=42):
     try:
         rd_mol2 = os.path.join(cdir, f"{pdbid}_ligand_rdkit.mol2")
         meta = _benchlib.rdkit_start_conformer(sdf_path, rd_mol2, conformer_seed)
-        with open(rd_mol2[:-len(".mol2")] + ".json", "w") as f:
+        with open(rd_mol2[:-len(".mol2")] + ".json", "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
     except ImportError:
         pass
@@ -356,7 +356,7 @@ def main(argv=None):
                     help="ETKDG seed of the precomputed RDKit start conformer")
     args = ap.parse_args(argv)
 
-    with open(args.ids) as f:
+    with open(args.ids, encoding="utf-8") as f:
         all_rows = {r["pdbid"].lower(): r for r in csv.DictReader(f)}
     if args.first:
         ids = sorted(all_rows)[:args.first]
@@ -381,7 +381,7 @@ def main(argv=None):
         else:
             manifest.append([pdbid, "skipped", "", "", "", 0, "", "", "", reason])
             print(f"{pdbid}: skipped - {reason}", flush=True)
-    with open(os.path.join(args.outdir, "manifest.csv"), "w", newline="") as f:
+    with open(os.path.join(args.outdir, "manifest.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["pdbid", "status", "comp_id", "chain", "resnum", "instances",
                     "inchikey", "identity_check", "full_inchikey_match", "reason"])

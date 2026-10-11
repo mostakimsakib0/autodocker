@@ -9,7 +9,7 @@ import runner  # noqa: F401  (imported first, so vspipeline binds this module)
 
 
 def _write(path, content):
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return path
 

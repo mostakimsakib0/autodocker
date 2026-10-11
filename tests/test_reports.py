@@ -6,7 +6,7 @@ import runner
 
 
 def _write(path, content):
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return path
 
@@ -30,7 +30,7 @@ def _receptor_pdbqt():
 
 def _ranking_csv(outdir, rows):
     path = os.path.join(outdir, "ranking.csv")
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=[
             "Ligand", "Binding_Affinity", "SimScore", "Binding_Modes",
             "Mode_Coverage", "MW", "LogP", "HBA", "HBD", "TPSA",
@@ -48,7 +48,7 @@ class TestRankingCsv:
         analyzer.save_ranking(results, mode="extended",
                               metrics_dict={"ligA": {"status": "OK"},
                                             "ligB": {}})
-        with open(analyzer.csv_file) as f:
+        with open(analyzer.csv_file, encoding="utf-8") as f:
             reader = csv.DictReader(f)
             assert reader.fieldnames[0] == "Ligand"
             assert "Binding_Affinity" in reader.fieldnames
@@ -72,7 +72,7 @@ class TestHtmlReport:
         runner.generate_html_report(csv_path, os.path.join(outdir, "docked"),
                                     html_path)
         assert os.path.exists(html_path)
-        with open(html_path) as f:
+        with open(html_path, encoding="utf-8") as f:
             content = f.read()
         assert "Virtual Screening Results Report" in content
         assert "ligA" in content
@@ -95,7 +95,7 @@ class TestHtmlReport:
         html_path = os.path.join(outdir, "results_report.html")
         runner.generate_html_report(csv_path, os.path.join(outdir, "docked"),
                                     html_path)
-        with open(html_path) as f:
+        with open(html_path, encoding="utf-8") as f:
             content = f.read()
         assert "<script>alert" not in content
         assert "&lt;script&gt;alert" in content
@@ -130,7 +130,7 @@ class TestNglViewer:
         runner.generate_html_report(
             csv_path, docked, html,
             receptor_pdbqt=os.path.join(outdir, "receptor_b.pdbqt"))
-        with open(html) as f:
+        with open(html, encoding="utf-8") as f:
             content = f.read()
         return outdir, content
 
@@ -166,7 +166,7 @@ class TestNglViewer:
         html = os.path.join(outdir, "results_report.html")
         runner.generate_html_report(
             csv_path, os.path.join(outdir, "docked"), html, receptor_pdbqt=None)
-        with open(html) as f:
+        with open(html, encoding="utf-8") as f:
             content = f.read()
         assert "No docked structures were available" in content
         assert "viewer-container" not in content
@@ -191,7 +191,7 @@ class TestNglViewer:
         html = os.path.join(outdir, "results_report.html")
         runner.generate_html_report(
             csv_path, docked, html, receptor_pdbqt=None)
-        with open(html) as f:
+        with open(html, encoding="utf-8") as f:
             content = f.read()
         assert "3D viewer unavailable" in content
         assert runner.NGL_CDN_URL not in content
@@ -250,7 +250,7 @@ class TestReportContent:
         csv_path = _ranking_csv(outdir, rows)
         html_path = os.path.join(outdir, "results_report.html")
         assert runner.generate_html_report(csv_path, docked, html_path)
-        with open(html_path) as f:
+        with open(html_path, encoding="utf-8") as f:
             return f.read()
 
     ROWS = [

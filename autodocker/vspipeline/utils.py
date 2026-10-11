@@ -119,7 +119,7 @@ def _strip_molfile_timestamps(path: str) -> None:
     so identical structures written in different minutes give identical
     files (the date carries no chemical information)."""
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             lines = fh.read().split("\n")
     except (FileNotFoundError, UnicodeDecodeError):
         return
@@ -133,7 +133,7 @@ def _strip_molfile_timestamps(path: str) -> None:
         if line.strip() == "$$$$":
             header = i + 2
     if changed:
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines))
 
 
@@ -156,7 +156,7 @@ def available_cpus() -> int:
     except (AttributeError, OSError):
         n = mp_cpu_count()
     try:
-        with open("/sys/fs/cgroup/cpu.max") as f:  # cgroup v2: "<quota> <period>"
+        with open("/sys/fs/cgroup/cpu.max", encoding="utf-8") as f:  # cgroup v2: "<quota> <period>"
             quota, period = f.read().split()[:2]
         if quota != "max":
             n = min(n, max(1, int(int(quota) // int(period))))
@@ -169,7 +169,7 @@ def parse_pdb_coords(pdb_path: str) -> Tuple[List[float], List[float], List[floa
     """Extract XYZ coordinates from PDB file."""
     xs, ys, zs = [], [], []
     try:
-        with open(pdb_path) as f:
+        with open(pdb_path, encoding="utf-8") as f:
             for line in f:
                 if line.startswith(("ATOM", "HETATM")):
                     try:
@@ -204,7 +204,7 @@ def get_chains(pdb_file: str) -> List[str]:
     Chain IDs are case-sensitive and returned as written.
     """
     chains = set()
-    with open(pdb_file, errors="replace") as f:
+    with open(pdb_file, errors="replace", encoding="utf-8") as f:
         for line in f:
             if line.startswith("ATOM") and len(line) > 21:
                 chain = line[21]

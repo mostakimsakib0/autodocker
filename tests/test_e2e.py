@@ -28,14 +28,14 @@ pytestmark = [
 
 
 def _box():
-    with open(os.path.join(DATA, "box.json")) as f:
+    with open(os.path.join(DATA, "box.json"), encoding="utf-8") as f:
         box = json.load(f)
     return box["center"], box["size"]
 
 
 def _write_grid(path):
     (cx, cy, cz), s = _box()
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(f"center_x = {cx}\ncenter_y = {cy}\ncenter_z = {cz}\n"
                 f"size_x = {s}\nsize_y = {s}\nsize_z = {s}\n")
     return path
@@ -89,18 +89,18 @@ def _poses(outdir):
 def test_fixtures_are_realistic():
     assert len(LIGANDS) >= 3
     for lig in LIGANDS:
-        lines = open(lig).read().splitlines()
+        lines = open(lig, encoding="utf-8").read().splitlines()
         coords = {ln[30:54] for ln in lines if ln.startswith(("ATOM", "HETATM"))}
         assert len(coords) > 5  # real 3D coordinates, not all at the origin
         torsdof = next(int(ln.split()[1]) for ln in lines if ln.startswith("TORSDOF"))
         assert torsdof >= 2
-    n_rec = sum(1 for ln in open(os.path.join(DATA, "receptor.pdbqt")) if ln.startswith("ATOM"))
+    n_rec = sum(1 for ln in open(os.path.join(DATA, "receptor.pdbqt"), encoding="utf-8") if ln.startswith("ATOM"))
     assert n_rec > 300
 
 
 def test_all_ligands_docked(runs):
     import csv
-    with open(os.path.join(runs["p1_a"], "ranking.csv")) as f:
+    with open(os.path.join(runs["p1_a"], "ranking.csv"), encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == len(LIGANDS)
     for row in rows:

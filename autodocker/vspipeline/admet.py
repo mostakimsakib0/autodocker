@@ -58,7 +58,7 @@ def sdf_coordinates(sdf_file: str) -> Optional[List[Tuple[float, float, float]]]
     atoms between ``M  V30 BEGIN ATOM`` and ``M  V30 END ATOM``.
     """
     try:
-        with open(sdf_file, errors="replace") as f:
+        with open(sdf_file, errors="replace", encoding="utf-8") as f:
             lines = f.read().split("$$$$")[0].splitlines()
     except OSError:
         return None
@@ -106,7 +106,7 @@ def _is_valid_sdf(sdf_file: str) -> Tuple[bool, str]:
         return False, (f"File is too small ({file_size} bytes) - likely a "
                        "truncated download or an error message")
     try:
-        with open(sdf_file, errors="replace") as f:
+        with open(sdf_file, errors="replace", encoding="utf-8") as f:
             content = f.read()
     except OSError as e:
         return False, f"Error reading SDF: {e}"
@@ -125,7 +125,7 @@ def _parse_sdf_data_items(sdf_file: str, props: Dict) -> bool:
 
     Returns True if all four Lipinski descriptors were found.
     """
-    with open(sdf_file, errors="replace") as f:
+    with open(sdf_file, errors="replace", encoding="utf-8") as f:
         lines = f.read().split("$$$$")[0].splitlines()
     if lines:
         props['name'] = lines[0].strip() or props['name']

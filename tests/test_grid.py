@@ -4,7 +4,7 @@ import runner
 
 
 def _write_grid(path, text):
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(text)
     return str(path)
 
@@ -88,7 +88,7 @@ def test_write_grid_produces_parsable_conf(protein_pdb, outdir):
 def test_write_grid_box_script(protein_pdb, outdir):
     prep = runner.ProteinPreparation(protein_pdb, outdir)
     prep.write_grid_box_script(0, 0, 0, 24, 24, 24)
-    with open(prep.grid_box_script) as f:
+    with open(prep.grid_box_script, encoding="utf-8") as f:
         assert "VERTEX" in f.read()
 
 

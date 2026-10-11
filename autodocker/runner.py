@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from vspipeline import defaults
+from vspipeline import outputs
 
 _FALLBACK_VERSION = "2.0.0"
 
@@ -45,7 +46,7 @@ def _read_version(base_dir: Optional[str] = None) -> str:
     base_dir = base_dir or os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(base_dir, "VERSION")
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             version = f.read().strip()
         if version:
             return version
@@ -738,7 +739,7 @@ def _python_packages() -> Dict[str, Optional[str]]:
 
 def write_run_manifest(path: str, manifest: Dict) -> None:
     """Write run_manifest.json with sorted keys (deterministic layout)."""
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, sort_keys=True, default=str)
         f.write("\n")
 
@@ -970,7 +971,7 @@ def _run_pipeline(args, state: Dict) -> int:
                 flexible_residues = built_residues
                 rigid_receptor = _remove_residues_from_pdbqt(
                     protein_prep.receptor_pdbqt, built_residues,
-                    os.path.join(args.output, "rigid.pdbqt"), flex_file=flex_file)
+                    os.path.join(args.output, outputs.RIGID_RECEPTOR_PDBQT), flex_file=flex_file)
 
     # ===== [3/5] Docking =====
     logger.info("[3/5] Docking")
@@ -1026,18 +1027,18 @@ def _run_pipeline(args, state: Dict) -> int:
     logger.info("[4/5] Pose analysis")
     if resume and checkpoint is not None and checkpoint.completed:
         logger.info(f"[*] Checkpoint updated: {len(checkpoint.completed)} successful dockings")
-    html_report_file = os.path.join(args.output, "results_report.html")
-    clusters_file = os.path.join(args.output, "pose_clusters.json")
+    html_report_file = os.path.join(args.output, outputs.HTML_REPORT)
+    clusters_file = os.path.join(args.output, outputs.POSE_CLUSTERS_JSON)
     if args.cluster_poses:
         logger.info("[*] Performing pose clustering...")
         clusters = cluster_poses(
-            os.path.join(args.output, "docked"), rmsd_threshold=args.rmsd_threshold,
+            os.path.join(args.output, outputs.DOCKED_DIR), rmsd_threshold=args.rmsd_threshold,
             ligands=[name for name, _ in results])
         clusters_data = {
             ligand: [{'id': c['id'], 'pose_count': len(c['poses'])} for c in ligand_clusters]
             for ligand, ligand_clusters in clusters.items()}
         try:
-            with open(clusters_file, 'w') as f:
+            with open(clusters_file, 'w', encoding="utf-8") as f:
                 json.dump(clusters_data, f, indent=2, sort_keys=True)
             logger.info(f"[*] Clustering saved to: {clusters_file}")
         except OSError as e:
@@ -1062,7 +1063,7 @@ def _run_pipeline(args, state: Dict) -> int:
             "Seed": args.seed,
         }
         html_ok = generate_html_report(
-            os.path.join(args.output, 'ranking.csv'), os.path.join(args.output, "docked"),
+            os.path.join(args.output, outputs.RANKING_CSV), os.path.join(args.output, outputs.DOCKED_DIR),
             html_report_file,
             receptor_pdbqt=protein_prep.receptor_pdbqt,
             meta=report_meta,
@@ -1083,24 +1084,24 @@ def _run_pipeline(args, state: Dict) -> int:
                      f"{args.max_failure_fraction:g})")
     logger.info("=" * 70)
     logger.info(f"Results saved to: {args.output}")
-    outputs = [("Ranking", analyzer.csv_file), ("Full results", analyzer.results_file),
+    written = [("Ranking", analyzer.csv_file), ("Full results", analyzer.results_file),
                ("Top hits", analyzer.top_hits_file), ("Metrics", analyzer.metrics_file),
                ("Pocket summary", protein_prep.pocket_summary_file),
                ("Ligand metadata", lib_manager.metadata_file),
                ("Grid visualization", protein_prep.grid_box_script),
-               ("Docked structures", os.path.join(args.output, "docked"))]
+               ("Docked structures", os.path.join(args.output, outputs.DOCKED_DIR))]
     if args.consensus:
-        outputs += [("Consensus ranking", os.path.join(args.output, "consensus_ranking.csv")),
-                    ("Consensus summary", os.path.join(args.output, "consensus_summary.json"))]
+        written += [("Consensus ranking", os.path.join(args.output, outputs.CONSENSUS_RANKING_CSV)),
+                    ("Consensus summary", os.path.join(args.output, outputs.CONSENSUS_SUMMARY_JSON))]
     if args.cluster_poses:
-        outputs.append(("Pose clusters", clusters_file))
+        written.append(("Pose clusters", clusters_file))
     if args.html_report:
         if html_ok:
-            outputs.append(("HTML report", html_report_file))
+            written.append(("HTML report", html_report_file))
         else:
             logger.warning("[!] HTML report could not be written (see warnings above)")
-    outputs.append(("Run manifest", os.path.join(args.output, "run_manifest.json")))
-    for label, path in outputs:
+    written.append(("Run manifest", os.path.join(args.output, outputs.RUN_MANIFEST_JSON)))
+    for label, path in written:
         if os.path.exists(path) or label == "Run manifest":
             logger.info(f"  - {label}: {path}")
     if args.flexibility and args.flexibility > 0:
@@ -1174,7 +1175,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 _engine_identity(path) for path, _ in state["engine"].docking_engines()]
         if "consensus" in state:
             extra["consensus"] = state["consensus"]
-        manifest_file = os.path.join(args.output, "run_manifest.json")
+        manifest_file = os.path.join(args.output, outputs.RUN_MANIFEST_JSON)
         try:
             write_run_manifest(manifest_file, _build_manifest(
                 args, argv, tools, started_at, status, exit_code, error, extra))

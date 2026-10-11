@@ -136,7 +136,7 @@ def test_write_pocket_summary(tmp_path):
                 "volume": 100.0, "box_volume": 200.0, "file": "p1.pdb"}]
     pp._write_pocket_summary(pockets)
     assert os.path.exists(pp.pocket_summary_file)
-    txt = open(pp.pocket_summary_file).read()
+    txt = open(pp.pocket_summary_file, encoding="utf-8").read()
     assert "Score" in txt and "0.8" in txt
 
 
@@ -152,7 +152,7 @@ def test_write_grid(tmp_path):
     pp = prot.ProteinPreparation("x.pdb", str(tmp_path))
     pp.write_grid(1.0, 2.0, 3.0, 25.0, 26.0, 27.0)
     assert os.path.exists(pp.grid_conf)
-    txt = open(pp.grid_conf).read()
+    txt = open(pp.grid_conf, encoding="utf-8").read()
     assert "center_x = 1.0" in txt and "size_z = 27.0" in txt
     assert os.path.exists(pp.grid_box_script)
 
@@ -160,7 +160,7 @@ def test_write_grid(tmp_path):
 def test_write_grid_box_script(tmp_path):
     pp = prot.ProteinPreparation("x.pdb", str(tmp_path))
     pp.write_grid_box_script(0, 0, 0, 20, 20, 20)
-    txt = open(pp.grid_box_script).read()
+    txt = open(pp.grid_box_script, encoding="utf-8").read()
     assert "VERTEX" in txt
 
 
@@ -175,7 +175,7 @@ def test_rebuild_receptor_keep_hetatm(tmp_path):
     pp.selected_chains = ["A"]
     out = pp.rebuild_receptor_keep_hetatm([("A", "1", "HOH")])
     assert os.path.exists(out)
-    assert "HETATM" in open(str(rec)).read()
+    assert "HETATM" in open(str(rec), encoding="utf-8").read()
 
 
 def test_kept_hetatm_lands_in_receptor_frame(tmp_path):
@@ -186,7 +186,7 @@ def test_kept_hetatm_lands_in_receptor_frame(tmp_path):
     pp = prot.ProteinPreparation(str(p), str(tmp_path))
     pp.prepare_receptor(chain="A")
     pp.rebuild_receptor_keep_hetatm([("A", "500", "HOH")])
-    lines = open(pp.receptor_pdbqt).read().splitlines()
+    lines = open(pp.receptor_pdbqt, encoding="utf-8").read().splitlines()
     het = [l for l in lines if l.startswith("HETATM") and "HOH" in l][0]
     xyz = (float(het[30:38]), float(het[38:46]), float(het[46:54]))
     # centroid of the protein is (59.5, 59.5, 59.5)
@@ -205,6 +205,6 @@ def test_frame_offset_file_restores_input_frame(tmp_path):
     script = os.path.join(os.path.dirname(__file__), "..", "scripts", "restore_frame.py")
     subprocess.run([sys.executable, script, str(tmp_path), pp.receptor_pdbqt], check=True)
     restored = str(pp.receptor_pdbqt).replace(".pdbqt", "_inputframe.pdbqt")
-    first = [l for l in open(restored) if l.startswith("ATOM")][0]
+    first = [l for l in open(restored, encoding="utf-8") if l.startswith("ATOM")][0]
     assert (float(first[30:38]), float(first[38:46]), float(first[46:54])) == \
         pytest.approx((0.0, 0.0, 0.0), abs=0.01)

@@ -209,7 +209,7 @@ def sample_ligands(mol2_gz, out_dir, prefix, max_n, seed, scratch_dir,
             continue
         mol2_path = os.path.join(scratch_dir, stem + ".mol2")
         try:
-            with open(mol2_path, "w") as out:
+            with open(mol2_path, "w", encoding="utf-8") as out:
                 out.write(block)
             mol2_to_pdbqt(mol2_path, pdbqt_path)
         except Exception as e:  # recorded, never fatal
@@ -580,7 +580,7 @@ def write_metrics(target, outdir, names, scores, status, ranking):
     os.makedirs(os.path.join(outdir, target), exist_ok=True)
     metrics = os.path.join(outdir, target, "metrics.csv")
     order = sorted(range(len(names)), key=lambda i: (_sort_key(scores[i]), names[i]))
-    with open(metrics, "w", newline="") as f:
+    with open(metrics, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["rank", "name", "label", "affinity", "status"])
         for rank, i in enumerate(order, 1):
@@ -588,7 +588,7 @@ def write_metrics(target, outdir, names, scores, status, ranking):
                              "active" if is_active(names[i]) else "decoy",
                              "" if scores[i] is None else repr(scores[i]),
                              status.get(names[i], "")])
-    dest = os.path.join(outdir, target, "ranking.csv")
+    dest = os.path.join(outdir, target, _benchlib.RANKING_CSV)
     if os.path.abspath(ranking) != os.path.abspath(dest):
         shutil.copy(ranking, dest)
     return metrics
@@ -659,16 +659,16 @@ def process_target(target, workdir, opts):
             rec["runner_cmd"] = " ".join(cmd)
             proc = subprocess.run(cmd, capture_output=True, text=True,
                                   timeout=opts["timeout"])
-            with open(os.path.join(tdir, "runner.log"), "w") as f:
+            with open(os.path.join(tdir, "runner.log"), "w", encoding="utf-8") as f:
                 f.write(proc.stdout or "")
                 f.write(proc.stderr or "")
-            ranking = os.path.join(outdir, "ranking.csv")
+            ranking = os.path.join(outdir, _benchlib.RANKING_CSV)
             if proc.returncode != 0 or not os.path.exists(ranking):
                 raise RuntimeError(
                     f"docking failed (rc={proc.returncode}): "
                     f"{(proc.stdout or '')[-400:]}{(proc.stderr or '')[-400:]}")
         else:
-            ranking = os.path.join(opts["ingest"], target, "ranking.csv")
+            ranking = os.path.join(opts["ingest"], target, _benchlib.RANKING_CSV)
             if not os.path.exists(ranking):
                 raise RuntimeError(f"ingest ranking.csv missing: {ranking}")
 
@@ -708,12 +708,12 @@ SUMMARY_COLS = [
 
 def save_tables(results, outdir, protocol):
     rows_path = os.path.join(outdir, "enrichment.csv")
-    with open(rows_path, "w", newline="") as f:
+    with open(rows_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=SUMMARY_COLS, extrasaction="ignore")
         writer.writeheader()
         for r in results:
             writer.writerow(r)
-    with open(os.path.join(outdir, "summary.json"), "w") as f:
+    with open(os.path.join(outdir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump({"protocol": protocol, "targets": results}, f, indent=2)
     print(f"\nResults written to {rows_path}")
 

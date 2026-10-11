@@ -10,6 +10,7 @@ import os
 import re
 from typing import Dict, List, Optional, Tuple
 from vspipeline import defaults  # noqa: E402
+from vspipeline import outputs  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ def detect_flexible_residues(pdbqt_file: str, binding_site_coords: Tuple[float, 
     """
     cx, cy, cz = binding_site_coords
     residues = {}
-    with open(pdbqt_file, 'r') as f:
+    with open(pdbqt_file, 'r', encoding="utf-8") as f:
         for line in f:
             if not line.startswith('ATOM'):
                 continue
@@ -84,6 +85,8 @@ FLEX_BACKBONE_NAMES = {"N", "C", "O", "H", "HN", "OXT"}
 # Bond if closer than the sum of covalent radii plus this tolerance (A), as
 # Open Babel's ConnectTheDots does.
 _BOND_TOLERANCE = 0.45
+# Covalent radius used for elements missing from _ATOMIC_RADII (that of carbon).
+_DEFAULT_ATOMIC_RADIUS = 0.76
 
 _ATOMIC_RADII = {
     "H": 0.31, "C": 0.76, "N": 0.71, "O": 0.66, "S": 1.05, "P": 1.07,
@@ -129,7 +132,7 @@ def _residue_atoms_from_pdbqt(pdbqt_file: str,
         return []
     chain, resnum = parsed
     atoms = []
-    with open(pdbqt_file, "r") as f:
+    with open(pdbqt_file, "r", encoding="utf-8") as f:
         for line in f:
             if not line.startswith(("ATOM", "HETATM")):
                 continue
@@ -168,8 +171,8 @@ def _resnum_matches(atom_resnum: str, key_resnum: str) -> bool:
 
 def _bonded(a: Dict, b: Dict) -> bool:
     """Covalent bond by distance (sum of covalent radii plus a tolerance)."""
-    radius = (_ATOMIC_RADII.get(a["element"], 0.76)
-              + _ATOMIC_RADII.get(b["element"], 0.76) + _BOND_TOLERANCE)
+    radius = (_ATOMIC_RADII.get(a["element"], _DEFAULT_ATOMIC_RADIUS)
+              + _ATOMIC_RADII.get(b["element"], _DEFAULT_ATOMIC_RADIUS) + _BOND_TOLERANCE)
     dx = a["coords"][0] - b["coords"][0]
     dy = a["coords"][1] - b["coords"][1]
     dz = a["coords"][2] - b["coords"][2]
@@ -300,7 +303,7 @@ def build_flexible_residue_pdbqt(receptor_pdbqt: str, residues: List[str],
     if not residues:
         return None
 
-    flex_file = os.path.join(outdir, "flex.pdbqt")
+    flex_file = os.path.join(outdir, outputs.FLEX_PDBQT)
     blocks = []
     written_keys = []
     seen = set()
@@ -325,7 +328,7 @@ def build_flexible_residue_pdbqt(receptor_pdbqt: str, residues: List[str],
 
     written = len(written_keys)
     if written:
-        with open(flex_file, "w") as dst:
+        with open(flex_file, "w", encoding="utf-8") as dst:
             dst.write("REMARK flexible residues: " + ", ".join(written_keys) + "\n")
             dst.writelines(blocks)
         if built is not None:
@@ -362,7 +365,7 @@ def _remove_residues_from_pdbqt(receptor_pdbqt: str, residues: List[str],
     flex_atoms = None
     if flex_file and os.path.exists(flex_file):
         flex_atoms = set()
-        with open(flex_file) as f:
+        with open(flex_file, encoding="utf-8") as f:
             for line in f:
                 if line.startswith(("ATOM", "HETATM")):
                     flex_atoms.add((line[6:11].strip(), line[21].strip().upper(),
@@ -370,7 +373,7 @@ def _remove_residues_from_pdbqt(receptor_pdbqt: str, residues: List[str],
 
     removed = 0
     kept = []
-    with open(receptor_pdbqt, "r") as src:
+    with open(receptor_pdbqt, "r", encoding="utf-8") as src:
         for line in src:
             if line.startswith(("ATOM", "HETATM")):
                 chain = line[21].strip().upper()
@@ -386,7 +389,7 @@ def _remove_residues_from_pdbqt(receptor_pdbqt: str, residues: List[str],
                     continue
             kept.append(line)
 
-    with open(outpath, "w") as dst:
+    with open(outpath, "w", encoding="utf-8") as dst:
         dst.writelines(kept)
 
     if removed:

@@ -115,7 +115,7 @@ def fake_smina(monkeypatch):
         # SMINA would write the output PDBQT; create it so the check passes.
         if "-o" in cmd:
             out_idx = cmd.index("-o") + 1
-            with open(cmd[out_idx], "w") as fh:
+            with open(cmd[out_idx], "w", encoding="utf-8") as fh:
                 fh.write("MODEL        1\n"
                          "REMARK minimizedAffinity -8.12345\n"
                          "ATOM      1  C   ALA A   1      0.0 0.0 0.0\n"
@@ -220,7 +220,7 @@ def fake_rescore(monkeypatch):
         lig = cmd[cmd.index("-l") + 1]
         if "fail" in os.path.basename(lig):
             return R(1, "", "boom")
-        with open(cmd[cmd.index("-o") + 1], "w") as fh:
+        with open(cmd[cmd.index("-o") + 1], "w", encoding="utf-8") as fh:
             fh.write("MODEL 1\nREMARK minimizedAffinity -5.43219\n"
                      "REMARK VINA RESULT:    -7.512      0.000      0.000\nENDMDL\n")
         return R(0, "Affinity: -5.43219 (kcal/mol)\n")
@@ -249,9 +249,9 @@ def test_consensus_rescores_vina_top_pose_with_vinardo(fake_rescore, tmp_path):
     assert "--score_only" in cmd
     assert cmd[cmd.index("--scoring") + 1] == "vinardo"
     assert "--exhaustiveness" not in cmd     # no re-docking
-    pose = open(cmd[cmd.index("-l") + 1]).read()
+    pose = open(cmd[cmd.index("-l") + 1], encoding="utf-8").read()
     assert "1.000" not in pose and "MODEL" not in pose   # first model only
-    log = open(os.path.join(outdir, "docked", "a_smina.log")).read()
+    log = open(os.path.join(outdir, "docked", "a_smina.log"), encoding="utf-8").read()
     assert log.startswith("# Command: smina -r rec.pdbqt")
 
 
@@ -270,9 +270,9 @@ def test_rescoring_flex_residues_passed(fake_rescore, tmp_path):
                                         flex_file="flex.pdbqt", scoring="vinardo",
                                         smina="smina", timeout=10)
     cmd = fake_rescore[-1]
-    flex = open(cmd[cmd.index("--flex") + 1]).read()
+    flex = open(cmd[cmd.index("--flex") + 1], encoding="utf-8").read()
     assert flex.startswith("BEGIN_RES") and "NZ  LYS" in flex
-    assert "NZ  LYS" not in open(cmd[cmd.index("-l") + 1]).read()
+    assert "NZ  LYS" not in open(cmd[cmd.index("-l") + 1], encoding="utf-8").read()
     assert scores["f"] == -5.43219
 
 
@@ -283,7 +283,7 @@ def test_consensus_outputs_summary_json_and_no_agreement_column(tmp_path):
     smina = {"a": -6.0, "b": -5.0, "c": -4.0, "d": None}
     agreement = cons.write_consensus_outputs(str(tmp_path), results, smina, "vinardo")
     assert agreement["n"] == 3 and abs(agreement["rho"] - 1.0) < 1e-9
-    with open(tmp_path / "consensus_ranking.csv") as f:
+    with open(tmp_path / "consensus_ranking.csv", encoding="utf-8") as f:
         rows = list(csv.reader(f))
     assert rows[0] == ["Ligand", "Vina_Affinity", "SMINA_Affinity", "Consensus"]
     assert not any(r and r[0].startswith("#") for r in rows)

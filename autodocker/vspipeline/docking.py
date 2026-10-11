@@ -29,6 +29,7 @@ from enum import Enum
 from multiprocessing import Pool
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 from vspipeline import defaults  # noqa: E402
+from vspipeline import outputs  # noqa: E402
 
 
 
@@ -213,7 +214,7 @@ def _parse_pdbqt_result_tokens(path: str) -> List[Tuple[str, Optional[str], Opti
             records.append(vina)
 
     saw_model = False
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             if line.startswith("MODEL"):
                 if saw_model:
@@ -445,7 +446,7 @@ def _parse_grid_config(grid_file: str) -> Dict[str, float]:
         return _GRID_CACHE[cache_key]
     config = {}
     try:
-        with open(grid_file, 'r') as f:
+        with open(grid_file, 'r', encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if '=' in line and not line.startswith('#'):
@@ -627,10 +628,10 @@ def _build_vina_command(vina_path: str, receptor: str, ligand: str, out: str,
         "--receptor", receptor,
         "--ligand", ligand,
         "--out", out,
-        "--exhaustiveness", str(vina_params.get('exhaustiveness', 8)),
-        "--num_modes", str(vina_params.get('binding_modes', 9)),
-        "--energy_range", str(vina_params.get('energy_range', 3.0)),
-        "--seed", str(vina_params.get('seed', 42))
+        "--exhaustiveness", str(vina_params.get('exhaustiveness', defaults.EXHAUSTIVENESS)),
+        "--num_modes", str(vina_params.get('binding_modes', defaults.BINDING_MODES)),
+        "--energy_range", str(vina_params.get('energy_range', defaults.ENERGY_RANGE)),
+        "--seed", str(vina_params.get('seed', defaults.SEED))
     ]
 
     if vina_params.get('threads'):
@@ -761,7 +762,7 @@ def _validate_output(name: str, out: str, stdout: str
     if os.path.getsize(out) == 0:
         raise _DockingError(f"Docking produced empty output file: {out}")
     try:
-        with open(out) as f:
+        with open(out, encoding="utf-8") as f:
             has_model = any(line.startswith("MODEL") for line in f)
         tokens = _parse_pdbqt_result_tokens(out)
     except OSError as e:
@@ -844,7 +845,7 @@ def dock_ligand(job: Union[DockJob, Sequence]) -> Tuple[str, Optional[float], Di
 
     engines = job.engine.docking_engines()
     last_error = None
-    with open(log_path, "w") as log:
+    with open(log_path, "w", encoding="utf-8") as log:
         for idx, (engine_path, label) in enumerate(engines):
             # Never let a previous attempt's (or run's) poses pass for this one.
             if os.path.exists(out):
@@ -986,7 +987,7 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
     Raises RuntimeError only when no ligand produced any score at all.
     """
     engine = engine or EngineConfig.from_runner()
-    dock_dir = os.path.join(outdir, "docked")
+    dock_dir = os.path.join(outdir, outputs.DOCKED_DIR)
     os.makedirs(dock_dir, exist_ok=True)
 
     # Guard against output collisions when ligand basenames are duplicated.

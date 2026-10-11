@@ -46,7 +46,7 @@ def test_1nc3_torsion_tree_and_typing_unchanged(tmp_path):
     runner.run([runner.OBABEL, "-imol2", LIGAND_1NC3, "-opdbqt", "-O", raw, "-h",
                 "--partialcharge", "gasteiger"], capture=True)
     det = _prepare_1nc3(str(tmp_path / "det.pdbqt")).decode().splitlines(True)
-    raw_lines = open(raw).read().splitlines(True)
+    raw_lines = open(raw, encoding="utf-8").read().splitlines(True)
     assert len(det) == len(raw_lines)
     for a, b in zip(det, raw_lines):
         if a.startswith(("ATOM", "HETATM")):
@@ -98,7 +98,7 @@ def test_run_obabel_deterministic_rejects_heavy_atom_differences(tmp_path):
         out = args[args.index("-O") + 1]
         calls.append(out)
         x = 0.0 if len(calls) == 1 else 0.5  # a --gen3d-like heavy-atom change
-        with open(out, "w") as f:
+        with open(out, "w", encoding="utf-8") as f:
             f.write(_sdf([("C", (x, 0.0, 0.0)), ("O", (x + 1.4, 0.0, 0.0))], [(1, 2)]))
 
     out = str(tmp_path / "lig.sdf")
@@ -113,12 +113,12 @@ def test_run_obabel_deterministic_identical_runs_untouched(tmp_path):
     text = _sdf([("C", (0.0, 0.0, 0.0)), ("O", (1.4, 0.0, 0.0))], [(1, 2)])
 
     def fake_obabel(args, outputs=()):
-        with open(args[args.index("-O") + 1], "w") as f:
+        with open(args[args.index("-O") + 1], "w", encoding="utf-8") as f:
             f.write(text)
 
     out = str(tmp_path / "lig.sdf")
     assert hyd.run_obabel_deterministic(["-O", out], out, run_obabel=fake_obabel) == 0
-    assert open(out).read() == text
+    assert open(out, encoding="utf-8").read() == text
 
 
 def test_run_obabel_deterministic_needs_output_in_args(tmp_path):

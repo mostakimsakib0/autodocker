@@ -42,7 +42,7 @@ $$$$
 def _make_ethanol_sdf(tmp_path):
     """Write a 3D ethanol SDF (gets nonzero Gasteiger charges)."""
     path = str(tmp_path / "ethanol.sdf")
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(ETHANOL_SDF)
     return path
 
@@ -83,7 +83,7 @@ def test_fix_pdbqt_charges_assigns_charges(zero_charge_pdbqt, tmp_path):
 
 def test_fix_pdbqt_charges_raises_on_bad_source(tmp_path):
     bad = str(tmp_path / "bad.pdbqt")
-    with open(bad, "w") as f:
+    with open(bad, "w", encoding="utf-8") as f:
         f.write("ATOM  junk\n")
     with pytest.raises(Exception) as exc:
         runner._fix_pdbqt_charges(bad, str(tmp_path / "missing.sdf"))
@@ -117,7 +117,7 @@ def test_blank_chain_pdb_kept_for_default_chain(protein_pdb, tmp_path):
     """PDBs with blank chain IDs (common in DUD-E-style receptors) must keep
     their atoms when the default chain 'A' is selected."""
     lines = []
-    with open(protein_pdb) as f:
+    with open(protein_pdb, encoding="utf-8") as f:
         for line in f:
             if line.startswith("ATOM"):
                 lines.append(line[:21] + " " + line[22:])
@@ -127,7 +127,7 @@ def test_blank_chain_pdb_kept_for_default_chain(protein_pdb, tmp_path):
     pdbfile.write_text("\n".join(lines) + "\n")
     prep = runner.ProteinPreparation(str(pdbfile), str(tmp_path))
     prep.prepare_receptor("A")
-    n = sum(1 for l in open(prep.receptor_pdbqt)
+    n = sum(1 for l in open(prep.receptor_pdbqt, encoding="utf-8")
             if l.startswith(("ATOM", "HETATM")))
     assert n > 0
 
@@ -137,7 +137,7 @@ def test_receptor_centroid_offsets_frame_shift(protein_pdb, tmp_path):
     receptor PDBQT is centered at the origin; _receptor_centroid must return
     the original-frame centroid so detect_pocket can shift the grid center."""
     lines = []
-    with open(protein_pdb) as f:
+    with open(protein_pdb, encoding="utf-8") as f:
         for line in f:
             if line.startswith("ATOM"):
                 x = float(line[30:38]) + 100.0
@@ -153,7 +153,7 @@ def test_receptor_centroid_offsets_frame_shift(protein_pdb, tmp_path):
 
     def centroid(path):
         xs, ys, zs = [], [], []
-        for l in open(path):
+        for l in open(path, encoding="utf-8"):
             if l.startswith("ATOM"):
                 xs.append(float(l[30:38]))
                 ys.append(float(l[38:46]))
