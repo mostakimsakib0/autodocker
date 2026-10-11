@@ -3,8 +3,11 @@ name: CI
 # Single test workflow (replaces the former duplicate test.yml):
 #  - lint:        ruff (pyflakes + syntax), shellcheck, hadolint
 #  - pytest:      Python 3.9-3.12 with Open Babel and the official Vina 1.2.7
-#  - docker:      on pull requests, build the image, smoke-screen it through
-#                 the entrypoint twice and require byte-identical results
+#  - docker:      on pull requests, build the image natively on amd64 and
+#                 arm64, smoke-screen it through the entrypoint twice and
+#                 require byte-identical results on each architecture
+#  - cross-arch:  compare the amd64 and arm64 smoke results (measured,
+#                 non-blocking: cross-architecture identity is not guaranteed)
 on:
   push:
     paths-ignore:
@@ -125,10 +128,19 @@ jobs:
           VS_COMMAND_TIMEOUT: '120'
 
   docker:
-    name: docker image smoke + determinism
+    name: docker ${{ matrix.arch }} smoke + determinism
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          # Native arm64 runner (no QEMU); free for public repositories.
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -146,22 +158,25 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          platforms: linux/${{ matrix.arch }}
           load: true
           push: false
           tags: autodocker:ci
           build-args: |
             AUTODOCKER_VERSION=${{ steps.version.outputs.version }}
             VCS_REF=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+          cache-to: type=gha,scope=docker-${{ matrix.arch }},mode=max
 
       - name: Check image metadata and bundled tools
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
         run: |
           label="$(docker image inspect autodocker:ci \
             --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')"
           test "$label" = "$VERSION"
+          test "$(docker image inspect autodocker:ci --format '{{ .Architecture }}')" = "$ARCH"
           docker run --rm --entrypoint python3 autodocker:ci \
             /autodocker/runner.py --version | grep -Fx "AutoDocker $VERSION"
           docker run --rm --entrypoint sh autodocker:ci -c '
@@ -187,10 +202,54 @@ jobs:
               python3 -m pytest -q -rs -p no:cacheprovider \
                 tests/test_smina_real.py tests/test_tools_real.py tests/test_e2e.py'
 
-      - name: Upload smoke outputs on failure
-        if: failure()
+      - name: Upload smoke outputs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: smoke-outputs
-          path: ${{ runner.temp }}/smoke
+          name: smoke-${{ matrix.arch }}
+          path: ${{ runner.temp }}/smoke/run1/output
           if-no-files-found: ignore
+
+  cross-arch:
+    name: cross-arch determinism (amd64 vs arm64, non-blocking)
+    needs: docker
+    if: always() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    # Measured, not guaranteed: a difference is reported but does not fail CI.
+    continue-on-error: true
+    steps:
+      - name: Download smoke outputs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: smoke-*
+          path: smoke
+
+      - name: Compare amd64 and arm64 results byte-for-byte
+        run: |
+          set -u
+          a=smoke/smoke-amd64 b=smoke/smoke-arm64
+          {
+            echo "## Cross-architecture determinism (amd64 vs arm64)"
+            echo
+            if [ ! -d "$a" ] || [ ! -d "$b" ]; then
+              echo "Result: **not compared** (an architecture produced no smoke output)"
+              exit 1
+            fi
+            echo "| file | byte-identical |"
+            echo "|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          # Primary: ranking and poses. Diagnostics: the prepared inputs.
+          for f in ranking.csv $(cd "$a" && ls docked/*_out.pdbqt) \
+                   receptor.pdbqt grid.conf $(cd "$a" && ls ligands/*.pdbqt 2>/dev/null); do
+            if cmp -s "$a/$f" "$b/$f"; then r=yes; else r=no; case "$f" in ranking.csv|docked/*) status=1 ;; esac; fi
+            echo "| \`$f\` | $r |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          if [ "$status" -eq 0 ]; then
+            echo -e "\nResult: **byte-identical** ranking.csv and docked poses" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo -e "\nResult: **differs** (see table; first lines of the ranking diff below)\n" >> "$GITHUB_STEP_SUMMARY"
+            { echo '```'; diff "$a/ranking.csv" "$b/ranking.csv" | head -20 || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          cat "$GITHUB_STEP_SUMMARY"
+          exit "$status"
