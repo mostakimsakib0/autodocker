@@ -39,6 +39,7 @@ from vspipeline import (
     library,
     manifest,
     outputs,
+    pdb_records,
     pipeline,
     protein,
     tools,
@@ -455,7 +456,7 @@ def _check_receptor_selection(args) -> None:
     if not args.flexible_residues or (args.flexibility is not None and args.flexibility <= 0):
         return
     try:
-        lines, _ = protein.read_pdb_records(args.receptor)
+        lines, _ = pdb_records.read_pdb_records(args.receptor)
     except (OSError, UnicodeDecodeError) as e:
         raise ConfigError(f"-r/--receptor: cannot read {args.receptor}: {e}") from None
     missing = flexible.missing_residues(lines, selected,

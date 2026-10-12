@@ -93,6 +93,28 @@ def _tail(text: Optional[str]) -> str:
     return " | ".join(lines[-_STDERR_TAIL_LINES:])
 
 
+def log_tool_stderr(tool: str, stderr: str) -> None:
+    """Log a tool's stderr at WARNING, collapsing repeated messages.
+
+    Open Babel prints one block per atom for some PDB warnings (e.g. a blank
+    element column), separated by '=====' lines; identical blocks (ignoring
+    the atom number) are logged once with a count.
+    """
+    if not stderr or not stderr.strip():
+        return
+    blocks = [b.strip() for b in re.split(r"^=+\s*$", stderr, flags=re.M) if b.strip()]
+    counts = {}
+    for block in blocks:
+        key = re.sub(r"\(atom \d+\)", "(atom N)", " ".join(block.split()))
+        counts[key] = counts.get(key, 0) + 1
+    for message, count in counts.items():
+        if re.fullmatch(r"\d+ molecules? converted", message):
+            logger.debug(f"{tool}: {message}")
+            continue
+        suffix = f" [x{count}]" if count > 1 else ""
+        logger.warning(f"[!] {tool}: {message}{suffix}")
+
+
 class ObabelNoOutput(RuntimeError):
     """Open Babel exited 0 but converted nothing or wrote no/empty output."""
 
@@ -386,7 +408,7 @@ def get_chains(pdb_file: str) -> List[str]:
 
     ATOM records with a blank chain ID (column 22) are reported as
     ``DEFAULT_CHAIN`` ("A"), the ID receptor preparation reads them as
-    (``protein.record_chain``), so ``--chain A`` and ``--chain all`` select
+    (``pdb_records.record_chain``), so ``--chain A`` and ``--chain all`` select
     them and a blank-chain receptor (DUD-E style) is reported as chain A. A
     file in which blank-chain ATOM records coexist with records of a real
     chain A raises ChainAmbiguityError (the two could not be told apart);

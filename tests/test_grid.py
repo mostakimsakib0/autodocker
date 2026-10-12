@@ -1,6 +1,6 @@
 import pytest
 
-from vspipeline import docking, protein
+from vspipeline import docking, fpocket, protein
 def _write_grid(path, text):
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
@@ -42,28 +42,26 @@ def _prep(protein_pdb, outdir):
     return protein.ProteinPreparation(protein_pdb, outdir)
 
 
-def test_parse_pocket_selection_default(protein_pdb, outdir):
+def test_parse_pocket_selection_default():
     pockets = [{"number": 3}, {"number": 7}]
-    assert _prep(protein_pdb, outdir)._parse_pocket_selection(
-        None, pockets) == [3]
+    assert fpocket.parse_pocket_selection(None, pockets) == [3]
 
 
-def test_parse_pocket_selection_explicit(protein_pdb, outdir):
+def test_parse_pocket_selection_explicit():
     pockets = [{"number": 3}, {"number": 7}]
-    assert _prep(protein_pdb, outdir)._parse_pocket_selection(
-        "7,3", pockets) == [7, 3]
+    assert fpocket.parse_pocket_selection("7,3", pockets) == [7, 3]
 
 
-def test_parse_pocket_selection_invalid(protein_pdb, outdir):
+def test_parse_pocket_selection_invalid():
     pockets = [{"number": 3}]
     with pytest.raises(ValueError, match="not found"):
-        _prep(protein_pdb, outdir)._parse_pocket_selection("9", pockets)
+        fpocket.parse_pocket_selection("9", pockets)
 
 
-def test_parse_pocket_selection_non_numeric(protein_pdb, outdir):
+def test_parse_pocket_selection_non_numeric():
     pockets = [{"number": 3}]
     with pytest.raises(ValueError, match="Invalid pocket"):
-        _prep(protein_pdb, outdir)._parse_pocket_selection("abc", pockets)
+        fpocket.parse_pocket_selection("abc", pockets)
 
 
 def test_centroid_fallback_grid(protein_pdb, outdir, monkeypatch):

@@ -12,11 +12,13 @@ from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 
 from vspipeline import defaults  # noqa: E402
-from vspipeline.protein import (
-    BLANK_CHAIN_ID,
+from vspipeline.hydrogens import (
     OB_BOND_TOLERANCE,
     OB_COVALENT_RADII,
     OB_UNKNOWN_COVALENT_RADIUS,
+)
+from vspipeline.pdb_records import (
+    BLANK_CHAIN_ID,
     _element_from_atom_name,
     read_pdb_records,
 )

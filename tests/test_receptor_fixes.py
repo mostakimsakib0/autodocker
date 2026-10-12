@@ -11,7 +11,7 @@ import vspipeline.hydrogens as hyd
 import vspipeline.pocket as pocket
 import vspipeline.protein as prot
 import vspipeline.utils as utils
-from vspipeline import pipeline, tools
+from vspipeline import pdb_records, pipeline, protonation, tools
 
 DATA = os.path.join(os.path.dirname(__file__), "data", "prep")
 SEMET = os.path.join(DATA, "1hsg_semet_fragment.pdb")
@@ -157,7 +157,7 @@ def test_parse_residue_key_forms(key, expected):
 
 
 def test_blank_chain_constants_agree():
-    assert fl.BLANK_CHAIN == prot.BLANK_CHAIN_ID == utils.DEFAULT_CHAIN
+    assert fl.BLANK_CHAIN == pdb_records.BLANK_CHAIN_ID == utils.DEFAULT_CHAIN
 
 
 def _two_chain_receptor(tmp_path, chains=("A", "a")):
@@ -372,7 +372,7 @@ def test_receptor_protonation_compares_a_third_run(tmp_path, monkeypatch):
                     f"    +0.200 HD\n")
         return ""
 
-    monkeypatch.setattr(prot, "_run_obabel", fake)
+    monkeypatch.setattr(protonation, "_run_obabel", fake)
     pp = prot.ProteinPreparation(str(tmp_path / "in.pdb"), str(tmp_path), seed=11)
     pp._protonate(7.4, source=str(tmp_path / "in.pdb"))
     assert [seed for _, seed in calls] == [11, 12, 13]

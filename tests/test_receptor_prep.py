@@ -8,7 +8,7 @@ import re
 import pytest
 
 import vspipeline.protein as prot
-from vspipeline import tools, utils
+from vspipeline import fpocket, gridbox, hydrogens, pdb_records, protonation, tools, utils
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
 # Residues 1-12 of the DUD-E AKT1 receptor (input hydrogens, blank chain and
@@ -45,8 +45,8 @@ def _vina_bonded_heavy(h_xyz, heavy):
     """Heavy atoms within Vina's covalent bond distance of a hydrogen."""
     out = []
     for t, xyz, line in heavy:
-        el = prot._pdbqt_element(t)
-        if math.dist(h_xyz, xyz) < prot._vina_bond_cutoff(el):
+        el = hydrogens.pdbqt_element(t)
+        if math.dist(h_xyz, xyz) < hydrogens.vina_bond_cutoff(el):
             out.append(line)
     return out
 
@@ -73,7 +73,7 @@ def test_every_polar_hydrogen_bonded_to_exactly_one_heavy_atom(tmp_path):
     pp = prot.ProteinPreparation(AKT1_FRAGMENT, str(tmp_path))
     pp.prepare_receptor("all", keep_hetero=True)
     atoms = _atoms(pp.receptor_pdbqt)
-    heavy = [a for a in atoms if a[0] not in prot.PDBQT_HYDROGEN_TYPES]
+    heavy = [a for a in atoms if a[0] not in hydrogens.PDBQT_HYDROGEN_TYPES]
     for t, xyz, line in atoms:
         if t == "HD":
             assert len(_vina_bonded_heavy(xyz, heavy)) == 1, line
@@ -86,7 +86,7 @@ def test_input_hydrogens_are_replaced_not_stacked(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         pp.prepare_receptor("all")
     assert "Removed" in caplog.text and "hydrogen records" in caplog.text
-    assert not any(prot.is_hydrogen_record(l) for l in open(pp.pdb_clean, encoding="utf-8")
+    assert not any(pdb_records.is_hydrogen_record(l) for l in open(pp.pdb_clean, encoding="utf-8")
                    if l.startswith(("ATOM", "HETATM")))
     atoms = _atoms(pp.receptor_pdbqt)
     nz = [a for a in atoms if a[2][12:16] == " NZ " and a[2][22:26] == "  11"][0]
@@ -119,8 +119,8 @@ def test_stabilize_hydrogens_replaces_random_groups(tmp_path):
     a2, b2 = tmp_path / "a2.pdbqt", tmp_path / "b2.pdbqt"
     a2.write_text("".join(second))
     b2.write_text("".join(first))
-    assert prot.stabilize_hydrogens(str(a), str(b)) == 3
-    assert prot.stabilize_hydrogens(str(a2), str(b2)) == 3
+    assert hydrogens.stabilize_hydrogens(str(a), str(b)) == 3
+    assert hydrogens.stabilize_hydrogens(str(a2), str(b2)) == 3
     # Same result whichever random placement Open Babel produced first.
     assert a.read_text() == a2.read_text()
     atoms = _atoms(str(a))
@@ -137,7 +137,7 @@ def test_stabilize_hydrogens_leaves_deterministic_groups(tmp_path):
     a, b = tmp_path / "a.pdbqt", tmp_path / "b.pdbqt"
     a.write_text("".join(lines))
     b.write_text("".join(lines))
-    assert prot.stabilize_hydrogens(str(a), str(b)) == 0
+    assert hydrogens.stabilize_hydrogens(str(a), str(b)) == 0
     assert a.read_text() == "".join(lines)
 
 
@@ -146,7 +146,7 @@ def test_stabilize_hydrogens_rejects_different_heavy_atoms(tmp_path):
     a.write_text(_pdbqt_line(1, "C", 0.0, 0.0, 0.0, "C"))
     b.write_text(_pdbqt_line(1, "C", 0.1, 0.0, 0.0, "C"))
     with pytest.raises(RuntimeError, match="different heavy atoms"):
-        prot.stabilize_hydrogens(str(a), str(b))
+        hydrogens.stabilize_hydrogens(str(a), str(b))
 
 
 # --- PDB records -----------------------------------------------------------
@@ -161,7 +161,7 @@ def test_stabilize_hydrogens_rejects_different_heavy_atoms(tmp_path):
     (_pdb_atom(1, "N", "ALA", "A", "1", 0, 0, 0, "N"), False),
 ])
 def test_is_hydrogen_record(line, expected):
-    assert prot.is_hydrogen_record(line) is expected
+    assert pdb_records.is_hydrogen_record(line) is expected
 
 
 def test_altloc_one_label_per_residue_highest_occupancy():
@@ -174,7 +174,7 @@ def test_altloc_one_label_per_residue_highest_occupancy():
         _pdb_atom(5, "OG", "SER", "A", "5", 2, 0, 0, "O", "A", 0.30),
         _pdb_atom(6, "N", "SER", "A", "5", 3, 0, 0, "N"),
     ]
-    kept, dropped = prot.select_altlocs(lines)
+    kept, dropped = pdb_records.select_altlocs(lines)
     assert dropped == 3
     assert [l[12:16].strip() for l in kept] == ["CA", "CB", "N"]
     assert all(l[16] == " " for l in kept)
@@ -188,7 +188,7 @@ def test_altloc_tie_takes_first_label_and_resolves_microheterogeneity():
         _pdb_atom(3, "CB", "THR", "A", "7", 1, 0, 0, "C", "B", 0.50),
         _pdb_atom(4, "OG1", "THR", "A", "7", 1, 0, 1, "O", "B", 0.50),
     ]
-    kept, dropped = prot.select_altlocs(lines)
+    kept, dropped = pdb_records.select_altlocs(lines)
     assert dropped == 2
     assert {l[17:20] for l in kept} == {"SER"}
 
@@ -222,7 +222,7 @@ def test_restore_labels_rejects_atom_count_mismatch(tmp_path):
     q = tmp_path / "r.pdbqt"
     q.write_text(_pdbqt_line(1, "C", 0.0, 0.0, 0.0, "C"))
     with pytest.raises(RuntimeError, match="heavy atoms"):
-        prot._restore_residue_labels(str(q), str(pdb))
+        protonation._restore_residue_labels(str(q), str(pdb))
 
 
 def test_restore_labels_hydrogen_search_radius(tmp_path):
@@ -232,10 +232,10 @@ def test_restore_labels_hydrogen_search_radius(tmp_path):
     q.write_text(_pdbqt_line(1, "N", 0.0, 0.0, 0.0, "N")
                  + _pdbqt_line(2, "H", 2.5, 0.0, 0.0, "HD"))
     with pytest.raises(RuntimeError, match="within 2.0 A"):
-        prot._restore_residue_labels(str(q), str(pdb))
+        protonation._restore_residue_labels(str(q), str(pdb))
     q.write_text(_pdbqt_line(1, "N", 0.0, 0.0, 0.0, "N")
                  + _pdbqt_line(2, "H", 1.0, 0.0, 0.0, "HD"))
-    assert prot._restore_residue_labels(str(q), str(pdb)) == 2
+    assert protonation._restore_residue_labels(str(q), str(pdb)) == 2
     h = [l for l in open(q, encoding="utf-8") if l[77:79] == "HD"][0]
     assert h[17:26] == "ALA A   1"
 
@@ -248,7 +248,7 @@ def test_restore_labels_warns_on_duplicate_coordinates(tmp_path, caplog):
     q.write_text(_pdbqt_line(1, "C", 0.0, 0.0, 0.0, "C")
                  + _pdbqt_line(2, "C", 0.0, 0.0, 0.0, "C"))
     with caplog.at_level(logging.WARNING):
-        prot._restore_residue_labels(str(q), str(pdb))
+        protonation._restore_residue_labels(str(q), str(pdb))
     assert "share coordinates" in caplog.text
 
 
@@ -261,19 +261,19 @@ def test_rank_pockets_ties_broken_by_pocket_number():
         {"number": 2, "score": 0.5, "druggability_score": 0.3, "volume": 50.0},
         {"number": 4, "score": 0.7, "druggability_score": 0.0, "volume": 10.0},
     ]
-    assert [p["number"] for p in prot.rank_pockets(pockets)] == [4, 2, 1, 3]
-    assert [p["number"] for p in prot.rank_pockets(pockets[::-1])] == [4, 2, 1, 3]
+    assert [p["number"] for p in fpocket.rank_pockets(pockets)] == [4, 2, 1, 3]
+    assert [p["number"] for p in fpocket.rank_pockets(pockets[::-1])] == [4, 2, 1, 3]
 
 
 def test_druggability_threshold_is_fpocket_documented_value():
-    assert prot.FPOCKET_DRUGGABILITY_THRESHOLD == 0.5
-    assert prot.is_druggable({"druggability_score": 0.5})
-    assert not prot.is_druggable({"druggability_score": 0.3})
+    assert fpocket.FPOCKET_DRUGGABILITY_THRESHOLD == 0.5
+    assert fpocket.is_druggable({"druggability_score": 0.5})
+    assert not fpocket.is_druggable({"druggability_score": 0.3})
 
 
 def test_bounding_box_padding_is_symmetric():
     xs, ys, zs = [0.0, 1.0, 1.0, 10.0], [0.0, 0.0, 0.0, 2.0], [5.0, 5.0, 5.0, 5.0]
-    cx, cy, cz, sx, sy, sz = prot.bounding_box(xs, ys, zs, padding=4.0)
+    cx, cy, cz, sx, sy, sz = gridbox.bounding_box(xs, ys, zs, padding=4.0)
     assert (cx, cy, cz) == (5.0, 1.0, 5.0)
     for c, s, vals in ((cx, sx, xs), (cy, sy, ys), (cz, sz, zs)):
         assert min(vals) - (c - s / 2) == pytest.approx(4.0)
@@ -284,8 +284,7 @@ def test_pocket_box_centred_on_bounding_box(tmp_path):
     p = tmp_path / "pocket1_atm.pdb"
     p.write_text("".join(_pdb_atom(i, "C", "ALA", "A", "1", x, 0.0, 0.0, "C")
                          for i, x in enumerate((0.0, 1.0, 2.0, 12.0), 1)))
-    pp = prot.ProteinPreparation("x.pdb", str(tmp_path))
-    cx, _, _, sx, _, _ = pp._get_pocket_info([str(p)], padding=6.0)
+    cx, _, _, sx, _, _ = gridbox.pocket_box([str(p)], padding=6.0)
     assert cx == 6.0 and sx == 24.0
 
 
@@ -339,7 +338,7 @@ def _prep_with_receptor(tmp_path):
 def test_detect_pocket_tie_break_and_symmetric_box(tmp_path, monkeypatch):
     pp = _prep_with_receptor(tmp_path)
     monkeypatch.setattr(tools, "find_tool", lambda *names: "/usr/bin/fpocket")
-    monkeypatch.setattr(prot, "_fpocket_version", lambda path: "4.0")
+    monkeypatch.setattr(fpocket, "_fpocket_version", lambda path: "4.0")
     box3 = [(0.0, 0.0, 0.0), (10.0, 2.0, 4.0), (1.0, 1.0, 1.0)]
     monkeypatch.setattr(utils, "run", _fake_fpocket([
         (3, 0.4, 0.1, box3), (2, 0.4, 0.1, box3), (1, 0.1, 0.9, box3)]))
@@ -354,7 +353,7 @@ def test_detect_pocket_tie_break_and_symmetric_box(tmp_path, monkeypatch):
 def test_detect_pocket_selects_lowest_number_on_full_tie(tmp_path, monkeypatch):
     pp = _prep_with_receptor(tmp_path)
     monkeypatch.setattr(tools, "find_tool", lambda *names: "/usr/bin/fpocket")
-    monkeypatch.setattr(prot, "_fpocket_version", lambda path: "4.0")
+    monkeypatch.setattr(fpocket, "_fpocket_version", lambda path: "4.0")
     far = [(50.0, 50.0, 50.0), (52.0, 52.0, 52.0)]
     near = [(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)]
     monkeypatch.setattr(utils, "run", _fake_fpocket([
@@ -374,7 +373,7 @@ def test_detect_pocket_fails_without_fpocket(tmp_path, monkeypatch):
 def test_detect_pocket_fails_when_no_pockets(tmp_path, monkeypatch):
     pp = _prep_with_receptor(tmp_path)
     monkeypatch.setattr(tools, "find_tool", lambda *names: "/usr/bin/fpocket")
-    monkeypatch.setattr(prot, "_fpocket_version", lambda path: None)
+    monkeypatch.setattr(fpocket, "_fpocket_version", lambda path: None)
     monkeypatch.setattr(utils, "run", _fake_fpocket([]))
     with pytest.raises(RuntimeError, match="no pockets"):
         pp.detect_pocket()
@@ -383,7 +382,7 @@ def test_detect_pocket_fails_when_no_pockets(tmp_path, monkeypatch):
 def test_detect_pocket_fails_without_info_file(tmp_path, monkeypatch):
     pp = _prep_with_receptor(tmp_path)
     monkeypatch.setattr(tools, "find_tool", lambda *names: "/usr/bin/fpocket")
-    monkeypatch.setattr(prot, "_fpocket_version", lambda path: None)
+    monkeypatch.setattr(fpocket, "_fpocket_version", lambda path: None)
     monkeypatch.setattr(utils, "run", _fake_fpocket(
         [(1, 0.3, 0.3, [(0.0, 0.0, 0.0)])], info=False))
     with pytest.raises(RuntimeError, match="pocket scores"):
