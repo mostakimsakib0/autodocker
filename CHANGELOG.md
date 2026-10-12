@@ -412,6 +412,11 @@ changes (below) are part of 2.0.0.
 
 ### CI
 
+- `repro.yml` (started by hand): reruns the 1HSG case study on a second
+  x86-64 runner with the image the authors' laptop used, and on a native
+  arm64 runner with that commit's arm64 image, and compares `ranking.csv`
+  and every pose file with the laptop result (`.github/repro/`).
+
 - One workflow: Python 3.9 to 3.12 with the official Vina 1.2.7 and Open
   Babel 3.2.1 (upstream wheel pinned by SHA-256; the tests fail on Open
   Babel < 3.2), ruff, shellcheck and hadolint; on pull requests the image is built for both

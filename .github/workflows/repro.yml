@@ -3,10 +3,13 @@ name: Reproducibility
 # The paper's cross-machine and cross-architecture check: the 1HSG
 # case-study screen (--chain all --pockets 2, inputs in .github/repro/1hsg)
 # rerun away from the authors' laptop and compared with the laptop result
-# (.github/repro/1hsg/expected). Runs on a push to feature/repro-runs that
-# changes these files (workflow_dispatch needs the file on the default
-# branch), or by hand once it is there:
+# (.github/repro/1hsg/expected). Started by hand only:
 #   gh workflow run repro.yml -r <branch> [-f image_run_id=<run>]
+# The paper's run is 38263602306 (x86-64: byte-identical to the laptop;
+# arm64: identical prepared inputs, docking within seed noise). The
+# default image artifact (Benchmarks run 38227673333) expires on
+# 2026-10-19; later runs need image_run_id of a newer Benchmarks run, whose
+# image then has to be compared with a laptop run of that same image.
 #
 #   plan      read build-info.json of the image built by a Benchmarks run
 #             (the image the laptop runs used): commit and image ID
@@ -22,11 +25,6 @@ name: Reproducibility
 # host.txt) as artifact repro-explicit_<machine>, the layout of
 # AutoDocker_Paper/results_2.0/repro/explicit_<machine>.
 on:
-  push:
-    branches: [feature/repro-runs]
-    paths:
-      - '.github/workflows/repro.yml'
-      - '.github/repro/**'
   workflow_dispatch:
     inputs:
       image_run_id:
@@ -44,8 +42,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # The default also applies to push-triggered runs (no inputs).
-  IMAGE_RUN_ID: ${{ inputs.image_run_id || '38227673333' }}
+  IMAGE_RUN_ID: ${{ inputs.image_run_id }}
 
 jobs:
   plan:
