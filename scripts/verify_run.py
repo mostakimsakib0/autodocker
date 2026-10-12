@@ -47,7 +47,8 @@ Modes
 ``verify_run.py RUN_A RUN_B``
     Compare two output directories: identical / different / one-sided files
     (ignoring run_manifest.json timestamps and the ``outputs`` hashes of
-    ``*.log`` files, ``*.log``, the Monte-Carlo
+    ``*.log`` files, ``*.log``, fpocket's own ``protein_clean_out/``, the
+    Monte-Carlo
     ``Volume`` column of pocket_summary.csv and the ``.docking*`` checkpoint
     files; the run directory path is normalised), the Spearman rank
     correlation of the two rankings and per-ligand score differences.
@@ -109,7 +110,8 @@ MANIFEST_REQUIRED_KEYS = ("autodocker_version", "argv", "args", "seed", "status"
 MANIFEST_FINISHED = ("completed",)
 MANIFEST_FINISHED_WITH_WARNING = ("too_many_failures",)
 # Compare mode: files never compared, and manifest keys that differ run to run.
-COMPARE_IGNORE = ("*.log", ".docking*", "*/.docking*")
+FPOCKET_OUT_DIR = "protein_clean_out"   # fpocket's own output (Monte-Carlo volumes)
+COMPARE_IGNORE = ("*.log", ".docking*", "*/.docking*", FPOCKET_OUT_DIR + "/*")
 MANIFEST_VOLATILE_KEYS = ("started_at", "finished_at")
 POCKET_VOLATILE_COLUMNS = ("Volume",)
 
@@ -727,7 +729,12 @@ def _normalise_pocket_summary(data):
 
 
 def _normalise_path(data, run_dir):
-    for prefix in (os.path.realpath(run_dir), os.path.abspath(run_dir)):
+    """``run_dir`` (resolved, absolute, and as given on the command line,
+    e.g. a relative -o) replaced by ``<RUN>``."""
+    given = run_dir.rstrip(os.sep)
+    for prefix in (os.path.realpath(run_dir), os.path.abspath(run_dir), given):
+        if not prefix or prefix in (".", os.sep):
+            continue
         data = data.replace(prefix.encode() + b"/", b"<RUN>/").replace(prefix.encode(), b"<RUN>")
     return data
 

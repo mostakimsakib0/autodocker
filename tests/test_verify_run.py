@@ -75,6 +75,7 @@ def test_mirrored_names_match_the_pipeline():
     assert vr.REPLICATE_TAG == outputs.REPLICATE_TAG
     assert vr.HASHED_OUTPUTS == outputs.HASHED_OUTPUTS
     assert vr.HASHED_OUTPUT_DIRS == outputs.HASHED_OUTPUT_DIRS
+    assert vr.FPOCKET_OUT_DIR == outputs.FPOCKET_OUT_DIR
 
 
 def test_expected_status_follows_the_pipeline():
@@ -247,6 +248,9 @@ def test_compare_identical_runs(tmp_path, capsys):
     _edit(b / "run_manifest.json", '"finished_at": "', '"finished_at": "1999')
     _edit(b / "docked" / "acetaminophen_vina.log", "AutoDock", "autodock")  # logs skipped
     (b / ".docking.lock").write_text("123", encoding="utf-8")
+    for d, text in ((a, "1"), (b, "2")):  # fpocket's own output is not compared
+        (d / "protein_clean_out").mkdir()
+        (d / "protein_clean_out" / "protein_clean_info.txt").write_text(text)
     for d, vol in ((a, "101.5"), (b, "99.25")):  # fpocket's Monte-Carlo volume
         (d / "pocket_summary.csv").write_text(
             "Pocket,Score,Druggability_Score,Volume,Box_Volume,Could_Be_Druggable,File\n"
