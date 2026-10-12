@@ -262,6 +262,127 @@ logical and physical core counts, CPU model, Vina and AutoDocker versions.
 
 Files: `runs.csv` (every run), `performance.csv` (per cell), `summary.json`.
 
+## Running the benchmarks on GitHub Actions
+
+`.github/workflows/benchmarks.yml` runs J1, J2, J3 and J5 (the baseline
+script `scripts/benchmark_baseline.py` must be in the ref) on free
+GitHub-hosted runners (`ubuntu-24.04`, 4 vCPUs), split into shards, and
+merges the shards into the files a single local run writes. J4 (throughput)
+is not run there: shared runners do not give stable timings.
+
+Trigger it by hand (it has no other trigger):
+
+```bash
+gh workflow run benchmarks.yml -r <branch> \
+    -f suites=casf,dude,baseline,easydock,parity -f casf_set=full -f shards=20
+gh run watch      # or: gh run list --workflow benchmarks.yml
+```
+
+`suites` is any comma list of `casf` (J1), `parity` (J3, needs `casf`),
+`dude` (J2), `baseline` (J5 Meeko + raw Vina, CASF sample and DUD-E) and
+`easydock` (J5 EasyDock, CASF sample). `casf_set` is `full` (every core-set
+ID that can be docked, see below) or `sample` (the seeded 40). `shards` is
+the number of CASF jobs. The docking protocol is not an input: it is fixed in
+`scripts/ci/run_suite.sh` (seed 42; J1 exhaustiveness 8, 9 modes, energy
+range 3, RDKit start conformer; J2 exhaustiveness 4, 1 mode, crystal-ligand
+box, 50 actives + 500 decoys; `--threads 1` and `--processes $(nproc)`).
+
+**Jobs.**
+
+| Job | What it does |
+|---|---|
+| `plan` | validates the inputs; CASF shard list and DUD-E target list |
+| `build` | builds the image once (the Dockerfile, labels and build args of `publish.yml`, `linux/amd64`), checks `runner.py --version`, Vina 1.2.7, Open Babel 3.2.1 and RDKit, and saves it with `docker save \| zstd -19` as artifact `image`; `build-info.json` (artifact `build-info`) records the image ID, the archive's SHA-256, the labels, every tool version, the SHA-256 of the docking binaries and the image's `pip freeze` |
+| `prepare` | inside the image: `fetch_casf_rcsb.py --sample 0` (`casf2016_full/`; `--sample 40 --sample-seed 42` → `casf2016/` for `casf_set=sample`) and `benchmark_enrichment.py --prepare-only --max-actives 50 --max-decoys 500` for the 10 targets (`dude/`, `dude_prepare/`), the same commands as the laptop's `benchmark_data/v2`; then `merge_shards.py split` and `scripts/ci/hash_inputs.sh` → artifacts `inputs` (all files) and `inputs-manifest` (`SHA256SUMS`, `casf_ids/`) |
+| `casf` (one per shard) | `benchmark_redock.py --pdbids <shard>`; on the shard's IDs of the 40-complex sample also `--start-conformer crystal` and `benchmark_vina_parity.py` on the work directories just written; `verify_run.py` on every run directory (when the ref has it) → artifact `casf-shard-NNN` |
+| `dude` (one per target) | `benchmark_enrichment.py --targets <t>` → artifact `dude-<t>` (with the runner's output directory) |
+| `baseline-redock`, `baseline-enrichment` (one per target), `easydock` | `benchmark_baseline.py` on the CASF sample and per DUD-E target (`--ligands-from` the prepare job's `dude_prepare/`), with Meeko 0.8.0 / RDKit 2026.09.1 / reduce 4.15 (`reduce-binary` 4.15.0) and EasyDock 1.3.1 in virtual environments pinned package by package (`scripts/ci/baseline_env.sh`, wheels only, `pip check`, `pip freeze` kept) and the upstream Vina 1.2.7 static binary (SHA-256 as in `ci.yml`); the RDKit start conformers come from the image's RDKit 2023.09.3 as in J1. `easydock` does not fail the run |
+| `aggregate` | runs after every other job, also when some failed; `scripts/ci/aggregate.sh` merges the shard artifacts with `scripts/merge_shards.py` → artifact `benchmark-results` (30 days) |
+
+Every container sees the same paths (`/repo` checkout, `/data` inputs,
+`/out` results; `scripts/ci/in_image.sh`), so the paths recorded in logs and
+summaries agree across shards. A shard uploads its results even when a step
+fails (each step's exit status is in its `exit_codes.txt`), and the aggregate
+job merges the shards that exist and lists the missing IDs, so one failed
+shard costs only its own complexes: re-run that job, or the failed jobs of
+the run (`gh run rerun <id> --failed`), and the aggregate job again.
+
+**CASF IDs.** `--set full` docks 278 of the 285 core-set IDs: 2xys, 4ih7,
+3gr2 and 3n86 are left out (the core-set SMILES puts an sp3 stereocentre
+where the crystal carbon is planar, a tautomer artefact: for 2xys and 4ih7
+no start conformer has the crystal ligand's InChIKey, see
+`benchmark_data/v2/README.md`), and 1a30, 3bv9, 3uri are peptide ligands
+that `fetch_casf_rcsb.py` cannot build (the prepare job fails if the fetch
+skips any other ID). The 40-complex sample contains none of them. The
+remaining IDs are sorted and dealt round-robin (shard k of n gets
+`ids[k::n]`, 13-14 complexes per shard with 20 shards); the IDs of every
+shard are in `inputs/casf_ids/`. The merged `summary.json` therefore equals
+that of one local `benchmark_redock.py --pdbids <the 278 IDs>` run
+(`--set sample`: of `--sample 40 --sample-seed 42`; the crystal-start
+comparison always records the sample's selection).
+
+**Merging.** `scripts/merge_shards.py {redock,baseline-redock,enrichment,baseline-enrichment,parity} --shards DIR... --outdir OUT`
+computes the merged files with the benchmark scripts' own code
+(`benchmark_redock.summarize`, `benchmark_enrichment.save_tables`,
+`benchmark_vina_parity.verdict`): `results.csv`/`parity.csv` rows and
+records are ordered by ID and targets by the benchmark's target order, so
+the result is byte-identical for any shard order and equals a single run
+over the same complexes (`tests/test_merge_shards.py`). The J1/J5 shards are
+run through `merge_shards.py capture`, which runs the script unchanged and
+also keeps the full-precision per-complex records (`records.json`):
+`results.csv` rounds RMSDs to 3 decimals, which would change medians and
+`≤ 2 Å` decisions. Shards with different protocols (any `protocol` field
+other than the ID/target list and `processes`), an ID in two shards, or
+records that do not reproduce their shard's `summary.json` are refused.
+
+**Runtime** (estimates, 4 vCPUs per job, at most 20 concurrent jobs on a
+public repository): `build` 40-90 min (less with the `docker-amd64` cache of
+`ci.yml`), `prepare` 30-60 min (the RCSB and DUD-E downloads dominate), a
+CASF shard 30-60 min (14 complexes at 5-10 min each on one thread, 4 at a
+time, plus the sample's crystal-start and parity re-runs), a DUD-E target
+45-90 min (550 ligands at about 20 s per thread), `baseline-redock` and
+`easydock` 1.5-2 h, a baseline target 45-90 min, `aggregate` a few minutes.
+With 20 CASF shards the docking runs in two waves (20 CASF jobs, then 21 DUD-E
+and baseline jobs): about 4-5 h end to end, every job well under the 6 h
+limit (job timeouts 330 min; the J2 runner call has a 4.5 h limit).
+
+**Results.** Download the merged results into the paper's results tree:
+
+```bash
+gh run download <run-id> -n benchmark-results \
+    -D ~/Downloads/Research/AutoDocker_Paper/results_2.0
+```
+
+The layout is the one `jcim_2.0/numbers/config.json` reads:
+`results_2.0/redock`, `redock_crystal`, `parity`, `enrichment`,
+`baseline/redock`, `baseline/enrichment` (and `baseline/easydock_redock`);
+then `python3 numbers/make_numbers.py` in `jcim_2.0`. The artifact also holds
+`benchmarks_summary.json` (git SHA and ref, run ID, image record, the
+SHA-256 of `SHA256SUMS`, per-shard CPU model, `nproc`, memory, runner image
+and timestamps, the merge reports with the missing IDs and the SHA-256 of
+every merged file), `merge/<result>.json`, `inputs/` and `build-info.json`.
+The per-shard artifacts (`casf-shard-NNN`, `dude-<t>`, ...) keep the work
+directories (run outputs, logs, `run_manifest.json`, `verify/`) for 30 days:
+`gh run download <run-id> -p 'casf-shard-*'`.
+
+**Laptop cross-check.** The prepared inputs are hashed with
+`scripts/ci/hash_inputs.sh` in a format that can be produced anywhere:
+
+```bash
+gh run download <run-id> -n inputs-manifest -D ci_inputs
+scripts/ci/hash_inputs.sh ~/Downloads/Research/benchmark_data/v2 \
+    casf2016_full dude dude_prepare > laptop.sha256     # casf_set=sample: casf2016
+scripts/ci/compare_inputs.sh ci_inputs/SHA256SUMS laptop.sha256
+```
+
+Every file must be identical except `*_ligand_modelserver.sdf` (RCSB
+ModelServer response metadata) and `dude_prepare/summary.json` (worker count
+and tool versions of the machine), which are listed as expected
+differences. A shard can be re-run on the laptop with the same image
+(`scripts/ci/load_image.sh` on the downloaded `image` artifact) and
+`BENCH_DATA=<inputs> BENCH_OUT=<dir> scripts/ci/run_suite.sh casf 007`;
+`verify_run.py RUN_A RUN_B` then compares a complex's CI and laptop runs.
+
 ## Environment
 
 Record the environment from the `summary.json` files of the rerun: AutoDocker
