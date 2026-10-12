@@ -42,6 +42,7 @@ tools/*/repo/
 # Committed test and CI smoke fixtures (*.pdbqt/*.sdf are ignored above)
 !tests/data/**
 !/.github/smoke/**
+!/.github/repro/**
 
 # Vendored fpocket was removed; never re-add it (build via tools/fpocket submodule)
 /fpocket/
