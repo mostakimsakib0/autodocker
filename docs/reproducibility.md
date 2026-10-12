@@ -38,6 +38,11 @@ fixed, what is not, and how it is tested.
   Vina still bonds it only to its parent atom. This matters because Vina
   decides which atoms are hydrogen-bond donors from hydrogen positions. The
   prepared receptor is therefore the same for every seed.
+- Trp/His ring hydrogens. Trp NE1 always gets HE1 and each His a tautomer
+  chosen by fixed rules (residue name, input hydrogens, metal coordination,
+  default HIE), placed from the ring geometry; `run_manifest.json` records
+  each decision under `receptor_residue_templates` (see
+  [`openbabel.md`](openbabel.md#trp-and-his-ring-hydrogens-residue-templates)).
 - Ligand hydrogens: the same check is applied to every ligand conversion
   that adds or keeps hydrogens.
 - 3D coordinates for 2D ligands come from RDKit ETKDGv3 seeded with `--seed`

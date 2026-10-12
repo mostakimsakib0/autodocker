@@ -37,6 +37,19 @@ A metal inside a larger residue (the Fe of HEM) or any other element without
 Gasteiger parameters still makes Open Babel convert nothing. That is an error that
 names the element and the residue.
 
+**Trp and His ring hydrogens.** Open Babel often adds no hydrogen to the Trp and
+His rings of a protein PDB, so they are assigned from residue templates after
+protonation (details and the effect on 49 receptors in
+[`openbabel.md`](openbabel.md#trp-and-his-ring-hydrogens-residue-templates)):
+- Trp NE1 always gets HE1.
+- His gets the tautomer named by its residue name (HID/HSD, HIE/HSE, HIP/HSP;
+  written as HIS), else the one the input's own hydrogens on ND1/NE2 show, else
+  the one with the metal-coordinating N unprotonated (one ring N within 2.8 Å of
+  a Zn/Fe/Cu/Ni/Co/Mn/Cd/Hg HETATM), else HIE (H on NE2). The choice does not
+  depend on `--ph`.
+- `run_manifest.json` records the counts and the rule used for each His
+  (`receptor_residue_templates`).
+
 **Open Babel converting nothing is an error.** Open Babel exits with status 0 when
 it skips every molecule (`0 molecules converted`). Every Open Babel call therefore
 fails, with Open Babel's messages, in either of these cases:

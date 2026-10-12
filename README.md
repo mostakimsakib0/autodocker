@@ -113,7 +113,10 @@ Only one run at a time can use an output directory: a run takes the lock
 directory stops at once with exit code 2 and changes nothing in it.
 
 Hydrogens present in the input receptor are removed and the receptor is
-protonated at pH 7.4 (`--ph`); it is centered at the origin
+protonated at pH 7.4 (`--ph`); Trp and His ring hydrogens come from residue
+templates (Trp NE1-H always; His HID/HIE/HIP from the residue name or the
+input's hydrogens, else HIE; see [`docs/openbabel.md`](docs/openbabel.md)).
+The receptor is centered at the origin
 during preparation, so `receptor.pdbqt`, `grid.conf` and the docked poses
 share that centered frame (`--grid-center` is given in the input PDB's
 coordinates and converted automatically).

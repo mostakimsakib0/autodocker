@@ -9,6 +9,21 @@ changes (below) are part of 2.0.0.
 
 ### Fixed
 
+- **(results)** Trp and His ring hydrogens come from residue templates. Open
+  Babel (3.1.1 and 3.2.1) often fails to kekulize the indole and imidazole
+  rings of a protein PDB and then adds no ring hydrogen: every Trp NE1 was
+  written as an acceptor without its hydrogen, and about half of the His had
+  no ring hydrogen, so Vina saw no donor there. Now Trp NE1 always gets HE1,
+  and each His gets HID, HIE or HIP from its residue name (HID/HIE/HIP,
+  HSD/HSE/HSP; written as HIS), else from the input's own hydrogens on
+  ND1/NE2, else with a metal-coordinating ring N left unprotonated, else HIE.
+  The choice does not depend on `--ph`. The hydrogens are placed in the ring
+  plane and typed `HD`; the protonated N is typed `N`, the other His N `NA`.
+  `run_manifest.json` records the decisions (`receptor_residue_templates`).
+  On 39 CASF-2016 + 10 DUD-E receptors, 280 Trp NE1 and 387 His N become
+  donors and 160 His ND1 become acceptors (HIE instead of Open Babel's
+  ND1-H); no other atom changes. The 1HSG case-study scores change (see
+  `docs/openbabel.md`).
 - **(results)** Receptor protonation is deterministic. Open Babel places
   some hydrogens in a random, clock-seeded direction when the neighbouring
   atoms do not fix one; Vina decides which atoms are hydrogen-bond donors

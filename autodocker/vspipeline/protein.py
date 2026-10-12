@@ -29,6 +29,7 @@ from vspipeline import (  # noqa: E402
     outputs,
     pocket,
     protonation,
+    residue_templates,
     utils,
 )
 from vspipeline.pdb_records import (  # noqa: E402
@@ -214,6 +215,9 @@ class ProteinPreparation:
         self.grid_conf = os.path.join(outdir, outputs.GRID_CONF)
         self.grid_box_script = os.path.join(outdir, outputs.GRID_BOX_PML)
         self.pocket_summary_file = os.path.join(outdir, outputs.POCKET_SUMMARY_CSV)
+        # Trp/His ring-hydrogen decisions (residue_templates.apply_residue_templates);
+        # None until prepare_receptor has run.
+        self.residue_templates: Optional[Dict] = None
 
     def validate(self):
         """Validate protein PDB file."""
@@ -329,6 +333,10 @@ class ProteinPreparation:
                 # obabel -p re-perceives residues; put the input's labels back.
                 relabelled = protonation._restore_residue_labels(self.receptor_pdbqt, source)
             logger.info(f"[*] Restored input residue labels on {relabelled} receptor atoms")
+            # Trp HE1 and His tautomers (residue_templates): in the input frame,
+            # after label restoration, before the translation to the docking frame.
+            self.residue_templates = residue_templates.apply_residue_templates(
+                self.receptor_pdbqt, self.pdb_file)
             # Centre on the heavy atoms of pdb_clean (the frame offset written
             # to frame_offset.txt).
             _translate_pdbqt(self.receptor_pdbqt, self._receptor_centroid())

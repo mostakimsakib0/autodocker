@@ -99,6 +99,10 @@ class RunState:
         if self.flexible_residues is not None:
             # The residues docked as flexible side chains ([] = rigid).
             extra["flexible_residues"] = list(self.flexible_residues)
+        templates = getattr(self.protein, "residue_templates", None)
+        if templates is not None:
+            # Trp/His ring hydrogens of the receptor (residue_templates.py).
+            extra["receptor_residue_templates"] = templates
         # Open Babel version and OB_RANDOM_SEED policy (manifest.check_openbabel).
         extra.update(self.openbabel or {})
         return extra

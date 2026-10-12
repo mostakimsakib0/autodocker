@@ -93,8 +93,9 @@ that, so keeping them was tested on the 39 CASF-2016 and 10 DUD-E receptors
 Kept hydrogens on 3.2.1 no longer over-protonate, but they carry the
 protonation choices of whoever prepared the file: 145 nitrogens change from
 acceptor to donor and 5 from donor to acceptor, all in the 14 pre-protonated
-receptors (72 Trp NE1, 69 + 5 His ring N, 4 Gly N; see the known
-limitation below), and one more hydrogen ends up
+receptors (72 Trp NE1, 69 + 5 His ring N, 4 Gly N; measured before the
+Trp/His residue templates below, which now protonate every Trp NE1 and take
+the His tautomer from the input's hydrogens), and one more hydrogen ends up
 within Vina's bond distance of a second heavy atom (DUD-E fa10). Removal keeps the documented meaning of `--ph` (one protonation
 model for every input), makes the receptor independent of how, or whether,
 the input was protonated, and leaves the 2.0 receptors identical to 1.x in
@@ -107,17 +108,95 @@ the NZ of Lys A325 lies 2.3 Å from its CE and is protonated as an isolated
 ammonium; in DUD-E aces the NE of Arg 46 lies 1.95 Å from OE1 of Glu 163, so
 Open Babel's NE hydrogen is 1.18 Å from that oxygen.)
 
-## Known limitation (3.1.1 and 3.2.1 alike)
+## Trp and His ring hydrogens: residue templates
 
-Open Babel's bond-order perception of protein PDB files often fails to
-kekulize the indole and imidazole rings ("Failed to kekulize aromatic bonds"
-in the log). The pH model then leaves Trp NE1 without its hydrogen, typed as an
-acceptor (all 280 Trp NE1 of the 49 receptors are `NA` without HD), and 206 of
-the 416 His residues get no ring hydrogen at all (the other 210 get ND1-H).
-Vina therefore sees these nitrogens as acceptors, not donors. This is identical
-in 1.x and 2.0 and unchanged by the Open Babel upgrade; a fix (e.g. assigning
-ring hydrogens from residue templates) would change receptor typing and is not
-part of 2.0.0.
+Open Babel's bond-order perception of protein PDB files (3.1.1 and 3.2.1
+alike) often fails to kekulize the indole and imidazole rings ("Failed to
+kekulize aromatic bonds" in the log), and its pH model then adds no ring
+hydrogen. On the 49 receptors below every Trp NE1 (280/280) was written as
+acceptor `NA` without a hydrogen, and 206 of the 416 His had no ring hydrogen
+(the other 210 got one on ND1). Vina calls an N a donor only when an `HD` atom
+lies within its bond distance (`model::assign_bonds`, 1.1 x covalent radii),
+so these nitrogens were acceptors, or neither donor nor acceptor, instead of
+donors.
+
+Since 2.0.0 these hydrogens come from residue templates
+(`vspipeline/residue_templates.py`), applied to the PDBQT Open Babel wrote
+(after the hydrogen stabilisation and the residue-label restoration, before the
+receptor is centred):
+
+- Every Open Babel hydrogen on Trp NE1 or His ND1/NE2 is removed; the template
+  decides all of them, whether or not Open Babel perceived the ring.
+- **Trp**: NE1 always gets HE1.
+- **His**: the tautomer comes from the first rule that applies:
+  1. residue name: HID/HSD (H on ND1), HIE/HSE (H on NE2), HIP/HSP (both); the
+     residue is written as HIS;
+  2. hydrogens of the input file on ND1 and/or NE2 (read from the input; the
+     receptor itself is still protonated without them): ND1 -> HID, NE2 ->
+     HIE, both -> HIP;
+  3. metal coordination: if exactly one ring N lies within 2.8 Å of a Zn, Fe,
+     Cu, Ni, Co, Mn, Cd or Hg HETATM of the input (kept by `--keep-hetero` or
+     not), that N stays unprotonated and the other gets the hydrogen;
+  4. default: HIE (H on NE2), the more common neutral tautomer and the default
+     of Amber/CHARMM preparation tools.
+
+  The choice does not depend on `--ph`: a His is charged (HIP) only when the
+  input says so by name or hydrogens. There is no hydrogen-bond network
+  optimisation (Reduce/PDB2PQR-style tautomer and flip search).
+- The hydrogen lies in the ring plane on the external bisector of the N's two
+  ring bonds, at 0.9845 Å (Open Babel's own sp2 N-H length, the length of the
+  ND1-H it adds), named HE1/HD1/HE2, typed `HD` with charge +0.000, and is
+  written right after its N; atom serials are renumbered. Open Babel computes
+  the Gasteiger charges before `-p` adds hydrogens, so all its polar hydrogens
+  carry +0.000 and their N the charge of the unprotonated atom; the template
+  hydrogens follow that convention (Vina does not read charges).
+- A protonated ring N is typed `N` (Vina N_D), an unprotonated His N `NA`
+  (N_A). No other atom changes.
+- `run_manifest.json` records, under `receptor_residue_templates`, the policy,
+  the number of Trp HE1 added, the His states and the rule that decided each
+  His (per residue), the His residues renamed, the Open Babel ring hydrogens
+  replaced, residues skipped for missing ring atoms, and any template hydrogen
+  within Vina's bond distance of a second atom (none in the 49 receptors).
+
+Effect on the 49 receptors (Open Babel 3.2.1, `--chain all`; Vina XS types
+from the emulation of `assign_bonds`/`assign_types`):
+
+| | N_D | N_A | N_DA | N_P | O_A | O_DA | HD |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| before (Open Babel ring hydrogens) | 21073 | 919 | 6 | 741 | 22026 | 2693 | 29291 |
+| residue templates | 21580 | 412 | 6 | 741 | 22026 | 2693 | 29798 |
+
+| Change (atoms) | Count |
+|---|---:|
+| Trp NE1 N_A -> N_D (HE1 added) | 280 |
+| His NE2 N_A -> N_D | 350 |
+| His ND1 N_A -> N_D | 37 |
+| His ND1 N_D -> N_A (Open Babel's ND1-H replaced by HIE) | 160 |
+| any other atom (type, coordinates, charge) | 0 |
+
+His states: 329 HIE, 66 HID, 21 HIP; decided by residue name 20 (DUD-E akt1,
+cdk2, hivpr), input hydrogens 78 (the pre-protonated CASF 1c5z, 1o3f, 1o5b and
+DUD-E receptors), metal coordination 0, default 318. 210 Open Babel ring
+hydrogens were replaced. Every Trp NE1 is N_D, every His has the donor/acceptor
+pattern of its state, every new HD is bonded (Vina's rule) to its N only, three
+preparations of each receptor are byte-identical, and Vina 1.2.5 scores a
+ligand against each (`--score_only`).
+
+1HSG case study (`protein.pdb`, ligands 1-4 and indinavir; `--chain all
+--pockets 2 --exhaustiveness 2 -p 2`): the receptor gains HE1 on the four Trp,
+and His A69/B69 become HIE (Open Babel had put the hydrogen on ND1); 332 HD
+instead of 328.
+
+| Ligand | Affinity before (kcal/mol) | Affinity with templates (kcal/mol) | Δ |
+|---|---:|---:|---:|
+| indinavir_ctrl | -11.576 | -11.568 | +0.008 |
+| 3 | -5.81 | -5.81 | 0 |
+| 4 | -5.249 | -5.249 | 0 |
+| 1 | -4.783 | -4.778 | +0.005 |
+| 2 | -4.624 | -4.562 | +0.062 |
+
+The ranking is unchanged, and two runs with templates give byte-identical
+outputs.
 
 ## Results change from 3.1.1 to 3.2.1
 
