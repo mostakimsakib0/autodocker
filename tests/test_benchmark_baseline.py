@@ -293,6 +293,73 @@ def test_easydock_unavailable_is_reported(tmp_path):
     assert "No module named rdkit" in summary["reason"]
 
 
+def test_unknown_residue_names_and_ids(tmp_path):
+    text = ("Error: Creation of data structure for receptor failed.\n"
+            "Template generation failed for unknown residues: {'CD', 'NI'}, which appear "
+            "to be linking fragments.\n")
+    assert bb.unknown_residue_names(text) == {"CD", "NI"}
+    assert bb.unknown_residue_names("Template matching failed for: ['A:136']") == set()
+    pdb = tmp_path / "r.pdb"
+    pdb.write_text(
+        "ATOM      1  N   ALA A   1      0.000   0.000   0.000  1.00  0.00           N\n"
+        "HETATM    2 CD    CD A 201      1.000   0.000   0.000  1.00  0.00          CD\n"
+        "HETATM    3 CD    CD A 201A     2.000   0.000   0.000  1.00  0.00          CD\n"
+        "HETATM    4 NI    NI B1003      3.000   0.000   0.000  1.00  0.00          NI\n",
+        encoding="utf-8")
+    # The insertion code is part of the ID: Meeko does not delete A:201A for A:201.
+    assert bb.residue_ids(str(pdb), {"CD", "NI"}) == ["A:201", "A:201A", "B:1003"]
+    assert bb.residue_ids(str(pdb), set()) == []
+
+
+def test_macrocycle_pseudo_atoms_are_detected(tmp_path):
+    mac = os.path.join(DATA, "macrocycle", "2x00_ligand_out.pdbqt")
+    assert bb.has_macrocycle_pseudo_atoms(mac)
+    plain = tmp_path / "plain.pdbqt"
+    plain.write_text("MODEL 1\n"
+                     "ATOM      1  C   UNL     1       0.000   0.000   0.000  0.00  0.00"
+                     "     0.000 C \n"
+                     "ENDMDL\n", encoding="utf-8")
+    assert not bb.has_macrocycle_pseudo_atoms(str(plain))
+
+
+@pytest.mark.skipif(not (MEEKO_BIN and shutil.which("obrms")
+                         and os.path.exists(os.path.join(MEEKO_BIN or "", "mk_export.py"))),
+                    reason="Meeko (AUTODOCKER_MEEKO_BIN) with mk_export.py, or obrms, not available")
+def test_macrocycle_poses_get_an_rmsd(tmp_path):
+    # Meeko opens the 15-membered ring of 2x00's ligand (G0/CG0 pseudo atoms);
+    # obrms alone returns inf for such poses.
+    mac = os.path.join(DATA, "macrocycle")
+    out = str(tmp_path / "2x00_ligand_out.pdbqt")
+    shutil.copy(os.path.join(mac, "2x00_ligand_out.pdbqt"), out)
+    tools = {"mk_export": os.path.join(MEEKO_BIN, "mk_export.py")}
+    rmsds, errors = bb.pose_rmsds(os.path.join(mac, "2x00_ligand.mol2"), out, str(tmp_path), tools)
+    assert errors == []
+    assert len(rmsds) == 2
+    assert all(r is not None and 0.0 <= r < 20.0 for r in rmsds)
+
+
+@needs_chain
+def test_receptor_with_untemplated_ions_is_prepared(tmp_path):
+    # Cd has no Meeko template: plain and -x preparation both fail, so the ion
+    # residues (both insertion codes) are deleted with -d and recorded.
+    pdb = tmp_path / "cd.pdb"
+    lines = []
+    with open(os.path.join(os.path.dirname(__file__), "data", "prep", "1hsg_zn_fragment.pdb"),
+              encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("HETATM") and line[17:20] == " ZN":
+                line = line[:12] + " CD " + line[16] + " CD" + line[20:76].ljust(56) + "CD\n"
+            lines.append(line)
+    pdb.write_text("".join(lines), encoding="utf-8")
+    tools = bb.resolve_tools(bb.build_parser().parse_args(
+        ["enrichment", "--workdir", str(tmp_path), "--outdir", str(tmp_path / "out"),
+         "--meeko-bin", MEEKO_BIN]))
+    out, rec = bb.prepare_receptor(str(pdb), str(tmp_path / "prep"), tools)
+    assert os.path.getsize(out) > 0
+    assert rec["deleted_untemplated_residues"] == ["A:201", "A:201A"]
+    assert " -d A:201,A:201A -x" in rec["mk_prepare_receptor"]
+
+
 def test_missing_preparation_tools_are_reported(tmp_path):
     out = tmp_path / "out"
     code = bb.main(["enrichment", "--workdir", DUDE, "--targets", "akt1", "--outdir",

@@ -19,7 +19,11 @@ Preparation chain
                receptorH.pdb -o receptor -p`` (Meeko, ProDy reader, Gasteiger
                charges from templates). If Meeko refuses residues that match
                no template, it is re-run with ``-x`` (delete them) and the
-               deleted residues are recorded in ``prep.json``.
+               deleted residues are recorded in ``prep.json``. Residues for
+               which Meeko cannot even build a template (single-atom ions of
+               elements it does not parametrize, e.g. Cd or Ni) stop ``-x``
+               too; their IDs are then passed to ``-d`` (delete) as Meeko's
+               message recommends, and recorded.
   * Ligand   : an RDKit molecule with explicit hydrogens written as SDF, then
                ``mk_prepare_ligand.py -i ligand.sdf -o ligand.pdbqt``.
                ``redock``: the start conformer of benchmark_redock.py
@@ -37,7 +41,11 @@ Preparation chain
                ``--cpu --threads``. The exact command is logged at the top
                of ``<name>_vina.log`` like AutoDocker's logs.
   * Metrics  : redock: obrms RMSD of every mode vs. the crystal MOL2
-               (``benchmark_redock.mode_rmsds``/``summarize``); enrichment:
+               (``benchmark_redock.mode_rmsds``/``summarize``). Meeko docks
+               macrocycles with a ring bond opened and pseudo atoms (types
+               G*/CG*) that obrms cannot map; such poses are first converted
+               with ``mk_export.py`` (Meeko's documented export, which closes
+               the ring) and each exported mode is compared. enrichment:
                AUC, EF, BEDROC, ROCe, bootstrap CIs and Mann-Whitney
                (``benchmark_enrichment.compute_stats``/``save_tables``).
                Poses stay in the input frame, so no frame shift is applied.
@@ -65,11 +73,13 @@ import json
 import multiprocessing
 import os
 import random
+import re
 import shlex
 import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _benchlib  # noqa: E402
@@ -205,6 +215,7 @@ def resolve_tools(args):
         "reduce_het_dict": reduce_het_dict(reduce_bin, args.reduce_het_dict),
         "mk_prepare_receptor": receptor_script,
         "mk_prepare_ligand": find_tool("mk_prepare_ligand.py", meeko_bin),
+        "mk_export": find_tool("mk_export.py", meeko_bin),
         "vina": args.vina_bin or shutil.which("vina"),
         "obabel": shutil.which("obabel"),
         "easydock": (args.easydock_bin or shutil.which("easydock")
@@ -237,7 +248,7 @@ def tool_record(tools):
 
 def missing_tools(tools, engine):
     needed = ["reduce", "mk_prepare_receptor", "mk_prepare_ligand", "obabel"]
-    needed.append("vina" if engine == "vina" else "easydock")
+    needed += ["vina", "mk_export"] if engine == "vina" else ["easydock"]
     return [n for n in needed if not tools.get(n)]
 
 
@@ -343,6 +354,28 @@ def deleted_residues(meeko_output):
     return keep[:50]
 
 
+def unknown_residue_names(meeko_output):
+    """Residue names Meeko could not build a template for ("Template
+    generation failed for unknown residues: {'CD'}")."""
+    m = re.search(r"unknown residues:\s*\{([^}]*)\}", meeko_output)
+    return {n.strip(" '\"") for n in m.group(1).split(",") if n.strip(" '\"")} if m else set()
+
+
+def residue_ids(pdb, names):
+    """Meeko residue IDs (chain:number+insertion code) of every residue of
+    ``pdb`` whose name is in ``names``, in file order."""
+    ids = []
+    if not names:
+        return ids
+    with open(pdb, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith(("ATOM", "HETATM")) and line[17:20].strip() in names:
+                rid = f"{line[21]}:{line[22:26].strip()}{line[26].strip()}"
+                if rid not in ids:
+                    ids.append(rid)
+    return ids
+
+
 def prepare_receptor(pdb, workdir, tools):
     """reduce -Trim, reduce -BUILD, mk_prepare_receptor.py. Returns
     ``(receptor.pdbqt, record)``; the record holds the commands and whether
@@ -376,9 +409,19 @@ def prepare_receptor(pdb, workdir, tools):
         rec["deleted_unmatched_residues"] = False
         code, text = _run(cmd, log, ok_codes=None)
         if code != 0 or not os.path.exists(out):
-            code, text = _run(cmd + ["-x"], log)
+            code, text = _run(cmd + ["-x"], log, ok_codes=None)
             rec["mk_prepare_receptor"] = shlex.join(cmd + ["-x"])
             rec["deleted_unmatched_residues"] = True
+            rec["meeko_messages"] = deleted_residues(text)
+        if code != 0 or not os.path.exists(out):
+            ids = residue_ids(built, unknown_residue_names(text))
+            if not ids:
+                raise RuntimeError(f"mk_prepare_receptor.py failed (exit {code}): "
+                                   f"{text.strip()[-300:]}")
+            final = cmd + ["-d", ",".join(ids), "-x"]
+            code, text = _run(final, log)
+            rec["mk_prepare_receptor"] = shlex.join(final)
+            rec["deleted_untemplated_residues"] = ids
             rec["meeko_messages"] = deleted_residues(text)
     if not os.path.exists(out):
         raise RuntimeError("mk_prepare_receptor.py wrote no PDBQT")
@@ -587,11 +630,46 @@ def redock_complex(job):
         token, value = _benchlib.first_vina_result(out)
         rec["affinity"] = rec["affinity_mode1"] = value
         # Poses are in the input frame: the crystal MOL2 is the reference as is.
-        br.apply_rmsds(rec, *br.mode_rmsds(crystal, out))
+        br.apply_rmsds(rec, *pose_rmsds(crystal, out, work, tools))
     except Exception as e:
         rec["status"] = "error"
         rec["error"] = str(e)[:500]
     return rec
+
+
+def has_macrocycle_pseudo_atoms(pdbqt):
+    """True if a Meeko/Vina PDBQT has the pseudo atoms of an opened
+    macrocycle (AutoDock types G0, G1, ... and CG0, CG1, ...)."""
+    with open(pdbqt, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith(("ATOM", "HETATM")) and re.fullmatch(r"C?G\d+", line[77:].strip()):
+                return True
+    return False
+
+
+def pose_rmsds(crystal, out_pdbqt, work, tools):
+    """``benchmark_redock.mode_rmsds`` of the docked poses; poses with
+    macrocycle pseudo atoms are first exported with mk_export.py (ring
+    closed, pseudo atoms removed) and each exported mode is compared."""
+    if not has_macrocycle_pseudo_atoms(out_pdbqt):
+        return br.mode_rmsds(crystal, out_pdbqt)
+    sdf = os.path.join(work, os.path.basename(out_pdbqt)[:-len(".pdbqt")] + "_export.sdf")
+    with open(os.path.join(work, "pose_export.log"), "w", encoding="utf-8") as log:
+        _run([tools["mk_export"], out_pdbqt, "-s", sdf], log)
+    with open(sdf, encoding="utf-8") as f:
+        blocks = [b for b in f.read().split("$$$$\n") if b.strip()]
+    rmsds, errors = [], []
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, block in enumerate(blocks, 1):
+            path = os.path.join(tmp, f"mode_{i}.sdf")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(block + "$$$$\n")
+            try:
+                rmsds.append(_benchlib.obrms(crystal, path))
+            except Exception as e:
+                rmsds.append(None)
+                errors.append(f"mode {i}: {e}")
+    return rmsds, errors
 
 
 def write_redock_results(results, outdir):
@@ -651,7 +729,8 @@ def run_redock(args, tools, tool_versions):
                       f"{os.path.basename(args.ids_csv)}"),
         "pdbids": pdbids,
         **{k: v for k, v in baseline_params(opts).items() if k != "tool_versions"},
-        "receptor_hetatm": "kept only if Meeko has a template (else deleted with -x)",
+        "receptor_hetatm": ("kept only if Meeko has a template (else deleted with -x; "
+                            "residues Meeko cannot template deleted with -d)"),
         "preparation": PREPARATION_CHAIN,
         "rmsd": "obrms heavy-atom, symmetry-corrected, no superposition",
         "top1": "mode 1 (first MODEL)",
@@ -922,7 +1001,8 @@ PREPARATION_CHAIN = {
     "receptor": ["fill blank PDB element columns from atom names", "reduce -Trim",
                  "reduce -BUILD [-DB het dict]",
                  "mk_prepare_receptor.py -i receptorH.pdb -o receptor -p "
-                 "(re-run with -x only if residues match no template)"],
+                 "(re-run with -x only if residues match no template; with -d IDS -x "
+                 "if Meeko cannot build a template for some residues)"],
     "ligand": ["RDKit molecule with explicit hydrogens -> SDF",
                "mk_prepare_ligand.py -i ligand.sdf -o ligand.pdbqt"],
     "docking": "vina --receptor --ligand --out --center_* --size_* --exhaustiveness "
