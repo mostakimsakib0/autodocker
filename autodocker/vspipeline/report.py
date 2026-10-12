@@ -55,28 +55,6 @@ def calculate_rmsd(pose1: List[Tuple[float, float, float]],
         return float(np.sqrt(np.mean(np.sum((p1 - p2)**2, axis=1))))
 
 
-def extract_coordinates_from_pdbqt(pdbqt_file: str) -> Tuple[str, List[Tuple[float, float, float]]]:
-    """Extract ligand name and coordinates from PDBQT file."""
-    coords = []
-    name = os.path.basename(pdbqt_file).replace('.pdbqt', '')
-
-    try:
-        with open(pdbqt_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.startswith('ATOM') or line.startswith('HETATM'):
-                    try:
-                        x = float(line[30:38].strip())
-                        y = float(line[38:46].strip())
-                        z = float(line[46:54].strip())
-                        coords.append((x, y, z))
-                    except (ValueError, IndexError):
-                        pass
-    except Exception as e:
-        logger.debug(f"Could not extract coords from {pdbqt_file}: {e}")
-
-    return name, coords
-
-
 _cluster_cache: Dict[Tuple, Dict] = {}
 
 
@@ -488,11 +466,6 @@ def _scatter_chart(data, width=720, height=260):
     return "".join(parts)
 
 
-def _REPORT_CSS(has_viewer: bool = False) -> str:
-    """Report stylesheet (``templates/report.css``)."""
-    return _template("report.css")
-
-
 def _viewer_notice(message: str) -> str:
     return f"""
     <div class="section" id="viewer">
@@ -775,7 +748,7 @@ def _render_report(data: _ReportData, viewer_section: str, meta: Optional[Dict],
     # start and end times are in run_manifest.json).
     n_scored = len(data.valid_affinities)
     return _fill(_template("report.html"), {
-        "__VS_CSS__": _REPORT_CSS(bool(data.ranked_ligands)),
+        "__VS_CSS__": _template("report.css"),
         "__VS_VIEWER_TOC__": viewer_toc,
         "__VS_VERSION__": __version__,
         "__VS_META__": _meta_html(meta),

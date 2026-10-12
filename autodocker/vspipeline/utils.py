@@ -149,12 +149,6 @@ def obabel_version(path: Optional[str] = None) -> Optional[Tuple[int, int, int]]
     return _obabel_version_of(path) if path else None
 
 
-def obabel_honours_seed(path: Optional[str] = None) -> bool:
-    """True when Open Babel reads OB_RANDOM_SEED (version >= 3.2.0)."""
-    version = obabel_version(path)
-    return version is not None and version >= OBABEL_SEEDABLE_VERSION
-
-
 def run_obabel(args: List[str], outputs: Iterable[str] = (),
                return_stderr: bool = False,
                seed: Optional[int] = None) -> Union[str, Tuple[str, str]]:

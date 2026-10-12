@@ -647,19 +647,6 @@ def _build_vina_command(vina_path: str, receptor: str, ligand: str, out: str,
     return cmd
 
 
-def _log_tool_version(tool_path: str, label: str) -> None:
-    """Best-effort tool version logging for reproducibility."""
-    try:
-        stdout, stderr, _ = utils.run([tool_path, "--version"], capture=True)
-        version_text = (stdout or stderr or "").strip().splitlines()
-        if version_text:
-            logger.info(f"[*] {label} version: {version_text[0]}")
-        else:
-            logger.info(f"[*] {label} version: (no version output)")
-    except Exception as e:
-        logger.warning(f"Could not determine {label} version: {e}")
-
-
 def _tool_label(vina_path: str) -> str:
     """Human-readable label for selected docking binary."""
     base = os.path.basename(vina_path).lower()
@@ -910,17 +897,6 @@ def _file_sha256(path: Optional[str]) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
-
-
-def _receptor_sha256(path: Optional[str]) -> str:
-    """SHA-256 of the complete receptor (or flex) PDBQT, hydrogens included.
-
-    Hydrogen coordinates matter: Vina perceives donor hydrogens by bond
-    distance (model.cpp, assign_bonds / bonded_to_HD), so moving a polar H
-    can change which heavy atom is a donor, and different Open Babel H
-    placements were observed to give different scores.
-    """
-    return _file_sha256(path)
 
 
 def _run_fingerprint(receptor: str, grid_file: str, flex_file: Optional[str],
