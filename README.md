@@ -1,4 +1,4 @@
-# Autodocker — Virtual Screening Pipeline
+# AutoDocker — reproducible and verifiable virtual screening with AutoDock Vina
 
 ![License](https://img.shields.io/github/license/mostakimsakib0/autodocker)
 ![CI](https://github.com/mostakimsakib0/autodocker/actions/workflows/ci.yml/badge.svg)
@@ -8,8 +8,11 @@
 AutoDocker is a containerized virtual-screening pipeline. It prepares proteins
 (chain selection, fpocket pocket detection, receptor PDBQT), prepares ligands
 (local SDF/MOL2/PDB/PDBQT or PubChem downloads), docks with AutoDock Vina
-(QuickVina fallback), and produces a reproducible ranked report
-(`ranking.csv`, `Top_hits.txt`, `metrics.txt`, optional HTML).
+(QuickVina fallback), and produces a ranked report (`ranking.csv`,
+`Top_hits.txt`, `metrics.txt` and, by default, an offline HTML report). Its
+preparation is deterministic, and every run writes a manifest of its inputs,
+tools, options and output checksums that `scripts/verify_run.py` checks, so a
+screen can be repeated exactly and checked by someone else.
 
 ---
 
@@ -164,6 +167,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `--keep-hetero` | Keep HETATM records of the selected chains (single-atom metal ions get Vina metal types; other elements without Open Babel Gasteiger parameters stop the run) | off |
 | `--flexible-residues` | Flexible side chains, e.g. `A45,A78`, `1:45` for digit chains, `45`/`A45` for a blank chain (case-sensitive); each must exist in the docked chains (else exit 2) and be buildable (else exit 1) | none |
 | `--auto-flexible N` | The N residues closest to the box center become flexible; if none can be built, docking is rigid (warning). Not with `--flexible-residues` | none |
+| `--flexibility {0..10}` | Kept for compatibility: any value > 0 enables flexible side chains (the number has no effect), 0 forces rigid docking | implied by the two options above |
 | `-p, --processes` | Parallel docking processes (`0`/`-1` = all CPUs, `-N` = CPUs ÷ N) | `1` |
 | `--threads` | CPU threads per docking process (`--cpu`) | CPUs ÷ processes |
 | `--exhaustiveness` | Vina exhaustiveness (≥ 1) | `8` |
@@ -180,6 +184,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `--smina-only` | Dock with SMINA instead of Vina (1 mode, no resume) | off |
 | `--top-n` | Top-ranked compounds highlighted in `Top_hits.txt` and the HTML report (`ranking.csv` lists all) | `20` |
 | `--no-html-report` | Skip the self-contained HTML report | report on |
+| `--html-report` | Accepted for compatibility (the report is on by default) | on |
 | `--cluster-poses` | Write `pose_clusters.json` (greedy RMSD clustering of each ligand's poses, `--rmsd-threshold`, default 2.0 Å) | off |
 | `-v, --verbose` | Debug logging for all modules | off |
 | `--version` | Print version and exit | — |
@@ -313,12 +318,14 @@ pip, source) are in [`docs/installation.md`](docs/installation.md); the
 
 ## More docs
 
-- [`docs/installation.md`](docs/installation.md) — Docker and native setup, troubleshooting
+- [`docs/installation.md`](docs/installation.md) — Docker and native setup, supported systems, troubleshooting
 - [`docs/openbabel.md`](docs/openbabel.md) — Open Babel version, `OB_RANDOM_SEED`, 3.1.1 -> 3.2.1 changes
-- [`docs/reproducibility.md`](docs/reproducibility.md) — determinism guarantees and how to verify
+- [`docs/outputs.md`](docs/outputs.md) — every output file, the `ranking.csv` columns and the result statuses
+- [`docs/reproducibility.md`](docs/reproducibility.md) — what is reproducible, how to verify a run, and the limits
 - [`docs/input_validation.md`](docs/input_validation.md) — input checks, receptor and ligand preparation rules
 - [`docs/user_testing.md`](docs/user_testing.md) — fresh-machine testing template and bug report form
-- [JOSS-style paper](paper/paper.md) — manuscript and references
+- [`docs/features_2_0.md`](docs/features_2_0.md) — the 2.0.0 features in detail (reference-ligand box, replicates, ...)
+- [Software paper draft](paper/paper.md) (JOSS format) and references
 - [Contributing guide](CONTRIBUTING.md)
 - [`BENCHMARKS.md`](BENCHMARKS.md) — validation, performance, and enrichment results
 

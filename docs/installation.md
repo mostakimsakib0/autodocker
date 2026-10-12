@@ -9,7 +9,17 @@ Requires a working Docker installation on Linux, macOS, or Windows (WSL2).
 Images run natively on x86-64 and ARM64 (Apple Silicon via Docker Desktop,
 AWS Graviton); `docker pull` selects the right architecture. Results are
 byte-reproducible on a given architecture; see `docs/reproducibility.md` for
-amd64 versus arm64.
+amd64 versus arm64. Docker or Podman, rootless or rootful, both work.
+
+Pull the published image (the quickest route):
+
+```bash
+docker pull ghcr.io/mostakimsakib0/autodocker:v2.0.0
+docker tag ghcr.io/mostakimsakib0/autodocker:v2.0.0 autodocker
+```
+
+or build it from source (compiles Vina, QuickVina 2, SMINA, fpocket and Open
+Babel from pinned submodules; takes a while):
 
 ```bash
 git clone --recurse-submodules https://github.com/mostakimsakib0/autodocker.git
@@ -114,12 +124,18 @@ Results appear in `works/output/` (`ranking.csv`, `Top_hits.txt`,
 | Symptom | Cause / fix |
 |---|---|
 | `Critical tool 'obabel' not found` | `obabel` (Open Babel) not on PATH — install it or use the Docker image |
-| `Open Babel 3.1.1 found; AutoDocker ... needs Open Babel >= 3.2.0` | a distribution's Open Babel; install 3.2.1 (above) to match the image's results |
+| `[!] Open Babel 3.1.1 found; AutoDocker ... needs Open Babel >= 3.2.0 ...` (warning) | a distribution's Open Babel: runs are still reproducible but not comparable with the image's; install 3.2.1 (above) |
 | `Unable to find OpenBabel plugins` | set `BABEL_LIBDIR` (and `BABEL_DATADIR`) to the install's `lib/openbabel/<version>` and `share/openbabel/<version>` |
 | `Critical tool 'vina' not found` | `vina` not on PATH — install `autodock-vina` or use Docker |
 | `Protein file not found: /workspace/protein.pdb` | container mount wrong — mount the directory containing `protein.pdb` at `/workspace` |
 | `No ligand files (.sdf/.pdbqt/...) found` | put ligands in `works/ligs/` (or set `LIGS`) |
 | `Receptor has no charges` | receptor PDB was stripped of HETATM/charge info — pass a raw PDB and let the pipeline prepare it |
 | Python under 3.9 | upgrade Python or use Docker |
+| `-o/--output ... is not writable` or `Permission denied` in the workspace | the container could not write to the mounted directory: make it writable (`chmod -R a+rwX works`), and report your `id -u` and engine (Docker/Podman, rootless or not) in an issue |
+| The box is not where the ligand binds (`grid_box.pml` in PyMOL) | fpocket's top-ranked pocket is not always the ligand site: use `--box-from-het RESNAME`, `--box-ligand FILE`, `--pockets N` (see `pocket_summary.csv`) or an explicit `--grid-center/--grid-size` |
+| Many ligands `OUT_OF_WINDOW` (score 0.0 or above −1) | the box misses the receptor or the binding site: check the box as above |
+| Ligands skipped with a reason in the log | see `docs/input_validation.md`; e.g. elements without Open Babel Gasteiger parameters (Se, B), multi-molecule files, empty files |
+| PubChem library modes fail to download | network access from the container is needed for `--library fda/custom`; retry, or download the SDF files and use local ligands |
+| arm64 scores differ slightly from x86-64 | expected: Vina's floating point differs between architectures; compare runs on the same architecture (`docs/reproducibility.md`) |
 
 For a reproducible two-run determinism check see `docs/reproducibility.md`.
