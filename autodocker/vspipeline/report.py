@@ -59,7 +59,8 @@ _cluster_cache: Dict[Tuple, Dict] = {}
 
 
 def cluster_poses(poses_dir: str, rmsd_threshold: float = defaults.RMSD_THRESHOLD,
-                  ligands: Optional[List[str]] = None) -> Dict[str, List[Dict]]:
+                  ligands: Optional[List[str]] = None,
+                  pose_files: Optional[Dict[str, str]] = None) -> Dict[str, List[Dict]]:
     """Greedy clustering of each ligand's docked modes.
 
     The distance is the heavy-atom RMSD by atom order (``calculate_rmsd``:
@@ -71,9 +72,14 @@ def cluster_poses(poses_dir: str, rmsd_threshold: float = defaults.RMSD_THRESHOL
     Results are cached per (poses_dir, threshold, ligands) so the same
     directory isn't re-scanned when the report and results phases both
     request clustering.
+
+    ``pose_files`` ({ligand: pose file in ``poses_dir``}) names each
+    ligand's reported pose file instead of scanning ``poses_dir``
+    (--replicates: the best replicate's <name>_rep<k>_out.pdbqt).
     """
     keep = None if ligands is None else set(ligands)
-    cache_key = (poses_dir, rmsd_threshold, None if keep is None else frozenset(keep))
+    cache_key = (poses_dir, rmsd_threshold, None if keep is None else frozenset(keep),
+                 None if pose_files is None else frozenset(pose_files.items()))
     if cache_key in _cluster_cache:
         return _cluster_cache[cache_key]
     clusters = defaultdict(list)
@@ -84,7 +90,12 @@ def cluster_poses(poses_dir: str, rmsd_threshold: float = defaults.RMSD_THRESHOL
     # Vina (<ligand>_out.pdbqt) and SMINA (<ligand>_smina.pdbqt) write every
     # mode of a ligand as a MODEL in one file; Vina wins if both exist.
     vina_outputs = {}
-    for file in sorted(os.listdir(poses_dir)):
+    if pose_files is not None:
+        # dock_all writes every pose file to poses_dir: keep the file names.
+        vina_outputs = {lig: os.path.basename(path) for lig, path in sorted(pose_files.items())
+                        if path and os.path.isfile(os.path.join(poses_dir,
+                                                                os.path.basename(path)))}
+    for file in sorted(os.listdir(poses_dir)) if pose_files is None else ():
         for suffix in (outputs.POSE_SUFFIX, outputs.SMINA_POSE_SUFFIX):
             if file.endswith(suffix):
                 lig = file[:-len(suffix)]
@@ -627,8 +638,16 @@ def _report_data(results_csv: str, poses_dir: str, grid_file: Optional[str],
             scatter_data.append({"name": lig.get(outputs.COL_LIGAND, '?'),
                                  "mw": mw, "aff": av})
 
+    # --replicates: cluster each ligand's reported (best-replicate) pose file.
+    pose_files = None
+    if ligands and outputs.COL_N_REPLICATES in ligands[0]:
+        base_dir = os.path.dirname(os.path.abspath(results_csv))
+        pose_files = {row.get(outputs.COL_LIGAND): _pose_file(row, row.get(outputs.COL_LIGAND),
+                                                              poses_dir, base_dir)
+                      for row in ligands}
     clusters = (cluster_poses(poses_dir, rmsd_threshold=rmsd_threshold,
-                              ligands=[row.get(outputs.COL_LIGAND) for row in ligands])
+                              ligands=[row.get(outputs.COL_LIGAND) for row in ligands],
+                              pose_files=pose_files)
                 if os.path.isdir(poses_dir) else {})
 
     return _ReportData(

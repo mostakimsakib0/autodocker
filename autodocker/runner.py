@@ -37,11 +37,13 @@ from vspipeline import (
     docking,
     flexible,
     library,
+    ligand_box,
     manifest,
     outputs,
     pdb_records,
     pipeline,
     protein,
+    replicates,
     tools,
     utils,
 )
@@ -266,7 +268,8 @@ def _add_receptor_options(parser: argparse.ArgumentParser) -> None:
                      "score (druggability breaks ties). Not combinable with --no-fpocket or "
                      "with --grid-center and --grid-size together (no pocket is used then)")
     rec.add_argument("--padding", type=float, default=defaults.PADDING,
-                     help="Box padding around the selected pocket(s), Angstrom")
+                     help="Box padding around the selected pocket(s) or reference ligand, "
+                     "Angstrom")
     rec.add_argument("--no-fpocket", action="store_true",
                      help="Skip fpocket; dock in a box around the whole receptor (heavy-atom "
                      f"bounding box + padding, each edge at least "
@@ -282,6 +285,18 @@ def _add_receptor_options(parser: argparse.ArgumentParser) -> None:
     rec.add_argument("--grid-size", default=None,
                      help="Explicit box size 'SX,SY,SZ' (Angstrom), e.g. 22.5,22.5,22.5; "
                      "overrides auto-detection")
+    rec.add_argument("--box-ligand", default=None, metavar="FILE",
+                     help="Box around a reference ligand (SDF/MOL/MOL2/PDB/PDBQT, first "
+                     "molecule; coordinates in the receptor PDB's frame): centered on its "
+                     "heavy atoms' bounding box, each edge max(extent + 2 x --padding, "
+                     f"{defaults.LIGAND_BOX_MIN_SIZE:g}) Angstrom. fpocket then only reports "
+                     "which pocket holds the ligand. Not combinable with --grid-center, "
+                     "--pockets or --box-from-het; --grid-size replaces the size")
+    rec.add_argument("--box-from-het", default=None, metavar="RESNAME[:CHAIN[:RESNUM]]",
+                     help="As --box-ligand, with the reference ligand taken from a HETATM "
+                     "group of the receptor PDB (e.g. MK1, MK1:B or MK1:B:902; residue "
+                     "number with insertion code, e.g. 902A); the group is removed from "
+                     "the receptor, also with --keep-hetero")
     rec.add_argument("--keep-waters", action="store_true",
                      help="Keep water molecules near the binding site in the receptor")
     rec.add_argument("--water-distance", type=float, default=defaults.WATER_DISTANCE,
@@ -328,6 +343,10 @@ def _add_docking_options(parser: argparse.ArgumentParser) -> None:
     dock.add_argument("--seed", type=int, default=None,
                       help=f"Random seed, {SEED_RANGE[0]} to {SEED_RANGE[1]} (Vina treats 0 "
                       f"as 'random'; default: $VS_SEED, else {DEFAULT_SEED})")
+    dock.add_argument("--replicates", type=int, default=defaults.REPLICATES,
+                      help="Dock every ligand N times with seeds --seed, --seed + 1, ...; "
+                      "the reported score is the best replicate's (ranking.csv adds "
+                      "n_replicates and the score mean/SD/min/max when N > 1). Vina only")
     dock.add_argument("--threads", type=int, default=None,
                       help="CPU threads per Vina process, passed as --cpu (default: all "
                       "cores, or cores divided by -p when -p > 1)")
@@ -544,6 +563,10 @@ def _check_values(args) -> None:
     for option, value in positive_ints:
         if value < 1:
             raise ConfigError(f"{option} must be >= 1, got {value}")
+    try:
+        replicates.check_replicates(args.replicates, args.seed, SEED_RANGE[1])
+    except ValueError as e:
+        raise ConfigError(str(e)) from None
     for option, value in (("--energy-range", args.energy_range),
                           ("--rmsd-threshold", args.rmsd_threshold),
                           ("--water-distance", args.water_distance)):
@@ -574,7 +597,20 @@ def _check_values(args) -> None:
 
 
 def _check_box_options(args, explicit) -> None:
-    """Box options that would be accepted but have no effect, and --pockets."""
+    """The reference-ligand box options, box options that would be accepted
+    but have no effect, and --pockets."""
+    try:
+        ligand_box.check_options(args.box_ligand, args.box_from_het, args.pockets,
+                                 args.grid_center)
+        if args.box_ligand is not None:
+            # Cheap read (pure Python): an unreadable, empty or 2D reference
+            # is a usage error before any ligand is prepared.
+            ligand_box.read_ligand_heavy_atoms(args.box_ligand)
+        if args.box_from_het is not None:
+            # Cheap read of the receptor: the group must exist and be unique.
+            ligand_box.select_het_group(args.receptor, args.box_from_het)
+    except ligand_box.LigandBoxError as e:
+        raise ConfigError(str(e)) from None
     if "grid_center_frame" in explicit and args.grid_center is None:
         raise ConfigError("--grid-center-frame only applies to --grid-center")
     if args.pockets is not None:
@@ -640,6 +676,8 @@ def _check_engine_options(args) -> None:
             conflicts.append("--binding-modes (SMINA mode reports 1 mode)")
         if args.energy_range != DEFAULT_ENERGY_RANGE:
             conflicts.append("--energy-range")
+        if args.replicates > 1:
+            conflicts.append("--replicates (replicates are Vina dockings)")
         if conflicts:
             raise ConfigError("--smina-only cannot be combined with " + ", ".join(conflicts))
 
@@ -707,13 +745,13 @@ def _run_pipeline(args, state: pipeline.RunState) -> int:
 
     ligands = pipeline.prepare_ligands(args, state)                       # [1/5]
     receptor = pipeline.prepare_receptor(args, state)                     # [2/5]
-    box = pipeline.docking_box(args, receptor)
+    box = pipeline.docking_box(args, state, receptor)
     pipeline.keep_hetatm_residues(args, receptor, box)
     flex = pipeline.flexible_receptor(args, state, receptor, box)
     docked = pipeline.dock(args, state, ligands, receptor, box, flex)     # [3/5]
     pipeline.consensus_rescoring(args, state, docked)
     clusters_file = pipeline.cluster_poses(args, docked)                  # [4/5]
-    analyzer, html_ok = pipeline.write_results(args, receptor, docked)    # [5/5]
+    analyzer, html_ok = pipeline.write_results(args, state, receptor, docked)  # [5/5]
 
     counts = pipeline.count_failures(args, state, docked)
     exit_code = _failure_exit_code(counts["failed"], counts["ligands"],

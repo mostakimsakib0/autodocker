@@ -20,10 +20,12 @@ COMMAND_TIMEOUT = 900           # seconds per external command
 # in docking.AFFINITY_FLOOR) are reported as OUT_OF_WINDOW.
 MIN_VALID_AFFINITY = -1.0       # kcal/mol
 MAX_FAILURE_FRACTION = 0.5      # exit 3 above this fraction of failed ligands
+REPLICATES = 1                  # dockings per ligand, seeds --seed + 0..N-1
 
 # Receptor and docking box
 PH = 7.4                        # receptor protonation pH
-PADDING = 6.0                   # Angstrom around the selected pocket(s)
+PADDING = 6.0                   # Angstrom around the selected pocket(s) or reference ligand
+LIGAND_BOX_MIN_SIZE = 22.5      # Angstrom; smallest edge of a --box-ligand/--box-from-het box
 WATER_DISTANCE = 4.0            # Angstrom; --keep-waters radius around the box center
 AUTO_FLEX_RADIUS = 8.0          # Angstrom; --auto-flexible candidates around the box center
 AUTO_FLEX_MAX_RESIDUES = 10

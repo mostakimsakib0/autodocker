@@ -29,12 +29,24 @@ GRID_CONF = "grid.conf"
 GRID_BOX_PML = "grid_box.pml"
 POCKET_SUMMARY_CSV = "pocket_summary.csv"
 FRAME_OFFSET_TXT = "frame_offset.txt"
+# --box-from-het: the input receptor without the reference HETATM group (the
+# file receptor preparation reads) and that group alone (input frame).
+RECEPTOR_NO_REFERENCE_PDB = "receptor_no_reference.pdb"
+REFERENCE_LIGAND_PDB = "reference_ligand.pdb"
 
 # fpocket's own output directory (next to PROTEIN_CLEAN_PDB, named by fpocket)
 FPOCKET_OUT_DIR = PROTEIN_CLEAN_PDB[:-len(".pdb")] + "_out"
 
 # Docking
 DOCKED_DIR = "docked"   # <name>_out.pdbqt poses and <name>_vina.log per ligand
+
+# --replicates N > 1: replicate k of a ligand is <name>_rep<k> in DOCKED_DIR
+# (poses, log, checkpoint key), docked from a copy of the ligand in
+# DOCKED_DIR/REPLICATE_INPUTS_DIR; per-replicate scores and the run summary.
+REPLICATE_TAG = "_rep"
+REPLICATE_INPUTS_DIR = "replicate_inputs"
+REPLICATE_SCORES_CSV = "replicate_scores.csv"
+REPLICATE_SUMMARY_JSON = "replicate_summary.json"
 
 # Outputs derived from a run's options and results. Every run removes the ones
 # left by an earlier run in the same output directory before it starts, so a
@@ -46,7 +58,8 @@ DERIVED_OUTPUTS = (
     RANKING_CSV, TOP_HITS_TXT, METRICS_TXT, RESULTS_FULL_TXT, HTML_REPORT,
     POSE_CLUSTERS_JSON, CONSENSUS_RANKING_CSV, CONSENSUS_SUMMARY_JSON,
     POCKET_SUMMARY_CSV, FPOCKET_OUT_DIR, GRID_CONF, GRID_BOX_PML, FRAME_OFFSET_TXT,
-    RIGID_RECEPTOR_PDBQT, FLEX_PDBQT,
+    RIGID_RECEPTOR_PDBQT, FLEX_PDBQT, RECEPTOR_NO_REFERENCE_PDB, REFERENCE_LIGAND_PDB,
+    REPLICATE_SCORES_CSV, REPLICATE_SUMMARY_JSON,
 )
 
 # Per-ligand files in DOCKED_DIR: <ligand name> + suffix
@@ -79,4 +92,14 @@ RANKING_COLUMNS = (
     COL_LIGAND, COL_AFFINITY, COL_SIMSCORE, COL_BINDING_MODES, COL_MODE_COVERAGE,
     COL_MW, COL_LOGP, COL_HBA, COL_HBD, COL_TPSA, COL_ROTORS, COL_SOURCE_URL,
     COL_DOCKED_FILE, COL_STATUS, COL_ENGINE, COL_MINIMIZED,
+)
+# Appended to RANKING_COLUMNS only with --replicates N > 1 (Binding_Affinity
+# is then the best replicate's score; these summarise the in-window replicates).
+COL_N_REPLICATES = "n_replicates"
+COL_SCORE_MEAN = "score_mean"
+COL_SCORE_SD = "score_sd"
+COL_SCORE_MIN = "score_min"
+COL_SCORE_MAX = "score_max"
+RANKING_REPLICATE_COLUMNS = (
+    COL_N_REPLICATES, COL_SCORE_MEAN, COL_SCORE_SD, COL_SCORE_MIN, COL_SCORE_MAX,
 )

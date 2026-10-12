@@ -30,10 +30,14 @@ from vspipeline import (
     defaults,
     docking,
     flexible,
+    fpocket,
     library,
+    ligand_box,
     outputs,
+    pdb_records,
     pocket,
     protein,
+    replicates,
     report,
     results,
     utils,
@@ -70,6 +74,12 @@ class RunState:
     engine: Optional[docking.EngineConfig] = None
     run_fingerprint: Optional[str] = None
     consensus: Optional[Dict] = None
+    # --box-ligand/--box-from-het: the reference ligand (set with the
+    # receptor) and the manifest's "box" entry (set with the box).
+    reference: Optional["ligand_box.ReferenceBox"] = None
+    box: Optional[Dict] = None
+    # --replicates N > 1: replicate_summary.json (seeds, spread, Spearman rho).
+    replicates: Optional[Dict] = None
     docking_failures: Optional[Dict] = None
     failures: Optional[Dict] = None
 
@@ -96,6 +106,12 @@ class RunState:
                 docking._engine_identity(path) for path, _ in self.engine.docking_engines()]
         if self.consensus is not None:
             extra["consensus"] = self.consensus
+        if self.box is not None:
+            # --box-ligand/--box-from-het: reference, rule, center in both frames.
+            extra["box"] = self.box
+        if self.replicates is not None:
+            # --replicates N > 1: seeds, median SD, Spearman rho of replicates 0/1.
+            extra["replicates"] = self.replicates
         if self.flexible_residues is not None:
             # The residues docked as flexible side chains ([] = rigid).
             extra["flexible_residues"] = list(self.flexible_residues)
@@ -129,7 +145,9 @@ class DockingResults:
 
 def uses_fpocket(args) -> bool:
     """True when the run detects pockets with fpocket: not with --no-fpocket,
-    and not when --grid-center and --grid-size give the whole box."""
+    and not when --grid-center and --grid-size give the whole box. With
+    --box-ligand/--box-from-het fpocket only reports which pocket holds the
+    reference ligand (--no-fpocket skips that)."""
     return not (args.no_fpocket
                 or (args.grid_center is not None and args.grid_size is not None))
 
@@ -244,10 +262,37 @@ def prepare_ligands(args, state: RunState) -> List[str]:
 # Stage 2: receptor, box, kept HETATM residues, flexible side chains
 # ---------------------------------------------------------------------------
 
+def reference_box(args) -> Tuple[Optional["ligand_box.ReferenceBox"], str]:
+    """(ReferenceBox or None, receptor PDB to prepare). --box-from-het: the
+    group is written alone to reference_ligand.pdb and the receptor is
+    prepared from a copy without it (receptor_no_reference.pdb), so no later
+    step (--keep-hetero, --detect-cofactors, ...) can bring it back."""
+    if args.box_ligand:
+        return ligand_box.box_from_ligand_file(
+            args.box_ligand, args.padding, defaults.LIGAND_BOX_MIN_SIZE), args.receptor
+    if not args.box_from_het:
+        return None, args.receptor
+    reference = ligand_box.box_from_het(args.receptor, args.box_from_het, args.padding,
+                                        defaults.LIGAND_BOX_MIN_SIZE)
+    stripped = os.path.join(args.output, outputs.RECEPTOR_NO_REFERENCE_PDB)
+    removed = ligand_box.write_receptor_without_group(args.receptor, stripped,
+                                                      reference.group)
+    ligand_box.write_reference_pdb(os.path.join(args.output, outputs.REFERENCE_LIGAND_PDB),
+                                   args.receptor, reference.group)
+    logger.info(f"[*] --box-from-het {reference.reference}: removed its {removed} records "
+                f"from the receptor ({outputs.RECEPTOR_NO_REFERENCE_PDB}); it is not part "
+                "of the receptor, also with --keep-hetero")
+    return reference, stripped
+
+
 def prepare_receptor(args, state: RunState) -> "protein.ProteinPreparation":
-    """[2/5] Chain selection, cleaning and protonation of the receptor."""
+    """[2/5] Chain selection, cleaning and protonation of the receptor (with
+    --box-from-het, of the receptor without the reference group; the
+    reference ligand is recorded in ``state.reference``)."""
     logger.info("[2/5] Receptor preparation and docking box")
-    protein_prep = protein.ProteinPreparation(args.receptor, args.output, seed=args.seed)
+    reference, receptor_input = reference_box(args)
+    state.reference = reference
+    protein_prep = protein.ProteinPreparation(receptor_input, args.output, seed=args.seed)
     state.protein = protein_prep
     protein_prep.validate()
 
@@ -256,11 +301,86 @@ def prepare_receptor(args, state: RunState) -> "protein.ProteinPreparation":
     return protein_prep
 
 
-def docking_box(args, protein_prep: "protein.ProteinPreparation") -> Box:
+def _reference_pockets(protein_prep: "protein.ProteinPreparation",
+                       reference: "ligand_box.ReferenceBox") -> Dict:
+    """Run fpocket on the prepared receptor only to report which pocket
+    holds the reference ligand (pocket_summary.csv, manifest). A failing
+    fpocket does not stop the run: the box does not depend on it."""
+    try:
+        target = protein_prep.pdb_clean
+        pockets = fpocket.rank_pockets(fpocket.collect_pockets(
+            fpocket.run_fpocket(target), target))
+        fpocket.write_pocket_summary(protein_prep.pocket_summary_file, pockets)
+    except RuntimeError as e:
+        logger.warning(f"[!] fpocket (run to compare with the reference ligand) failed: {e}")
+        return {"error": str(e)}
+    rows = ligand_box.pocket_overlaps(list(reference.coords), pockets, reference.center)
+    summary = ligand_box.fpocket_summary(rows)
+    best, top = summary["best_overlapping_pocket"], summary["top_ranked_pocket"]
+    if best is None:
+        logger.warning(f"[!] No fpocket pocket overlaps the reference ligand (fpocket's "
+                       f"top pocket: pocket{top['pocket']})")
+    elif summary["top_pocket_contains_reference"]:
+        logger.info(f"[*] fpocket's top pocket (pocket{top['pocket']}) holds "
+                    f"{best['overlap_fraction']:.0%} of the reference ligand")
+    else:
+        logger.warning(
+            f"[!] The reference ligand is in pocket{best['pocket']} (fpocket rank "
+            f"{best['rank']}, {best['overlap_fraction']:.0%} of its heavy atoms), not in "
+            f"fpocket's top pocket{top['pocket']}: an fpocket-selected box would have "
+            "missed this site")
+    return summary
+
+
+def _reference_ligand_box(args, reference: "ligand_box.ReferenceBox",
+                          protein_prep: "protein.ProteinPreparation") -> Tuple[Box, Dict]:
+    """--box-ligand/--box-from-het: the box (docking frame) around the
+    reference ligand, with its checks and log lines. Returns (box, details
+    for the manifest's "box" entry: receptor contact and fpocket report)."""
+    offset = protein_prep.frame_offset()
+    for line in reference.log_lines(offset):
+        logger.info(line)
+    xs, ys, zs = pdb_records._heavy_atom_coords(protein_prep.pdb_clean)
+    receptor_atoms = list(zip(xs, ys, zs))
+    if not ligand_box.points_in_box(receptor_atoms, reference.center, reference.size):
+        raise ValueError(
+            f"The box around the reference ligand ({reference.describe()}) contains no "
+            "receptor atom of the docked chain(s): is the ligand in the receptor PDB's "
+            "frame, and is its site in the chains selected with --chain?")
+    contact = ligand_box.min_distance(list(reference.coords), receptor_atoms)
+    if contact > ligand_box.CONTACT_WARN_DISTANCE:
+        logger.warning(
+            f"[!] The reference ligand is {contact:.1f} A from the nearest receptor heavy "
+            f"atom (> {ligand_box.CONTACT_WARN_DISTANCE:g} A): check that it is in the "
+            "receptor PDB's frame and that --chain selects the chains of its site")
+    if args.box_ligand and args.keep_hetero:
+        same = ligand_box.matching_het_groups(list(reference.coords),
+                                              ligand_box.het_groups(args.receptor))
+        if same:
+            logger.warning(
+                f"[!] The reference ligand occupies the receptor's HETATM group "
+                f"{same[0].spec}, which --keep-hetero keeps in the receptor; use "
+                f"--box-from-het {same[0].spec} to remove it")
+    details = {"receptor_contact": contact,
+               "fpocket": (_reference_pockets(protein_prep, reference)
+                           if uses_fpocket(args) else None)}
+    cx, cy, cz = reference.docking_center(offset)
+    sx, sy, sz = reference.size
+    return (cx, cy, cz, sx, sy, sz), details
+
+
+def docking_box(args, state: RunState, protein_prep: "protein.ProteinPreparation") -> Box:
     """The docking box (docking frame): from fpocket pockets, around the
-    whole receptor (--no-fpocket), and/or --grid-center/--grid-size. Writes
-    grid.conf, grid_box.pml and frame_offset.txt."""
-    if args.no_fpocket:
+    whole receptor (--no-fpocket), around a reference ligand
+    (--box-ligand/--box-from-het, recorded in ``state.box``), and/or
+    --grid-center/--grid-size. Writes grid.conf, grid_box.pml and
+    frame_offset.txt."""
+    reference = state.reference
+    reference_details: Dict = {}
+    if reference is not None:
+        (cx, cy, cz, sx, sy, sz), reference_details = _reference_ligand_box(
+            args, reference, protein_prep)
+    elif args.no_fpocket:
         cx, cy, cz, sx, sy, sz = protein_prep.centroid_grid(padding=args.padding)
         logger.info("[*] Docking box: whole-receptor box (--no-fpocket)")
     elif not uses_fpocket(args):
@@ -271,7 +391,7 @@ def docking_box(args, protein_prep: "protein.ProteinPreparation") -> Box:
         cx, cy, cz, sx, sy, sz = protein_prep.detect_pocket(
             pocket_spec=args.pockets, padding=args.padding)
 
-    if uses_fpocket(args) or args.no_fpocket:
+    if reference is None and (uses_fpocket(args) or args.no_fpocket):
         logger.info(f"[*] Grid center: {cx:.2f}, {cy:.2f}, {cz:.2f}")
         logger.info(f"[*] Grid size: {sx:.2f}, {sy:.2f}, {sz:.2f}")
 
@@ -288,6 +408,12 @@ def docking_box(args, protein_prep: "protein.ProteinPreparation") -> Box:
     if args.grid_size:
         sx, sy, sz = docking._parse_grid_triplet(args.grid_size, "grid-size")
         logger.info(f"[*] Grid size overridden: {sx:.2f}, {sy:.2f}, {sz:.2f}")
+    if reference is not None:
+        state.box = reference.manifest(
+            protein_prep.frame_offset(),
+            grid_size_override=(sx, sy, sz) if args.grid_size else None,
+            fpocket=reference_details.get("fpocket"),
+            receptor_contact=reference_details.get("receptor_contact"))
 
     low, high = TYPICAL_GRID_SIZE_RANGE
     for axis, size in (("x", sx), ("y", sy), ("z", sz)):
@@ -482,10 +608,27 @@ def dock(args, state: RunState, ligands: List[str],
         scores, checkpoint, metrics_dict = docking.dock_all(
             receptor, ligands, protein_prep.grid_conf,
             args.output, num_processes=args.processes, resume=not args.no_resume,
-            vina_params=vina_params, flex_file=flex.flex_file, engine=engine)
+            vina_params=vina_params, flex_file=flex.flex_file, engine=engine,
+            replicates=args.replicates)
         state.run_fingerprint = getattr(checkpoint, "fingerprint", None)
+        if args.replicates > 1:
+            state.replicates = replicate_outputs(args, scores, metrics_dict)
     return DockingResults(results=scores, metrics=metrics_dict, checkpoint=checkpoint,
                           receptor=receptor, flex_file=flex.flex_file)
+
+
+def replicate_outputs(args, scores, metrics_dict) -> Dict:
+    """replicate_scores.csv and replicate_summary.json of a run with
+    --replicates N > 1; returns the summary (run_manifest.json)."""
+    summary = replicates.summary(metrics_dict, args.replicates, args.seed)
+    replicates.write_replicate_scores(
+        os.path.join(args.output, outputs.REPLICATE_SCORES_CSV), args.output,
+        sorted(name for name, _ in scores), metrics_dict)
+    replicates.write_summary(os.path.join(args.output, outputs.REPLICATE_SUMMARY_JSON),
+                             summary)
+    for line in replicates.log_lines(summary):
+        (logger.warning if line.startswith("[!]") else logger.info)(line)
+    return summary
 
 
 def consensus_rescoring(args, state: RunState, docked: DockingResults) -> None:
@@ -520,7 +663,10 @@ def cluster_poses(args, docked: DockingResults) -> str:
         logger.info("[*] Performing pose clustering...")
         clusters = report.cluster_poses(
             os.path.join(args.output, outputs.DOCKED_DIR), rmsd_threshold=args.rmsd_threshold,
-            ligands=[name for name, _ in docked.results])
+            ligands=[name for name, _ in docked.results],
+            # --replicates: each ligand's reported (best-replicate) pose file.
+            pose_files=({name: (docked.metrics.get(name) or {}).get("dock_file")
+                         for name, _ in docked.results} if args.replicates > 1 else None))
         clusters_data = {
             ligand: [{'id': c['id'], 'pose_count': len(c['poses'])} for c in ligand_clusters]
             for ligand, ligand_clusters in clusters.items()}
@@ -537,12 +683,13 @@ def cluster_poses(args, docked: DockingResults) -> str:
 # Stage 5: outputs
 # ---------------------------------------------------------------------------
 
-def write_results(args, protein_prep: "protein.ProteinPreparation",
+def write_results(args, state: RunState, protein_prep: "protein.ProteinPreparation",
                   docked: DockingResults) -> Tuple["results.ResultsAnalyzer", bool]:
     """[5/5] ranking.csv, the text reports and (unless --no-html-report) the
     HTML report. Returns (the analyzer that wrote them, HTML report written)."""
     logger.info("[5/5] Saving results")
-    analyzer = results.ResultsAnalyzer(args.output, top_n=args.top_n)
+    analyzer = results.ResultsAnalyzer(args.output, top_n=args.top_n,
+                                       replicates=args.replicates)
     analyzer.save_ranking(docked.results, mode="extended", metrics_dict=docked.metrics)
     analyzer.save_metrics_report(docked.results, docked.metrics)
 
@@ -558,6 +705,12 @@ def write_results(args, protein_prep: "protein.ProteinPreparation",
             "Exhaustiveness": args.exhaustiveness,
             "Seed": args.seed,
         }
+        if args.replicates > 1:
+            report_meta["Replicates"] = (
+                f"{args.replicates} (seeds {args.seed}..{args.seed + args.replicates - 1}; "
+                "best replicate reported)")
+        if state.box is not None:
+            report_meta["Docking box"] = f"reference ligand {state.box['reference']}"
         html_ok = report.generate_html_report(
             os.path.join(args.output, outputs.RANKING_CSV),
             os.path.join(args.output, outputs.DOCKED_DIR),
@@ -608,6 +761,14 @@ def log_summary(args, state: RunState, protein_prep: "protein.ProteinPreparation
                     ("Consensus summary", os.path.join(args.output, outputs.CONSENSUS_SUMMARY_JSON))]
     if args.cluster_poses:
         written.append(("Pose clusters", clusters_file))
+    if args.replicates > 1:
+        written += [("Replicate scores",
+                     os.path.join(args.output, outputs.REPLICATE_SCORES_CSV)),
+                    ("Replicate summary",
+                     os.path.join(args.output, outputs.REPLICATE_SUMMARY_JSON))]
+    if args.box_from_het:
+        written.append(("Reference ligand",
+                        os.path.join(args.output, outputs.REFERENCE_LIGAND_PDB)))
     if args.html_report:
         if html_ok:
             written.append(("HTML report", os.path.join(args.output, outputs.HTML_REPORT)))

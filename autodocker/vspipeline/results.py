@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple
 
 from vspipeline import defaults  # noqa: E402
 from vspipeline import outputs  # noqa: E402
+from vspipeline import replicates as replicates_mod  # noqa: E402
 from vspipeline.docking import (SIMSCORE_RMSD_LB_CUTOFF, SIMSCORE_RMSD_UB_CUTOFF,
                                  Status)
 
@@ -61,9 +62,13 @@ def _minimized_text(meta: Dict) -> str:
 class ResultsAnalyzer:
     """Writes the ranking and the text reports of one screen."""
 
-    def __init__(self, outdir: str, top_n: int = defaults.TOP_N):
+    def __init__(self, outdir: str, top_n: int = defaults.TOP_N,
+                 replicates: int = defaults.REPLICATES):
         self.outdir = outdir
         self.top_n = top_n
+        # --replicates N > 1: ranking.csv gets the replicate columns and
+        # Top_hits.txt a replicate line (N = 1 leaves both unchanged).
+        self.replicates = replicates
         self.results_file = os.path.join(outdir, outputs.RESULTS_FULL_TXT)
         self.top_hits_file = os.path.join(outdir, outputs.TOP_HITS_TXT)
         self.csv_file = os.path.join(outdir, outputs.RANKING_CSV)
@@ -145,10 +150,14 @@ class ResultsAnalyzer:
             with open(self.csv_file, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 if metrics_dict:
-                    writer.writerow(outputs.RANKING_COLUMNS)
+                    extra_columns = (outputs.RANKING_REPLICATE_COLUMNS
+                                     if self.replicates > 1 else ())
+                    writer.writerow(outputs.RANKING_COLUMNS + extra_columns)
                     for lig, status, affinity in rows:
                         metrics = metrics_dict.get(lig, {})
                         meta = self.metadata.get(lig, {})
+                        extra = (replicates_mod.ranking_values(metrics)
+                                 if extra_columns else [])
                         writer.writerow([
                             lig, self._affinity_csv(status, affinity),
                             _blank_if_none(metrics.get("simscore")),
@@ -162,7 +171,7 @@ class ResultsAnalyzer:
                             status.value,
                             metrics.get("engine") or metrics.get("vina_tool", ""),
                             _minimized_text(meta),
-                        ])
+                        ] + extra)
                 else:
                     writer.writerow([outputs.COL_LIGAND, outputs.COL_AFFINITY, outputs.COL_STATUS])
                     for lig, status, affinity in rows:
@@ -253,10 +262,19 @@ class ResultsAnalyzer:
                         if metrics.get("engine"):
                             f.write(f"   Engine: {metrics['engine']}\n")
                         f.write(f"   Docked file: {self._dock_file(name, metrics)}\n")
+                        replicate_line = replicates_mod.top_hits_line(metrics)
+                        if replicate_line:
+                            f.write(f"   {replicate_line}\n")
 
                     f.write(f"   Interpretation: {self._interpretation(status, affinity)}\n")
                     if status is Status.FAILED:
-                        f.write(f"   Log: {outputs.DOCKED_DIR}/{name}{outputs.VINA_LOG_SUFFIX}\n")
+                        metrics = (metrics_dict or {}).get(name) or {}
+                        if replicates_mod.has_replicates(metrics):
+                            f.write(f"   Logs: {outputs.DOCKED_DIR}/{name}"
+                                    f"{outputs.REPLICATE_TAG}<k>{outputs.VINA_LOG_SUFFIX}\n")
+                        else:
+                            f.write(f"   Log: {outputs.DOCKED_DIR}/{name}"
+                                    f"{outputs.VINA_LOG_SUFFIX}\n")
 
                 f.write("\n" + "=" * 70 + "\n")
             logger.info(f"[*] Top hits saved: {self.top_hits_file}")

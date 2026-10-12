@@ -33,6 +33,7 @@ from enum import Enum
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 from vspipeline import defaults  # noqa: E402
 from vspipeline import outputs  # noqa: E402
+from vspipeline import replicates as replicates_mod  # noqa: E402
 from vspipeline import tools, utils  # noqa: E402
 from vspipeline.charges import _pdbqt_has_atoms, _pdbqt_has_nonzero_charges  # noqa: E402
 from vspipeline.checkpoint import DockingCheckpoint  # noqa: E402
@@ -900,7 +901,8 @@ def _file_sha256(path: Optional[str]) -> str:
 
 
 def _run_fingerprint(receptor: str, grid_file: str, flex_file: Optional[str],
-                     vina_params: Dict, engine: Optional[EngineConfig] = None) -> str:
+                     vina_params: Dict, engine: Optional[EngineConfig] = None,
+                     replicates: int = 1) -> str:
     """Hash of everything that determines a ligand's docking result apart from
     the ligand itself: receptor and flex files (byte-exact), grid file,
     docking parameters and the primary engine binary (path, SHA-256,
@@ -911,9 +913,13 @@ def _run_fingerprint(receptor: str, grid_file: str, flex_file: Optional[str],
     primary engine produced stays valid whether or not a fallback is
     configured. A result the fallback produced is tagged with the fallback's
     SHA-256 (metrics ``fallback_sha256``) and re-docked on its own when the
-    fallback changes or is turned off (see dock_all)."""
+    fallback changes or is turned off (see dock_all).
+
+    ``replicates`` (--replicates N) is part of the parameters only when N > 1,
+    so the fingerprint of a plain run is unchanged."""
     engine = engine or EngineConfig.from_settings()
-    params = {k: v for k, v in vina_params.items() if k != "threads"}
+    params = replicates_mod.fingerprint_params(
+        {k: v for k, v in vina_params.items() if k != "threads"}, replicates)
     payload = json.dumps({
         "receptor": _file_sha256(receptor),
         "grid": _file_sha256(grid_file),
@@ -1151,7 +1157,8 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
              resume: bool = True,
              vina_params: Optional[Dict] = None,
              flex_file: Optional[str] = None,
-             engine: Optional[EngineConfig] = None
+             engine: Optional[EngineConfig] = None,
+             replicates: int = 1
              ) -> Tuple[List[Tuple[str, Optional[float]]], DockingCheckpoint, Dict]:
     """Dock all ligands with resume and metrics.
 
@@ -1166,6 +1173,12 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
     When no ligand produced any score, an error is logged and every ligand
     is returned as FAILED (the caller writes the outputs and decides the exit
     code).
+
+    ``replicates`` N > 1 docks every ligand N times, replicate k with seed
+    ``vina_params["seed"] + k`` (vspipeline.replicates): every (ligand,
+    replicate) is a job and a checkpoint entry of its own (<name>_rep<k>),
+    and the results and metrics returned are per ligand (best replicate,
+    with the replicate statistics in its metrics).
     """
     engine = engine or EngineConfig.from_settings()
     dock_dir = os.path.join(outdir, outputs.DOCKED_DIR)
@@ -1182,6 +1195,14 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
         )
 
     vina_params = {**_default_vina_params(), **(vina_params or {})}
+    library_names = ligand_names
+    if replicates > 1:
+        # One docking unit per (ligand, replicate): a copy of the ligand named
+        # <name>_rep<k>, so its outputs and checkpoint key carry the replicate.
+        units = replicates_mod.expand_ligands(ligands, replicates, dock_dir)
+        unit_replicate = {utils.ligand_name(path): k for path, k in units}
+        ligands = [path for path, _ in units]
+        ligand_names = [utils.ligand_name(lig) for lig in ligands]
 
     # Each Vina process uses every core by default, so N workers would
     # oversubscribe the CPU N-fold. Split the cores between workers unless
@@ -1192,7 +1213,7 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
     ligand_hashes = {utils.ligand_name(lig): _file_sha256(lig) for lig in ligands}
     checkpoint = DockingCheckpoint(
         outdir, fingerprint=_run_fingerprint(receptor, grid_file, flex_file,
-                                             vina_params, engine),
+                                             vina_params, engine, replicates),
         resume=resume)
 
     # A result of the fallback engine is only valid with the same fallback
@@ -1221,9 +1242,16 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
         checkpoint.completed.pop(utils.ligand_name(lig), None)
 
     min_valid_affinity = float(vina_params['min_valid_affinity'])
-    logger.info(
-        f"[*] Docking {len(ligands_todo)} new ligands "
-        f"({len(ligands) - len(ligands_todo)} cached)")
+    if replicates > 1:
+        logger.info(
+            f"[*] Docking {len(ligands_todo)} new (ligand, replicate) pairs "
+            f"({len(ligands) - len(ligands_todo)} cached): {len(library_names)} ligands x "
+            f"{replicates} replicates, seeds {vina_params['seed']}.."
+            f"{vina_params['seed'] + replicates - 1}")
+    else:
+        logger.info(
+            f"[*] Docking {len(ligands_todo)} new ligands "
+            f"({len(ligands) - len(ligands_todo)} cached)")
     logger.info(f"[*] Vina parameters: exhaustiveness={vina_params['exhaustiveness']}, "
                 f"modes={vina_params['binding_modes']}, "
                 f"range={vina_params['energy_range']} kcal/mol, "
@@ -1272,7 +1300,10 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
     if not ligands_todo:
         logger.info("[*] All ligands already docked (checkpoint)")
     else:
-        jobs = [DockJob(receptor, lig, grid_file, dock_dir, vina_params, flex_file, engine)
+        jobs = [DockJob(receptor, lig, grid_file, dock_dir,
+                        vina_params if replicates <= 1 else replicates_mod.replicate_params(
+                            vina_params, unit_replicate[utils.ligand_name(lig)]),
+                        flex_file, engine)
                 for lig in ligands_todo]
         start_time = time.time()
         total = len(jobs)
@@ -1328,4 +1359,8 @@ def dock_all(receptor: str, ligands: List[str], grid_file: str,
             "[!] All docking attempts failed; no ligand produced a score. Inspect "
             f"{os.path.join(dock_dir, '*' + outputs.VINA_LOG_SUFFIX)} for root causes.")
 
+    if replicates > 1:
+        all_results, metrics_dict = replicates_mod.aggregate(
+            library_names, dict(all_results), metrics_dict, replicates,
+            int(vina_params['seed']))
     return all_results, checkpoint, metrics_dict
