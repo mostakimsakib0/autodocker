@@ -155,18 +155,20 @@ single command and a fixed seed.
 AutoDocker ships reproducible benchmark scripts (`scripts/benchmark_*.py`;
 results in `BENCHMARKS.md`):
 
-1. **Re-docking power.** PDBbind v2016 core-set complexes are re-docked
-   from seeded RDKit start conformers; top-1 and best-of-9 success rates
-   within 2 Å RMSD of the crystal pose: TBD (rerun pending).
+1. **Re-docking power.** 278 of the 285 CASF-2016 (PDBbind v2016) core-set
+   complexes are re-docked from seeded RDKit start conformers (the 7
+   exclusions are listed in `BENCHMARKS.md`): the top-ranked pose is within
+   2 Å RMSD of the crystal pose for 140 (50.4%), the best of nine for 195
+   (70.1%).
 2. **Screening power.** DUD-E enrichment (Mysinger et al., 2012,
-   @mysinger2012dude) on a curated, family-diverse target set (kinases
-   akt1/braf, reductase aldr) with seeded sampling (50 actives + 100
-   decoys per target), bootstrap 95% confidence intervals and one-sided
-   Mann-Whitney U tests. ROC AUC, EF and BEDROC per target: TBD (rerun
-   pending); full per-target results will be in `BENCHMARKS.md`.
+   @mysinger2012dude) on ten targets from six protein families, with boxes
+   from the crystal ligands and a seeded sample of 50 unique active
+   compounds and 500 decoys per target, bootstrap 95% confidence intervals
+   and one-sided Mann-Whitney U tests: ROC AUC 0.64-0.88 (mean 0.743) and
+   EF5% 2.4-7.1 (mean 3.83); per-target results are in `BENCHMARKS.md`.
 3. **No hidden corruption.** The parity benchmark re-runs the logged Vina
-   command and compares every mode, and `ranking.csv` against raw mode 1:
-   TBD (rerun pending).
+   command of 40 re-docked complexes: all 304 mode scores equal raw Vina's,
+   and `ranking.csv` reports the raw mode-1 score in all 40.
 4. **Performance & scalability.** Wall-clock time, peak RSS, and throughput
    are measured as a function of ligand-library size and process count
    (`scripts/benchmark_performance.py`, see `BENCHMARKS.md`).

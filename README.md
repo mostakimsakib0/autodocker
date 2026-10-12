@@ -271,8 +271,13 @@ edited to match), and with `--redock` re-executes the logged Vina commands
 `BENCHMARKS.md` describes the bundled benchmarks: CASF-2016 re-docking from
 seeded RDKit start conformers, DUD-E enrichment (ROC AUC, EF, BEDROC with
 bootstrap confidence intervals) with boxes from the crystal ligands, a
-raw-Vina parity check, and throughput scaling. Results for 2.0.0 are pending;
-every benchmark is reproducible from `scripts/benchmark_*.py`.
+raw-Vina parity check, and throughput scaling. Results for 2.0.0 (GitHub
+Actions): the top-ranked pose is within 2 Å of the crystal pose for 140 of 278
+CASF-2016 complexes (50.4%), ROC AUC is 0.64-0.88 (mean 0.743) over ten DUD-E
+targets, and all 304 pose scores of the parity check equal raw Vina's. The
+comparison with the standard Meeko + Vina workflow and the throughput numbers
+are being added to `BENCHMARKS.md`. Every benchmark is reproducible from
+`scripts/benchmark_*.py`.
 
 ## Requirements
 

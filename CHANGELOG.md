@@ -389,6 +389,16 @@ changes (below) are part of 2.0.0.
 - The performance benchmark runs one Vina thread per process by default,
   computes efficiency against total threads and throughput from
   successfully docked ligands, and records the threads of each run.
+- The baseline (J5, Meeko + Vina) failed on some receptors and poses that
+  the standard workflow can handle: DUD-E's names of standard amino acids
+  (LEV, GLZ, ASQ, MEU) are restored before Meeko, which has no template for
+  them (cdk2 and hivpr could not be prepared); residues for which Meeko
+  cannot even build a template (single-atom ions such as Cd and Ni in
+  CASF 3ao4 and 3cj4) are deleted with `-d` when `-x` alone fails, and
+  recorded in `params.json`; poses of macrocycles, which Meeko docks with a
+  ring bond opened and pseudo atoms, are exported with `mk_export.py`
+  before the RMSD (obrms returned infinity, e.g. for 2x00). Meeko's reader
+  still fails on 5c2h, which is reported as a failure.
 
 ### CI
 

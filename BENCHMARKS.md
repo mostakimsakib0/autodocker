@@ -108,18 +108,19 @@ current docking parameters, the AutoDocker and RDKit versions and the
 SHA-256 of the complex's input files (receptor, ligand MOL2/SDF,
 precomputed start conformer).
 
-**Results** (AutoDocker 2.0.0, Vina version as recorded in `summary.json`):
+**Results** (AutoDocker 2.0.0, Vina 1.2.7; GitHub Actions run 38227673333,
+image built at commit 2c1e260, full CASF-2016 core set, RDKit start conformers):
 
 | Metric | Value |
 |---|---|
-| Complexes sampled / built / attempted / evaluated | TBD (rerun with 2.0.0) |
-| Excluded complexes (with reasons) | TBD (rerun with 2.0.0) |
-| Top-1 success, over evaluated complexes | TBD (rerun with 2.0.0) |
-| Top-1 success, over attempted complexes (failures count as misses) | TBD (rerun with 2.0.0) |
-| Best-of-9 success, over evaluated / attempted | TBD (rerun with 2.0.0) |
-| Median top-1 RMSD | TBD (rerun with 2.0.0) |
-| Median best-of-9 RMSD | TBD (rerun with 2.0.0) |
-| Top-1 success with `--start-conformer crystal` (comparison) | TBD (rerun with 2.0.0) |
+| Complexes in the core set / built / attempted / evaluated | 285 / 282 / 278 / 278 |
+| Excluded complexes (with reasons) | 7: 1a30, 3bv9, 3uri (peptide ligands, not built); 2xys, 4ih7, 3gr2, 3n86 (no start conformer with the crystal InChIKey from the core-set SMILES) |
+| Top-1 success, over evaluated complexes | 140 / 278 (50.4 %) |
+| Top-1 success, over attempted complexes (failures count as misses) | 140 / 278 (50.4 %; no docking or RMSD failure) |
+| Best-of-9 success, over evaluated / attempted | 195 / 278 (70.1 %) / same |
+| Median top-1 RMSD | 1.97 Å |
+| Median best-of-9 RMSD | 1.21 Å |
+| Top-1 success with `--start-conformer crystal` (comparison; seeded 40-complex sample) | 27 / 40 (67.5 %); best-of-9 32 / 40 (80.0 %); median top-1 RMSD 0.90 Å |
 
 Files: `results.csv` (per complex: status, ranking.csv affinity, mode-1
 affinity, top-1/best RMSD, RMSD of every mode, reason for any exclusion) and
@@ -175,18 +176,22 @@ Also reported:
 Primary columns: AUC and EF5%. EF1% and BEDROC (†) are secondary, see the
 caveats above.
 
+AutoDocker 2.0.0, GitHub Actions run 38227673333 (image built at commit
+2c1e260), crystal-ligand boxes. Mean over the ten targets: ROC AUC 0.743,
+EF5% 3.83.
+
 | Target | Family | N (failed act./dec.) | AUC (95 % CI) | EF5% (max) | EF1% (max) † | BEDROC † | p (M-W, one-sided) |
 |---|---|---|---|---|---|---|---|
-| akt1 | kinase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
-| braf | kinase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
-| cdk2 | kinase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
-| egfr | kinase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
-| fa10 | serine protease | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
-| hivpr | aspartic protease | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
-| andr | nuclear receptor | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
-| aldr | reductase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
-| hmdh | reductase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
-| aces | esterase | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
+| akt1 | kinase | 50 + 500 (0/0) | 0.738 (0.668–0.800) | 2.95 (11.0) | 3.67 (11.0) | 0.308 | 1.3e-8 |
+| braf | kinase | 50 + 500 (0/0) | 0.883 (0.837–0.921) | 7.07 (11.0) | 7.33 (11.0) | 0.682 | 2.1e-19 |
+| cdk2 | kinase | 50 + 500 (0/0) | 0.717 (0.641–0.793) | 3.54 (11.0) | 7.33 (11.0) | 0.534 | 2.1e-7 |
+| egfr | kinase | 50 + 500 (0/0) | 0.638 (0.558–0.715) | 2.36 (11.0) | 3.67 (11.0) | 0.360 | 6.4e-4 |
+| fa10 | serine protease | 50 + 500 (0/0) | 0.840 (0.786–0.890) | 4.71 (11.0) | 7.33 (11.0) | 0.594 | 9.8e-16 |
+| hivpr | aspartic protease | 50 + 500 (0/0) | 0.653 (0.572–0.734) | 2.36 (11.0) | 0.00 (11.0) | 0.079 | 1.7e-4 |
+| andr | nuclear receptor | 50 + 500 (0/0) | 0.657 (0.564–0.754) | 4.71 (11.0) | 7.33 (11.0) | 0.676 | 1.2e-4 |
+| aldr | reductase | 50 + 500 (0/0) | 0.760 (0.693–0.824) | 3.14 (11.0) | 5.50 (11.0) | 0.508 | 6.9e-10 |
+| hmdh | reductase | 50 + 500 (0/0) | 0.802 (0.743–0.861) | 2.75 (11.0) | 3.67 (11.0) | 0.340 | 8.9e-13 |
+| aces | esterase | 50 + 500 (0/0) | 0.743 (0.671–0.813) | 4.71 (11.0) | 9.17 (11.0) | 0.646 | 6.9e-9 |
 
 Files: `enrichment.csv` (one row per target, all metrics and CIs, DUD-E entry
 and compound counts), `<target>/metrics.csv` (ranked ligands incl. failures),
@@ -221,11 +226,11 @@ binary's `--version` is stored in `summary.json`.
 
 | Metric | Value |
 |---|---|
-| Complexes checked / passed | TBD (rerun with 2.0.0) |
-| Modes compared / matched | TBD (rerun with 2.0.0) |
-| ranking.csv equals raw mode 1 | TBD (rerun with 2.0.0) |
-| Output files byte-identical | TBD (rerun with 2.0.0) |
-| Vina binary and version | TBD (rerun with 2.0.0) |
+| Complexes checked / passed | 40 / 40 (the seeded 40-complex sample; run 38227673333) |
+| Modes compared / matched | 304 / 304 |
+| ranking.csv equals raw mode 1 | 40 / 40 (numerically and as text) |
+| Output files byte-identical | 40 / 40 |
+| Vina binary and version | `/usr/local/bin/vina`, AutoDock Vina v1.2.7 (the image's binary) |
 
 Files: `parity.csv`, `summary.json`.
 
@@ -252,14 +257,12 @@ total threads at p = 1), i.e. speedup / p with one thread per process
 (None when a cell's thread count is unknown). `summary.json` records the
 logical and physical core counts, CPU model, Vina and AutoDocker versions.
 
-**Results:**
+**Results** (the paper's run: `--sizes 10,50`, laptop with the image of run 38227673333):
 
 | Size | p=1 | p=2 | p=4 | p=8 |
 |---|---|---|---|---|
 | 10 | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
-| 25 | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
 | 50 | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
-| 100 | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
 
 (each cell: median wall time [min–max], throughput, speedup vs. p=1)
 
@@ -282,12 +285,12 @@ and docking settings?
 
 | Step | Baseline | AutoDocker (J1/J2) |
 |---|---|---|
-| Receptor | blank PDB element columns filled from atom names; `reduce -Trim`; `reduce -BUILD`; `mk_prepare_receptor.py -i receptorH.pdb -o receptor -p` (re-run with `-x` only if residues match no Meeko template; recorded) | `runner.py` receptor preparation |
+| Receptor | blank PDB element columns filled from atom names; DUD-E's names of standard amino acids restored (LEV, GLZ, ASQ, MEU → LEU, GLY, ASP, MET); `reduce -Trim`; `reduce -BUILD`; `mk_prepare_receptor.py -i receptorH.pdb -o receptor -p` (re-run with `-x` only if residues match no Meeko template, and with `-d IDS -x` if Meeko cannot build a template for some residues, e.g. single-atom Cd or Ni ions; deletions recorded) | `runner.py` receptor preparation |
 | Ligand (J1) | the same start conformer (`_benchlib.rdkit_start_conformer`, seeded ETKDGv3 + MMFF, InChIKey checked; `--start-conformer crystal`: `{pdbid}_ligand.sdf`) as SDF with explicit H; `mk_prepare_ligand.py` | same start conformer, `runner.py` ligand preparation |
 | Ligand (J2) | the same DUD-E compound and entry (`--ligands-from` the J2 outdir reads its `<target>/ligands.csv`), read by RDKit with its hydrogens; `mk_prepare_ligand.py` | Open Babel MOL2 → PDBQT |
 | Box | crystal ligand, centroid, edge max(22.5, extent + 12) Å | same |
 | Docking | raw `vina` 1.2.7, `--seed 42`, J1: exhaustiveness 8, 9 modes, energy range 3; J2: exhaustiveness 4, 1 mode, energy range 1; `--cpu 1` | same settings via `runner.py` |
-| Metrics | `benchmark_redock.mode_rmsds`/`summarize`; `benchmark_enrichment.compute_stats`/`save_tables` | same code |
+| Metrics | `benchmark_redock.mode_rmsds`/`summarize` (poses with Meeko's macrocycle pseudo atoms G*/CG* are first exported with `mk_export.py`, which closes the ring); `benchmark_enrichment.compute_stats`/`save_tables` | same code |
 
 Poses stay in the input frame (the crystal MOL2 is the RMSD reference as is).
 The outputs have the J1/J2 schema (`results.csv` + `summary.json`;
@@ -327,11 +330,11 @@ reason to `summary.json`.
 
 | Metric | AutoDocker | Baseline (Meeko + Vina) | EasyDock |
 |---|---|---|---|
-| J1 top-1 success (≤ 2 Å) | TBD (rerun with 2.0.0) | TBD | TBD |
-| J1 best-of-N success | TBD (rerun with 2.0.0) | TBD | TBD |
-| J1 median top-1 RMSD | TBD (rerun with 2.0.0) | TBD | TBD |
-| J2 mean ROC AUC (10 targets) | TBD (rerun with 2.0.0) | TBD | TBD |
-| J2 mean EF5% | TBD (rerun with 2.0.0) | TBD | TBD |
+| J1 top-1 success (≤ 2 Å), seeded 40-complex sample | TBD (rerun with 2.0.0) | TBD | TBD |
+| J1 best-of-N success, same sample | TBD (rerun with 2.0.0) | TBD | TBD |
+| J1 median top-1 RMSD, same sample | TBD (rerun with 2.0.0) | TBD | TBD |
+| J2 mean ROC AUC (10 targets) | 0.743 | TBD | — (not run) |
+| J2 mean EF5% | 3.83 | TBD | — (not run) |
 
 Files: as J1/J2, plus `work/<id>/params.json` (box, start conformer,
 receptor preparation incl. deleted residues) and the preparation logs.
