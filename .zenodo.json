@@ -8,12 +8,12 @@
     {
       "name": "Md. Mostakim Ahmed Sakib",
       "orcid": "0009-0001-7176-2016",
-      "affiliation": "Independent researcher"
+      "affiliation": "Dept. of CSE, Manarat International University, Dhaka, Bangladesh"
     },
     {
       "name": "Ahmad Hasan Mubashshir",
       "orcid": "0009-0004-8636-2711",
-      "affiliation": "Independent researcher"
+      "affiliation": "Dept. of CSE, Manarat International University, Dhaka, Bangladesh"
     }
   ],
   "title": "AutoDocker: reproducible, containerized virtual screening with AutoDock Vina",
