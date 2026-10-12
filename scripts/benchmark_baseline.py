@@ -10,7 +10,10 @@ and the baseline can be put side by side.
 Preparation chain
 -----------------
   * Receptor : PDB element columns filled from the atom names where blank
-               (DUD-E receptors have none; no other change), then
+               (DUD-E receptors have none) and DUD-E's own names of
+               standard amino acids restored (LEV, GLZ, ASQ, MEU -> LEU,
+               GLY, ASP, MET; Meeko has no template for them and cannot
+               delete them from inside a chain); no other change. Then
                ``reduce -Trim`` (remove hydrogens), ``reduce -BUILD`` (add
                hydrogens, flip Asn/Gln/His) and ``mk_prepare_receptor.py -i
                receptorH.pdb -o receptor -p`` (Meeko, ProDy reader, Gasteiger
@@ -272,9 +275,16 @@ def element_from_name(name):
     return letters[0].upper() if letters else ""
 
 
-def fill_pdb_elements(src, dst):
+# DUD-E's names for standard amino acids in some receptors (cdk2 LEV, hivpr
+# GLZ/ASQ, egfr MEU; the atom names are those of the standard residue).
+DUDE_RESIDUE_NAMES = {"LEV": "LEU", "GLZ": "GLY", "ASQ": "ASP", "MEU": "MET"}
+
+
+def fill_pdb_elements(src, dst, renamed=None):
     """Copy a PDB file, writing the element (columns 77-78) of ATOM/HETATM
-    records that have none. Returns the number of records changed."""
+    records that have none and restoring the standard name of the residues
+    in DUDE_RESIDUE_NAMES. Returns the number of records whose element was
+    filled; ``renamed`` (a dict) receives {old name: records renamed}."""
     changed = 0
     with open(src, encoding="utf-8", errors="replace") as fin, \
             open(dst, "w", encoding="utf-8") as fout:
@@ -284,6 +294,11 @@ def fill_pdb_elements(src, dst):
                 if not body[76:78].strip():
                     body = body[:76] + element_from_name(body[12:16]).rjust(2) + body[78:]
                     changed += 1
+                standard = DUDE_RESIDUE_NAMES.get(body[17:20])
+                if standard:
+                    if renamed is not None:
+                        renamed[body[17:20]] = renamed.get(body[17:20], 0) + 1
+                    body = body[:17] + standard + body[20:]
                 line = body.rstrip() + "\n"
             fout.write(line)
     return changed
@@ -336,7 +351,9 @@ def prepare_receptor(pdb, workdir, tools):
     rec = {"input": os.path.abspath(pdb), "input_sha256": _benchlib.file_sha256(pdb)}
     with open(os.path.join(workdir, "receptor_prep.log"), "w", encoding="utf-8") as log:
         elem = os.path.join(workdir, "receptor_elements.pdb")
-        rec["elements_filled"] = fill_pdb_elements(pdb, elem)
+        renamed = {}
+        rec["elements_filled"] = fill_pdb_elements(pdb, elem, renamed)
+        rec["residues_renamed"] = renamed
         trim = os.path.join(workdir, "receptor_trim.pdb")
         built = os.path.join(workdir, "receptorH.pdb")
         # reduce's exit status is not an error indicator (it is non-zero when

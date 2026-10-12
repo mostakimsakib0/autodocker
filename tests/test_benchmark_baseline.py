@@ -198,6 +198,24 @@ def test_fill_pdb_elements_keeps_existing_ones(tmp_path):
     assert lines[3] == "END"
 
 
+def test_fill_pdb_elements_restores_dude_residue_names(tmp_path):
+    """DUD-E's LEV/GLZ/ASQ/MEU become LEU/GLY/ASP/MET (Meeko has no template
+    for them); other names, including the real TPO, are left alone."""
+    src = tmp_path / "in.pdb"
+    src.write_text(
+        "ATOM    724  N   LEV    83       3.745  34.040   5.822\n"
+        "ATOM    725  CA  GLZ A  27       5.140  33.982   6.264\n"
+        "ATOM    726  CA  ASQ A  29       5.140  33.982   6.264\n"
+        "ATOM    727  SD  MEU   793       5.140  33.982   6.264\n"
+        "ATOM    728  OG1 TPO   308       5.140  33.982   6.264\n", encoding="utf-8")
+    dst = tmp_path / "out.pdb"
+    renamed = {}
+    bb.fill_pdb_elements(str(src), str(dst), renamed)
+    names = [line[17:20] for line in dst.read_text(encoding="utf-8").splitlines()]
+    assert names == ["LEU", "GLY", "ASP", "MET", "TPO"]
+    assert renamed == {"LEV": 1, "GLZ": 1, "ASQ": 1, "MEU": 1}
+
+
 def test_script_interpreter_forms(tmp_path):
     plain = tmp_path / "plain" / "tool.py"
     plain.parent.mkdir()
