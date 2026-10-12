@@ -15,6 +15,9 @@ rm -rf "$ws"
 mkdir -p "$ws"
 cp "$here/1hsg/protein.pdb" "$ws/"
 cp -r "$here/1hsg/ligs" "$ws/"
+# The image runs as dockuser (UID 1000), not as the runner's user: let it
+# write output/ (as .github/smoke/run_smoke.sh does).
+chmod -R a+rwX "$ws"
 
 {
 	echo "uname: $(uname -srm)"
