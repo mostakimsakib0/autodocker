@@ -357,7 +357,15 @@ changes (below) are part of 2.0.0.
 - `scripts/verify_run.py`: checks an output directory without trusting it
   (ranking vs poses vs logs vs manifest, output and input SHA-256, engine
   SHA-256), re-executes the logged Vina commands byte for byte
-  (`--redock`, also for a moved run) and compares two runs.
+  (`--redock`, also for a moved run) and compares two runs. In a 2.0.0
+  manifest a missing `outputs` or `inputs` section, and a logged command
+  without `--seed`, fail. The hashes are checksums, not signatures: an edit
+  with recomputed hashes passes the consistency checks and is caught only by
+  `--redock`, for the ligands it re-docks (`--sample 0` = all), on the CPU
+  architecture of the run (docs/reproducibility.md, "Limits").
+- Documentation: `docs/outputs.md` (every output file, the `ranking.csv`
+  columns and statuses), `docker pull` installation and troubleshooting in
+  `docs/installation.md`, and issue templates for bug and tester reports.
 - `scripts/benchmark_baseline.py` (BENCHMARKS.md J5): the standard Vina
   workflow (reduce + Meeko + raw Vina, optionally EasyDock) on the J1/J2
   complexes with the same boxes, seed and settings.
