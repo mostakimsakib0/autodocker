@@ -6,6 +6,7 @@ at call time. Every external command of the pipeline goes through ``run``
 (the Open Babel calls through ``run_obabel``), so a test can replace
 ``utils.run`` to fake them.
 """
+import hashlib
 import logging
 import os
 import re
@@ -53,6 +54,18 @@ _STDERR_TAIL_LINES = 5
 GASTEIGER_ELEMENTS = frozenset({"H", "D", "C", "N", "O", "F", "CL", "BR", "I", "S", "P"})
 
 _CONVERTED = re.compile(r"(\d+) molecules? converted")
+
+
+def file_sha256(path: str) -> Optional[str]:
+    """SHA-256 (hex) of a file's bytes; None when it cannot be read."""
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except OSError:
+        return None
 
 
 def run(cmd_list: List[str], capture: bool = False,

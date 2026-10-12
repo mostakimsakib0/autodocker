@@ -859,6 +859,7 @@ def _main_locked(args, argv: List[str], started_at: str) -> int:
     try:
         try:
             tool_probes = _probe_tools(args)
+            state.inputs = manifest.run_inputs(args)
             state.openbabel = manifest.check_openbabel(args.seed)
             pipeline.remove_stale_outputs(args.output)
             exit_code = _run_pipeline(args, state)
@@ -906,9 +907,11 @@ def _write_final_manifest(args, argv, tool_probes, started_at, status, exit_code
                           state: pipeline.RunState) -> None:
     manifest_file = os.path.join(args.output, outputs.RUN_MANIFEST_JSON)
     try:
+        extra = state.manifest_entries()
+        # SHA-256 of every output written (verify_run.py checks them).
+        extra["outputs"] = manifest.output_hashes(args.output)
         manifest.write_run_manifest(manifest_file, manifest.build_manifest(
-            args, argv, tool_probes, started_at, status, exit_code, error,
-            state.manifest_entries()))
+            args, argv, tool_probes, started_at, status, exit_code, error, extra))
     except OSError as e:
         logger.warning(f"Could not write {manifest_file}: {e}")
 

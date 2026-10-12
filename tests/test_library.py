@@ -285,9 +285,13 @@ def test_prepare_local_pdbqt_direct(tmp_path):
     lig = indir / "mol1.pdbqt"
     lig.write_text(_LIGAND_PDBQT)
     lm = library.LibraryManager(str(tmp_path), str(indir))
-    assert lm.prepare_local(apply_lipinski=False) == [str(lig)]
+    assert lm.prepare_local(apply_lipinski=False) == [str(tmp_path / "ligands" / "mol1.pdbqt")]
     # The deprecated keyword still works.
-    assert lm.prepare_local(apply_admet=False) == [str(lig)]
+    assert lm.prepare_local(apply_admet=False) == [str(tmp_path / "ligands" / "mol1.pdbqt")]
+    # PDBQT inputs are docked from a byte-identical copy in OUTDIR/ligands.
+    assert (tmp_path / "ligands" / "mol1.pdbqt").read_bytes() == lig.read_bytes()
+    assert lm.metadata["mol1"]["pdbqt"] == os.path.join("ligands", "mol1.pdbqt")
+    assert lm.metadata["mol1"]["source_file"] == str(lig)
 
 
 def test_prepare_local_missing_dir(tmp_path):
@@ -311,7 +315,7 @@ def test_prepare_local_rejects_receptor_style_pdbqt(tmp_path):
     good.write_text(_LIGAND_PDBQT)
     (indir / "c1.pdbqt").write_text(_ATOM)
     lm = library.LibraryManager(str(tmp_path), str(indir))
-    assert lm.prepare_local(apply_lipinski=False) == [str(good)]
+    assert lm.prepare_local(apply_lipinski=False) == [str(tmp_path / "ligands" / "good.pdbqt")]
     assert "ROOT" in library._ligand_pdbqt_problem(str(indir / "c1.pdbqt"))
     assert library._ligand_pdbqt_problem(str(good)) is None
 
@@ -343,7 +347,7 @@ def test_same_name_other_format_is_superseded_not_failed(tmp_path, monkeypatch, 
     lm = library.LibraryManager(str(tmp_path / "out"), str(indir))
     with caplog.at_level(logging.INFO):
         out = lm.prepare_local(apply_lipinski=False)
-    assert out == [str(indir / "a.pdbqt"), str(indir / "b.pdbqt")]
+    assert out == [str(tmp_path / "out" / "ligands" / f"{n}.pdbqt") for n in ("a", "b")]
     assert lm.failed == []
     assert [os.path.basename(p) for p, _ in lm.superseded] == ["a.mol2", "b.mol2"]
     assert "Success: 2/2" in caplog.text
@@ -361,7 +365,7 @@ def test_name_is_reserved_on_first_sight(tmp_path, monkeypatch):
     monkeypatch.setattr(admet.ADMETFilter, "parse_sdf_properties",
                         _custom_props(900.0, 9.0))
     lm = library.LibraryManager(str(tmp_path / "out"), str(indir))
-    assert lm.prepare_local(apply_lipinski=True) == [str(indir / "ok.pdbqt")]
+    assert lm.prepare_local(apply_lipinski=True) == [str(tmp_path / "out" / "ligands" / "ok.pdbqt")]
     assert [os.path.basename(p) for p, _ in lm.failed] == ["lig.sdf"]
     assert "Lipinski" in lm.failed[0][1]
     assert [os.path.basename(p) for p, _ in lm.superseded] == ["lig.mol2"]
@@ -385,7 +389,7 @@ def test_same_name_same_format_in_subdirs_is_a_failure(tmp_path):
     (indir / "a" / "x.pdbqt").write_text(_LIGAND_PDBQT)
     (indir / "b" / "x.pdbqt").write_text(_LIGAND_PDBQT)
     lm = library.LibraryManager(str(tmp_path / "out"), str(indir))
-    assert lm.prepare_local(apply_lipinski=False) == [str(indir / "a" / "x.pdbqt")]
+    assert lm.prepare_local(apply_lipinski=False) == [str(tmp_path / "out" / "ligands" / "x.pdbqt")]
     assert "Duplicate ligand name" in lm.failed[0][1]
 
 
@@ -398,7 +402,7 @@ def test_output_dir_inside_ligand_dir_is_skipped(tmp_path, caplog):
     (outdir / "docked" / "y.pdbqt").write_text(_LIGAND_PDBQT)  # a previous run
     lm = library.LibraryManager(str(outdir), str(indir))
     with caplog.at_level(logging.WARNING):
-        assert lm.prepare_local(apply_lipinski=False) == [str(indir / "x.pdbqt")]
+        assert lm.prepare_local(apply_lipinski=False) == [str(outdir / "ligands" / "x.pdbqt")]
     assert "inside the ligand directory" in caplog.text
 
 
@@ -425,7 +429,7 @@ def test_multi_molecule_sdf_rejected(tmp_path, monkeypatch):
     (indir / "ok.pdbqt").write_text(_LIGAND_PDBQT)
     monkeypatch.setattr(utils, "run", _fake_obabel())
     lm = library.LibraryManager(str(tmp_path / "out"), str(indir))
-    assert lm.prepare_local(apply_lipinski=False) == [str(indir / "ok.pdbqt")]
+    assert lm.prepare_local(apply_lipinski=False) == [str(tmp_path / "out" / "ligands" / "ok.pdbqt")]
 
 
 def test_local_sdf_properties_parsed_once(tmp_path, monkeypatch):

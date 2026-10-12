@@ -5,7 +5,6 @@ runner.py writes the manifest at the end of every run that got past option
 validation, whatever its outcome (see runner._main_locked); the entries that
 describe the run's progress come from pipeline.RunState.
 """
-import hashlib
 import json
 import logging
 import math
@@ -18,7 +17,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
-from vspipeline import hydrogens, tools, utils
+from vspipeline import hydrogens, outputs, tools, utils
 from vspipeline.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -39,14 +38,7 @@ def utc_now() -> str:
 
 
 def _sha256(path: str) -> Optional[str]:
-    try:
-        digest = hashlib.sha256()
-        with open(path, "rb") as f:
-            for block in iter(lambda: f.read(1 << 20), b""):
-                digest.update(block)
-        return digest.hexdigest()
-    except OSError:
-        return None
+    return utils.file_sha256(path)
 
 
 def probe_tool(kind: str, path: Optional[str]) -> Dict:
@@ -159,6 +151,42 @@ def _json_safe(value):
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     return value
+
+
+def _file_entry(path: str) -> Dict:
+    return {"path": os.path.abspath(path), "sha256": _sha256(path)}
+
+
+def run_inputs(args) -> Dict:
+    """run_manifest.json "inputs" known before the run starts: the receptor
+    PDB (-r) and the --box-ligand file (paths absolute, SHA-256 of the bytes
+    read). The ligand files are added by the ligand stage
+    (library.LibraryManager.inputs)."""
+    inputs = {"receptor": _file_entry(args.receptor), "ligands": {}}
+    if getattr(args, "box_ligand", None):
+        inputs["box_ligand"] = _file_entry(args.box_ligand)
+    return inputs
+
+
+def output_hashes(outdir: str) -> Dict[str, str]:
+    """run_manifest.json "outputs": {path relative to ``outdir`` ('/'
+    separators): sha256} of outputs.HASHED_OUTPUTS that exist and of every
+    file below outputs.HASHED_OUTPUT_DIRS (hidden files excluded), sorted by
+    path."""
+    found = {}
+    for name in outputs.HASHED_OUTPUTS:
+        path = os.path.join(outdir, name)
+        if os.path.isfile(path):
+            found[name] = _sha256(path)
+    for top in outputs.HASHED_OUTPUT_DIRS:
+        for root, dirs, files in os.walk(os.path.join(outdir, top)):
+            dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+            for name in sorted(files):
+                if name.startswith("."):
+                    continue
+                path = os.path.join(root, name)
+                found[os.path.relpath(path, outdir).replace(os.sep, "/")] = _sha256(path)
+    return dict(sorted(found.items()))
 
 
 def write_run_manifest(path: str, manifest: Dict) -> None:

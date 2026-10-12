@@ -10,6 +10,7 @@ import pytest
 
 import runner
 from vspipeline import report as report_mod
+from vspipeline import manifest as manifest_mod
 from vspipeline import protein, tools, utils
 pytestmark = pytest.mark.skipif(
     not (shutil.which("vina") and shutil.which("obabel")),
@@ -49,6 +50,22 @@ def test_main_end_to_end_writes_manifest(tmp_path, protein_pdb, caplog):
     assert (out / "ranking.csv").exists()
     meta = json.loads((out / "ligand_metadata.json").read_text())
     assert meta["ethanol"]["minimized"] is True
+    # Input and output hashes (scripts/verify_run.py checks them).
+    assert manifest["inputs"]["receptor"] == {
+        "path": os.path.abspath(protein_pdb), "sha256": manifest_mod._sha256(protein_pdb)}
+    lig = manifest["inputs"]["ligands"]["ethanol"]
+    assert lig["path"] == str(ligs / "ethanol.sdf") and len(lig["sha256"]) == 64
+    assert "box_ligand" not in manifest["inputs"]
+    hashed = manifest["outputs"]
+    assert list(hashed) == sorted(hashed)
+    for rel in ("ranking.csv", "receptor.pdbqt", "protein_clean.pdb", "grid.conf",
+                "ligand_metadata.json", "docked/ethanol_out.pdbqt", "docked/ethanol_vina.log",
+                "ligands/ethanol.pdbqt"):
+        assert hashed[rel] == manifest_mod._sha256(str(out / rel)), rel
+    assert not any(rel.startswith(".") or "/." in rel or rel == "run_manifest.json"
+                   for rel in hashed)
+    log = (out / "docked" / "ethanol_vina.log").read_text()
+    assert f"# Engine: {manifest['tools']['vina']['path']} sha256=" in log
 
 
 # ---------------------------------------------------------------------------

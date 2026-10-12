@@ -80,12 +80,19 @@ class RunState:
     box: Optional[Dict] = None
     # --replicates N > 1: replicate_summary.json (seeds, spread, Spearman rho).
     replicates: Optional[Dict] = None
+    # run_manifest.json "inputs": receptor and --box-ligand (manifest.run_inputs,
+    # hashed when the run starts); the ligands come from ``library``.
+    inputs: Optional[Dict] = None
     docking_failures: Optional[Dict] = None
     failures: Optional[Dict] = None
 
     def manifest_entries(self) -> Dict:
         """The run_manifest.json entries describing this run's progress."""
         extra = {}
+        if self.inputs is not None:
+            ligands = dict(sorted((self.library.inputs if self.library is not None
+                                   else {}).items()))
+            extra["inputs"] = {**self.inputs, "ligands": ligands}
         if self.library is not None:
             extra["ligand_preparation"] = {"failed": len(self.library.failed),
                                            "superseded": len(self.library.superseded)}

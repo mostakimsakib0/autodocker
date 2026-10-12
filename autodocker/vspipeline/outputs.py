@@ -103,3 +103,18 @@ COL_SCORE_MAX = "score_max"
 RANKING_REPLICATE_COLUMNS = (
     COL_N_REPLICATES, COL_SCORE_MEAN, COL_SCORE_SD, COL_SCORE_MIN, COL_SCORE_MAX,
 )
+
+# Files whose SHA-256 run_manifest.json records under "outputs" (those that
+# exist when the manifest is written), plus every file below
+# HASHED_OUTPUT_DIRS (hidden files excluded). Not hashed: the manifest
+# itself, pocket_summary.csv (fpocket's Monte-Carlo volume differs run to
+# run), fpocket's own FPOCKET_OUT_DIR and the checkpoint/lock files.
+HASHED_OUTPUTS = (
+    RANKING_CSV, TOP_HITS_TXT, METRICS_TXT, RESULTS_FULL_TXT, HTML_REPORT,
+    POSE_CLUSTERS_JSON, CONSENSUS_RANKING_CSV, CONSENSUS_SUMMARY_JSON,
+    REPLICATE_SCORES_CSV, REPLICATE_SUMMARY_JSON,
+    RECEPTOR_PDBQT, PROTEIN_CLEAN_PDB, RIGID_RECEPTOR_PDBQT, FLEX_PDBQT,
+    RECEPTOR_NO_REFERENCE_PDB, REFERENCE_LIGAND_PDB,
+    GRID_CONF, GRID_BOX_PML, FRAME_OFFSET_TXT, LIGAND_METADATA_JSON,
+)
+HASHED_OUTPUT_DIRS = (DOCKED_DIR, LIGANDS_DIR, LIGANDS_MINIMIZED_DIR)

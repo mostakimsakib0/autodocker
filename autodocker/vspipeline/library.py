@@ -337,6 +337,10 @@ class LibraryManager:
         # same-name files that were not used (see FORMAT_PRECEDENCE).
         self.failed: List[Tuple[str, str]] = []
         self.superseded: List[Tuple[str, str]] = []
+        # The input file of each ligand (prepared or failed; not superseded
+        # files): {name: {"path", "sha256"[, "source_url"]}}, hashed when it is
+        # read (run_manifest.json "inputs").
+        self.inputs: Dict[str, Dict] = {}
         os.makedirs(self.lib_dir, exist_ok=True)
         os.makedirs(self.minimized_dir, exist_ok=True)
         # Allow overriding the PubChem REST base for tests/mirrors.
@@ -346,7 +350,7 @@ class LibraryManager:
     def _out_relpath(self, path: str) -> str:
         """Path relative to the output directory when it lies inside it (as
         ranking.csv's Docked_File), so metadata does not depend on where the
-        output directory is; absolute otherwise (e.g. a PDBQT used as given)."""
+        output directory is; absolute otherwise (e.g. an input file)."""
         out = os.path.abspath(self.outdir)
         full = os.path.abspath(path)
         if os.path.commonpath([out, full]) == out:
@@ -408,6 +412,7 @@ class LibraryManager:
         downloaded: List[str] = []
         rejected: List[Tuple[str, str]] = []
         self.failed = []
+        self.inputs = {}
         for name in names:
             if len(downloaded) >= limit:
                 logger.info(f"[*] Reached {limit} compounds, stopping download")
@@ -521,6 +526,8 @@ class LibraryManager:
             raise
         except Exception as e:
             raise RuntimeError(f"PubChem SDF download failed ({e})") from e
+        self._record_input(ligand_id, sdf_file,
+                           source_url=f"{self.PUBCHEM_COMPOUND_URL}{cid}")
 
         source, removed = self._largest_fragment("sdf", sdf_file, ligand_id)
         props = None
@@ -547,6 +554,12 @@ class LibraryManager:
             **provenance,
         })
         return pdbqt_file
+
+    def _record_input(self, name: str, path: str, **extra) -> None:
+        """Record ``path`` (absolute) and its SHA-256 as the input of ligand
+        ``name`` (see ``self.inputs``)."""
+        self.inputs[name] = {"path": os.path.abspath(path),
+                             "sha256": utils.file_sha256(path), **extra}
 
     def _save_metadata(self):
         try:
@@ -983,7 +996,11 @@ class LibraryManager:
 
         coordinates, coordinates_method = "input", None
         if fmt == "pdbqt":
-            out = path
+            # Docked from a byte-identical copy in the output directory, so
+            # the run is self-contained (logs, metadata and verify_run.py
+            # --redock of a moved run only refer to files inside it).
+            if not (os.path.exists(out) and os.path.samefile(path, out)):
+                shutil.copyfile(path, out)
         elif _is_2d_input(source):
             # A 2D MOL2/PDB gets 3D coordinates exactly like a 2D SDF.
             title = os.path.basename(path) if fmt == "pdb" else None
@@ -1043,6 +1060,7 @@ class LibraryManager:
                         "(a 2D MOL2/PDB gets seeded RDKit 3D coordinates)")
 
         self.failed = []
+        self.inputs = {}
         self.superseded = []
         out_files: List[str] = []
         owners: Dict[str, Tuple[str, str]] = {}  # stem -> (format, path)
@@ -1057,6 +1075,7 @@ class LibraryManager:
                     self.superseded.append((path, owner))
                 continue
             owners[stem] = (fmt, path)
+            self._record_input(stem, path)
             try:
                 out_files.append(self._prepare_local_file(fmt, path, apply_lipinski))
             except (LigandRejected, RuntimeError, OSError, ValueError) as e:
