@@ -301,6 +301,21 @@ def test_box_from_het_mk1_end_to_end(tmp_path, caplog):
         assert (out / "pocket_summary.csv").exists()
 
 
+def test_box_from_het_without_fpocket_installed(tmp_path, caplog):
+    """--box-from-het without fpocket on PATH: the box comes from the
+    reference, so the run goes ahead and only the pocket report is skipped."""
+    tools.configure(fpocket=None)
+    out = tmp_path / "out"
+    with caplog.at_level(logging.INFO):
+        code = _main(_site_argv(tmp_path, out) + ["--box-from-het", "MK1"])
+    assert code == runner.EXIT_OK
+    assert "fpocket not found: the pocket report" in caplog.text
+    m = _manifest(out)
+    assert m["box"]["source"] == "het_group" and m["box"]["fpocket"] is None
+    assert "fpocket" not in m["tools"]
+    assert not (out / "pocket_summary.csv").exists()
+
+
 def test_box_ligand_with_grid_size_and_no_fpocket(tmp_path, caplog):
     """--box-ligand mk1.sdf --grid-size: the center from the reference, the
     size given; --no-fpocket skips the fpocket report. With --keep-hetero the

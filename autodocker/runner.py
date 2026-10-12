@@ -289,8 +289,8 @@ def _add_receptor_options(parser: argparse.ArgumentParser) -> None:
                      help="Box around a reference ligand (SDF/MOL/MOL2/PDB/PDBQT, first "
                      "molecule; coordinates in the receptor PDB's frame): centered on its "
                      "heavy atoms' bounding box, each edge max(extent + 2 x --padding, "
-                     f"{defaults.LIGAND_BOX_MIN_SIZE:g}) Angstrom. fpocket then only reports "
-                     "which pocket holds the ligand. Not combinable with --grid-center, "
+                     f"{defaults.LIGAND_BOX_MIN_SIZE:g}) Angstrom. fpocket (when installed) "
+                     "then only reports which pocket holds the ligand. Not combinable with --grid-center, "
                      "--pockets or --box-from-het; --grid-size replaces the size")
     rec.add_argument("--box-from-het", default=None, metavar="RESNAME[:CHAIN[:RESNUM]]",
                      help="As --box-ligand, with the reference ligand taken from a HETATM "
@@ -711,7 +711,7 @@ def _tools_for_run(args) -> Dict[str, Optional[str]]:
             used["vina_fallback"] = found.vina_fallback
     if args.smina_only or args.consensus:
         used["smina"] = found.smina
-    if pipeline.uses_fpocket(args):
+    if pipeline.uses_fpocket(args) and found.fpocket:
         used["fpocket"] = found.fpocket
     return used
 
@@ -811,7 +811,7 @@ def _claim_output_dir(args) -> None:
     EXIT_USAGE when that fails."""
     try:
         _require_tools(smina_only=args.smina_only, consensus=args.consensus,
-                       fpocket=pipeline.uses_fpocket(args))
+                       fpocket=pipeline.needs_fpocket(args))
     except RuntimeError as e:
         logger.error(f"[!] {e}")
         sys.exit(EXIT_USAGE)

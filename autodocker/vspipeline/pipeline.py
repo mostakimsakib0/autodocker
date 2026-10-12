@@ -40,6 +40,7 @@ from vspipeline import (
     replicates,
     report,
     results,
+    tools,
     utils,
 )
 from vspipeline.version import __version__
@@ -157,6 +158,13 @@ def uses_fpocket(args) -> bool:
     reference ligand (--no-fpocket skips that)."""
     return not (args.no_fpocket
                 or (args.grid_center is not None and args.grid_size is not None))
+
+
+def needs_fpocket(args) -> bool:
+    """True when fpocket must be installed because it gives the box. With
+    --box-ligand/--box-from-het it only adds the pocket report, which is
+    skipped when fpocket is not found."""
+    return uses_fpocket(args) and not (args.box_ligand or args.box_from_het)
 
 
 def flexible_residue_keys(value: str) -> List[str]:
@@ -368,9 +376,14 @@ def _reference_ligand_box(args, reference: "ligand_box.ReferenceBox",
                 f"[!] The reference ligand occupies the receptor's HETATM group "
                 f"{same[0].spec}, which --keep-hetero keeps in the receptor; use "
                 f"--box-from-het {same[0].spec} to remove it")
-    details = {"receptor_contact": contact,
-               "fpocket": (_reference_pockets(protein_prep, reference)
-                           if uses_fpocket(args) else None)}
+    pockets = None
+    if uses_fpocket(args):
+        if tools.settings().fpocket:
+            pockets = _reference_pockets(protein_prep, reference)
+        else:
+            logger.info("[*] fpocket not found: the pocket report of the reference "
+                        "ligand is skipped (the box does not depend on it)")
+    details = {"receptor_contact": contact, "fpocket": pockets}
     cx, cy, cz = reference.docking_center(offset)
     sx, sy, sz = reference.size
     return (cx, cy, cz, sx, sy, sz), details
