@@ -262,6 +262,71 @@ logical and physical core counts, CPU model, Vina and AutoDocker versions.
 
 Files: `runs.csv` (every run), `performance.csv` (per cell), `summary.json`.
 
+## J5 — Baseline: the standard Vina workflow
+
+**Question.** Is AutoDocker's preparation as good as the workflow the
+AutoDock Vina documentation recommends, on the same complexes, boxes, seed
+and docking settings?
+
+**Protocol.** `scripts/benchmark_baseline.py` re-runs J1 (`redock`) and J2
+(`enrichment`) without AutoDocker:
+
+| Step | Baseline | AutoDocker (J1/J2) |
+|---|---|---|
+| Receptor | blank PDB element columns filled from atom names; `reduce -Trim`; `reduce -BUILD`; `mk_prepare_receptor.py -i receptorH.pdb -o receptor -p` (re-run with `-x` only if residues match no Meeko template; recorded) | `runner.py` receptor preparation |
+| Ligand (J1) | the same start conformer (`_benchlib.rdkit_start_conformer`, seeded ETKDGv3 + MMFF, InChIKey checked; `--start-conformer crystal`: `{pdbid}_ligand.sdf`) as SDF with explicit H; `mk_prepare_ligand.py` | same start conformer, `runner.py` ligand preparation |
+| Ligand (J2) | the same DUD-E compound and entry (`--ligands-from` the J2 outdir reads its `<target>/ligands.csv`), read by RDKit with its hydrogens; `mk_prepare_ligand.py` | Open Babel MOL2 → PDBQT |
+| Box | crystal ligand, centroid, edge max(22.5, extent + 12) Å | same |
+| Docking | raw `vina` 1.2.7, `--seed 42`, J1: exhaustiveness 8, 9 modes, energy range 3; J2: exhaustiveness 4, 1 mode, energy range 1; `--cpu 1` | same settings via `runner.py` |
+| Metrics | `benchmark_redock.mode_rmsds`/`summarize`; `benchmark_enrichment.compute_stats`/`save_tables` | same code |
+
+Poses stay in the input frame (the crystal MOL2 is the RMSD reference as is).
+The outputs have the J1/J2 schema (`results.csv` + `summary.json`;
+`enrichment.csv` + `summary.json` + `<target>/{ligands,metrics,ranking}.csv`),
+so the two result sets can be joined column by column. Every Vina command is
+logged as the first line of `<name>_vina.log`.
+
+Tool versions the script was validated with (each run records its own in `summary.json` →
+`protocol.tools`): reduce 4.15.250408 (`reduce-binary` 4.15.0 wheel), Meeko
+0.8.0 with RDKit 2026.09.1, NumPy 2.5.4, SciPy 1.18.1, gemmi 0.7.5, ProDy
+2.6.1 (Meeko's own virtual environment), Vina 1.2.7, Open Babel 3.2.1, RDKit
+2023.09.3 for the start conformers (the J1 stack). Meeko needs a recent RDKit
+(`rdDetermineBonds`), so it is installed in its own environment:
+
+```bash
+python3 -m venv /opt/baseline && /opt/baseline/bin/pip install \
+    meeko==0.8.0 rdkit==2026.9.1 gemmi==0.7.5 scipy prody reduce-binary==4.15.0
+python3 scripts/benchmark_baseline.py redock --data-dir data/casf2016_rcsb \
+    --sample 40 --sample-seed 42 --meeko-bin /opt/baseline/bin --vina-bin /usr/local/bin/vina \
+    --outdir benchmarks/results/baseline_redock --processes 8 --seed 42
+python3 scripts/benchmark_baseline.py enrichment --workdir data/dude \
+    --targets akt1,braf,cdk2,egfr,fa10,hivpr,andr,aldr,hmdh,aces \
+    --ligands-from benchmarks/results/enrichment --meeko-bin /opt/baseline/bin \
+    --outdir benchmarks/results/baseline_enrichment --processes 8 --seed 42
+```
+
+`--engine easydock` docks the same Meeko receptor and start ligands with
+EasyDock 1.3.1 (`pip install easydock` plus rdkit, meeko, gemmi, vina,
+dask, distributed, scikit-learn, prody in its own environment;
+`--easydock-bin`). EasyDock prepares the ligand with Meeko itself, keeps 3D
+input coordinates, and docks with the Vina 1.2.7 Python API, searching 50
+poses and keeping `--binding-modes` (no energy range). When `easydock` is
+missing or does not start, the script exits with status 3 and writes the
+reason to `summary.json`.
+
+**Results:**
+
+| Metric | AutoDocker | Baseline (Meeko + Vina) | EasyDock |
+|---|---|---|---|
+| J1 top-1 success (≤ 2 Å) | TBD (rerun with 2.0.0) | TBD | TBD |
+| J1 best-of-N success | TBD (rerun with 2.0.0) | TBD | TBD |
+| J1 median top-1 RMSD | TBD (rerun with 2.0.0) | TBD | TBD |
+| J2 mean ROC AUC (10 targets) | TBD (rerun with 2.0.0) | TBD | TBD |
+| J2 mean EF5% | TBD (rerun with 2.0.0) | TBD | TBD |
+
+Files: as J1/J2, plus `work/<id>/params.json` (box, start conformer,
+receptor preparation incl. deleted residues) and the preparation logs.
+
 ## Environment
 
 Record the environment from the `summary.json` files of the rerun: AutoDocker
