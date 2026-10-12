@@ -1,16 +1,12 @@
 """Failure-mode and edge-case tests for the autodocker pipeline."""
 
-import argparse
 import os
 import sys
 
 import pytest
 
 import runner
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
-
-
+from vspipeline import charges, docking, protein, utils
 # ---------------------------------------------------------------------------
 # Versioning
 # ---------------------------------------------------------------------------
@@ -30,21 +26,21 @@ def test_version_attribute_and_flag(capsys, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_tiny_receptor_rejected(tiny_protein_pdb, outdir):
-    prep = runner.ProteinPreparation(tiny_protein_pdb, outdir)
+    prep = protein.ProteinPreparation(tiny_protein_pdb, outdir)
     with pytest.raises(ValueError, match="need >= 100"):
         prep.validate()
 
 
 def test_empty_pdbqt_has_no_atoms(empty_pdbqt):
-    assert runner._pdbqt_has_atoms(empty_pdbqt) is False
+    assert charges._pdbqt_has_atoms(empty_pdbqt) is False
 
 
 def test_zero_charge_pdbqt_detected(charged_pdbqt, empty_pdbqt):
-    assert runner._ensure_pdbqt_has_charges(charged_pdbqt) is True
+    assert charges._ensure_pdbqt_has_charges(charged_pdbqt) is True
 
 
 def test_charge_check_empty_file(empty_pdbqt):
-    assert runner._ensure_pdbqt_has_charges(empty_pdbqt) is False
+    assert charges._ensure_pdbqt_has_charges(empty_pdbqt) is False
 
 
 def _grid_config(tmp_path):
@@ -57,7 +53,7 @@ def _grid_config(tmp_path):
 def test_missing_receptor_fails_dock(tmp_path, charged_pdbqt, monkeypatch, outdir):
     """dock_ligand must return a FAILED record when inputs are missing."""
     grid = _grid_config(tmp_path)
-    result = runner.dock_ligand((
+    result = docking.dock_ligand((
         str(tmp_path / "does_not_exist_receptor.pdbqt"),
         charged_pdbqt,
         str(grid), outdir,
@@ -73,9 +69,9 @@ def test_all_tools_failed_is_fatal(tmp_path, charged_pdbqt, monkeypatch, outdir)
     def _boom(*a, **k):
         raise RuntimeError("simulated docking binary crash")
 
-    monkeypatch.setattr(runner, "run", _boom)
+    monkeypatch.setattr(utils, "run", _boom)
     grid = _grid_config(tmp_path)
-    result = runner.dock_ligand((
+    result = docking.dock_ligand((
         charged_pdbqt, charged_pdbqt,
         str(grid), outdir,
         {"seed": 42, "extra_args": []}, None))
@@ -87,12 +83,12 @@ def test_all_tools_failed_is_fatal(tmp_path, charged_pdbqt, monkeypatch, outdir)
 def test_duplicate_ligand_names_rejected(tmp_path, outdir, charged_pdbqt):
     lig_dir = tmp_path / "ligs"
     lig_dir.mkdir()
-    (lig_dir / "dup.pdbqt").write_text(open(charged_pdbqt).read())
+    (lig_dir / "dup.pdbqt").write_text(open(charged_pdbqt, encoding="utf-8").read())
     (lig_dir / "dup.pdbqt").touch()
     ligs = [str(lig_dir / "dup.pdbqt")] * 3
     with pytest.raises(ValueError, match="Duplicate ligand names"):
-        runner.dock_all(charged_pdbqt, ligs, tmp_path / "g.txt", outdir,
-                        resume=False, vina_params={})
+        docking.dock_all(charged_pdbqt, ligs, tmp_path / "g.txt", outdir,
+                         resume=False, vina_params={})
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +99,7 @@ def test_grid_missing_axis(tmp_path):
     cfg = tmp_path / "bad_grid.txt"
     cfg.write_text("cx 1.0\n")
     with pytest.raises(Exception):
-        runner._parse_grid_config(str(cfg))
+        docking._parse_grid_config(str(cfg))
 
 
 # ---------------------------------------------------------------------------
@@ -122,15 +118,12 @@ def _load_benchmark(name):
 def test_enrichment_auc_degenerates_to_none():
     be = _load_benchmark("benchmark_enrichment")
     # no actives -> None
-    scores = {f"D_{i}": -5.0 + i for i in range(10)}
-    labels = {n: n.startswith("A_") for n in scores}
-    assert be.auc_and_ef(scores, labels) == (None, None, None)
-    # perfect separation still works
-    scores = {f"A_{i}": -8.0 - i for i in range(5)}
-    scores.update({f"D_{i}": -2.0 for i in range(5)})
-    auc, ef1, _ = be.auc_and_ef(scores, labels={n: n.startswith("A_")
-                                                for n in scores})
-    assert auc == 1.0
+    assert be.roc_auc([-5.0 + i for i in range(10)], [False] * 10) is None
+    assert be.enrichment_factor([-5.0 + i for i in range(10)], [False] * 10, 0.01) is None
+    # perfect separation
+    scores = [-8.0 - i for i in range(5)] + [-2.0] * 5
+    labels = [True] * 5 + [False] * 5
+    assert be.roc_auc(scores, labels) == 1.0
 
 
 def test_enrichment_mannwhitney_ties():

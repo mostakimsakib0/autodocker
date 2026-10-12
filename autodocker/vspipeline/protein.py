@@ -1,51 +1,223 @@
 #!/usr/bin/env python3
-"""PROTEIN PREPARATION.
+"""Receptor preparation: the ``ProteinPreparation`` class used by the
+pipeline, and receptor cleaning.
 
-Split out of runner.py (behavior-preserving refactor). All cross-module
-references go through the ``runner`` namespace at call time so the public
-entry point and its monkeypatch surface stay unchanged.
+ProteinPreparation runs the receptor stage on top of these modules:
+
+* pdb_records: PDB record reading (first model, one alternate location per
+  residue, element perception),
+* protonation: Open Babel protonation, deterministic hydrogens and residue
+  label restoration,
+* fpocket: fpocket pockets (running, parsing, ranking, selection),
+* gridbox: box geometry and the grid/PyMOL/frame-offset writers.
+
+Cleaning (chain selection, hydrogens, HETATM records, selenomethionine) is
+defined here.
 """
-import os
-import re
-import csv
-import json
-import math
-import time
-import shlex
-import uuid
-import shutil
-import fnmatch
-import glob
-import html
-import statistics
-import subprocess
 import logging
+import os
+import tempfile
 from collections import defaultdict
-from datetime import datetime
-from pathlib import Path
-from typing import List, Tuple, Optional, Dict
-from urllib.parse import quote
-from multiprocessing import Pool, cpu_count as mp_cpu_count
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
-# The runner module owns the tool-path globals (OBABEL, VINA*, SMINA,
-# COMMAND_TIMEOUT) and every public name; import it lazily-safe: during the
-# initial import of runner this binds the partially-initialized module
-# object, which is fine because attributes are only accessed at call time.
-import runner  # noqa: E402
+from vspipeline import (  # noqa: E402
+    charges,
+    defaults,
+    fpocket,
+    gridbox,
+    outputs,
+    pocket,
+    protonation,
+    residue_templates,
+    utils,
+)
+from vspipeline.pdb_records import (  # noqa: E402
+    BLANK_CHAIN_ID,
+    _has_blank_chain,
+    _heavy_atom_coords,
+    _residue_position,
+    is_hydrogen_record,
+    read_pdb_records,
+    record_chain,
+)
 
 logger = logging.getLogger(__name__)
 
-class ProteinPreparation:
-    """Advanced protein preparation with chain selection."""
+# Modified amino acids deposited as HETATM; they are part of the protein and
+# dropping them would leave holes in the backbone or side chains.
+MODIFIED_RESIDUES = {
+    "MSE", "SEP", "TPO", "PTR", "CSO", "CSD", "CME", "MLY", "HYP", "KCX",
+    "PCA", "CSS", "OCS", "SCH", "NEP", "ALY", "M3L", "TYS",
+}
 
-    def __init__(self, pdb_file: str, outdir: str):
+# Selenomethionine is written as methionine (Se -> S): AutoDock Vina has no
+# selenium atom type and Open Babel no Gasteiger parameters for Se, so a SeMet
+# structure could not be converted at all. The side chains are isosteric
+# (C-Se 1.95 A vs C-S 1.81 A); coordinates are kept as deposited.
+SELENOMETHIONINE = "MSE"
+_SEMET_TO_MET_ATOM = {"SE": " SD "}
+
+# A receptor with fewer ATOM records than this is rejected as truncated.
+MIN_PROTEIN_ATOM_LINES = 100
+# Default padding (A) added on each side of the pocket atoms' bounding box.
+DEFAULT_PADDING = defaults.PADDING
+# Minimum edge (A) of the whole-receptor box used with --no-fpocket.
+MIN_RECEPTOR_BOX_SIZE = 24.0
+
+
+# ---------------------------------------------------------------------------
+# Cleaning
+# ---------------------------------------------------------------------------
+
+def _semet_to_met(line: str) -> Tuple[str, Tuple[str, str]]:
+    """A selenomethionine (MSE) record as methionine: residue name MET, the
+    selenium as ' SD ' with element S. Returns (line, residue position)."""
+    name = line[12:16]
+    element = line[76:78] if len(line) > 76 else ""
+    if name.strip() in _SEMET_TO_MET_ATOM:
+        name = _SEMET_TO_MET_ATOM[name.strip()]
+        element = " S"
+    line = line[:12] + name + line[16:17] + "MET" + line[20:]
+    if len(line) > 76:
+        line = line[:76] + element + line[78:]
+    return line, _residue_position(line)
+
+
+@dataclass
+class _CleaningCounts:
+    """What receptor cleaning kept and dropped (for the log)."""
+    kept_atoms: int = 0
+    skipped_hetero: int = 0
+    removed_h: int = 0
+    semet: Set[Tuple[str, str]] = field(default_factory=set)  # residue positions
+    # chain -> [ATOM, HETATM] records of the chains not selected
+    other_chains: Dict[str, List[int]] = field(
+        default_factory=lambda: defaultdict(lambda: [0, 0]))
+
+
+def _clean_records(lines: Sequence[str], selected_chains: Sequence[str],
+                   keep_hetero: bool) -> Tuple[List[str], _CleaningCounts]:
+    """The records of ``pdb_clean`` (see ProteinPreparation._write_clean_pdb)
+    from the first-model, one-altloc ``lines``, and the counts."""
+    counts = _CleaningCounts()
+    last_was_atom = False
+    out = []
+    for line in lines:
+        is_atom = line.startswith("ATOM")
+        is_het = line.startswith("HETATM")
+        if is_het and line[17:20].strip() in MODIFIED_RESIDUES:
+            line = "ATOM  " + line[6:]
+            is_atom, is_het = True, False
+        if is_atom or (keep_hetero and is_het):
+            if len(line) <= 21 or record_chain(line) not in selected_chains:
+                if len(line) > 21:
+                    counts.other_chains[record_chain(line)][0 if is_atom else 1] += 1
+                continue
+            # Input hydrogens are dropped: Open Babel's pH model would
+            # protonate the already protonated groups once more and put
+            # the extra hydrogen in a random direction.
+            if is_hydrogen_record(line):
+                counts.removed_h += 1
+                continue
+            if is_atom and line[17:20] == SELENOMETHIONINE:
+                line, residue = _semet_to_met(line)
+                counts.semet.add(residue)
+            out.append(line)
+            counts.kept_atoms += 1
+            last_was_atom = True
+        elif is_het:
+            counts.skipped_hetero += 1
+        elif line.startswith("TER") and last_was_atom:
+            out.append(line)
+            last_was_atom = False
+    out.append("END\n")
+    return out, counts
+
+
+def _log_cleaning(counts: _CleaningCounts, skipped_altloc: int, keep_hetero: bool) -> None:
+    """Report what cleaning dropped or changed."""
+    if skipped_altloc:
+        logger.info(f"[*] Kept one alternate location per residue (highest "
+                    f"occupancy); dropped {skipped_altloc} alternate-location "
+                    "atom records")
+    if counts.removed_h:
+        logger.warning(
+            f"[!] Removed {counts.removed_h} hydrogen records from the input; the receptor "
+            "is re-protonated by Open Babel at the requested pH (input "
+            "protonation states are not kept)")
+    if counts.semet:
+        logger.warning(
+            f"[!] Wrote {len(counts.semet)} selenomethionine (MSE) residue(s) as "
+            "methionine (MET, Se -> S): AutoDock Vina has no selenium atom type "
+            "and Open Babel no Gasteiger parameters for Se; coordinates are kept")
+    if counts.skipped_hetero and not keep_hetero:
+        logger.info(
+            f"[*] Removed {counts.skipped_hetero} HETATM records during receptor cleaning")
+    het_only = sorted(c for c, (n_atom, _) in counts.other_chains.items() if n_atom == 0)
+    if keep_hetero and het_only:
+        logger.warning(
+            "[!] --keep-hetero: not keeping HETATM records of chain(s) without "
+            "protein atoms, which --chain never selects: " + ", ".join(
+                f"{c} ({counts.other_chains[c][1]} records)" for c in het_only))
+    dropped_het = sum(n_het for c, (n_atom, n_het) in counts.other_chains.items() if n_atom)
+    if keep_hetero and dropped_het:
+        logger.info(f"[*] --keep-hetero: {dropped_het} HETATM records of chains "
+                    "outside the selection are not kept")
+
+
+# ---------------------------------------------------------------------------
+# Receptor files
+# ---------------------------------------------------------------------------
+
+def _translate_pdbqt(path: str, offset: Tuple[float, float, float]) -> None:
+    """Subtract ``offset`` from every ATOM/HETATM coordinate of a PDBQT file."""
+    dx, dy, dz = offset
+    out = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if line.startswith(("ATOM", "HETATM")) and len(line) >= 54:
+                x = float(line[30:38]) - dx
+                y = float(line[38:46]) - dy
+                z = float(line[46:54]) - dz
+                line = f"{line[:30]}{x:8.3f}{y:8.3f}{z:8.3f}{line[54:]}"
+            out.append(line)
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(out)
+
+
+def _write_without_residues(src: str, dst: str, residues: set) -> None:
+    """Copy a PDB without the HETATM residues whose ``pocket._residue_key``
+    is in ``residues``."""
+    with open(src, encoding="utf-8") as f:
+        lines = f.readlines()
+    kept = []
+    for line in lines:
+        parsed = pocket._parse_hetatm(line)
+        if parsed is not None and pocket._residue_key(parsed) in residues:
+            continue
+        kept.append(line)
+    with open(dst, "w", encoding="utf-8") as f:
+        f.writelines(kept)
+
+
+class ProteinPreparation:
+    """Receptor preparation: chain selection, cleaning, protonation, pocket
+    detection and the docking box."""
+
+    def __init__(self, pdb_file: str, outdir: str, seed: int = defaults.SEED):
         self.pdb_file = pdb_file
         self.outdir = outdir
-        self.pdb_clean = os.path.join(outdir, "protein_clean.pdb")
-        self.receptor_pdbqt = os.path.join(outdir, "receptor.pdbqt")
-        self.grid_conf = os.path.join(outdir, "grid.conf")
-        self.grid_box_script = os.path.join(outdir, "grid_box.pml")
-        self.pocket_summary_file = os.path.join(outdir, "pocket_summary.csv")
+        # OB_RANDOM_SEED of the receptor conversion (the run's --seed).
+        self.seed = seed
+        self.pdb_clean = os.path.join(outdir, outputs.PROTEIN_CLEAN_PDB)
+        self.receptor_pdbqt = os.path.join(outdir, outputs.RECEPTOR_PDBQT)
+        self.grid_conf = os.path.join(outdir, outputs.GRID_CONF)
+        self.grid_box_script = os.path.join(outdir, outputs.GRID_BOX_PML)
+        self.pocket_summary_file = os.path.join(outdir, outputs.POCKET_SUMMARY_CSV)
+        # Trp/His ring-hydrogen decisions (residue_templates.apply_residue_templates);
+        # None until prepare_receptor has run.
+        self.residue_templates: Optional[Dict] = None
 
     def validate(self):
         """Validate protein PDB file."""
@@ -56,94 +228,144 @@ class ProteinPreparation:
             raise PermissionError(f"Cannot read protein file: {self.pdb_file}")
 
         try:
-            count = sum(1 for l in open(self.pdb_file) if l.startswith("ATOM"))
+            with open(self.pdb_file, encoding="utf-8") as f:
+                count = sum(1 for line in f if line.startswith("ATOM"))
         except IOError as e:
             raise IOError(f"Error reading protein file: {e}")
 
-        if count < 100:
+        if count < MIN_PROTEIN_ATOM_LINES:
             raise ValueError(
-                f"Invalid protein: only {count} ATOM lines (need >= 100)")
+                f"Invalid protein: only {count} ATOM lines "
+                f"(need >= {MIN_PROTEIN_ATOM_LINES})")
 
-        logger.info(f"[✔] Protein validated: {count} ATOM lines")
+        logger.info(f"[*] Protein validated: {count} ATOM lines")
 
     def select_chain(self) -> str:
-        """Choose a chain for docking. Non-interactive: never prompts."""
-        chains = runner.get_chains(self.pdb_file)
+        """Choose a chain for docking when --chain is not given.
+
+        Non-interactive: with several protein chains the first one (in
+        sorted order) is used and a warning lists the alternatives.
+        """
+        chains = utils.get_chains(self.pdb_file)
 
         if len(chains) == 1:
-            logger.info(f"[*] Single chain detected: {chains[0]}")
+            note = ""
+            if chains[0] == BLANK_CHAIN_ID and _has_blank_chain(self.pdb_file):
+                note = (f" (blank chain ID in the PDB, read as {BLANK_CHAIN_ID}; "
+                        f"--chain {BLANK_CHAIN_ID} and residue keys such as "
+                        f"{BLANK_CHAIN_ID}45 or 45 address it)")
+            logger.info(f"[*] Single chain detected: {chains[0]}{note}")
             return chains[0]
 
-        logger.info(f"[*] Multiple chains detected: {', '.join(chains)}")
         logger.warning(
-            f"[!] Multiple chains present; using first chain '{chains[0]}'. "
-            "Specify --chain to choose explicitly.")
+            f"[!] WARNING: {len(chains)} protein chains present "
+            f"({', '.join(chains)}); docking against chain '{chains[0]}' only. "
+            "Pass --chain (e.g. --chain all or --chain A,B) to choose explicitly.")
         return chains[0]
 
-    def prepare_receptor(self, chain: str = "A", keep_hetero: bool = False) -> List[str]:
-        """Clean protein and convert to PDBQT."""
-        available_chains = runner.get_chains(self.pdb_file)
-        selected_chains = runner._parse_chain_selection(chain, available_chains)
-        logger.info(
-            f"[*] Preparing receptor (chain(s): {', '.join(selected_chains)})...")
-
-        kept_atoms = 0
-        skipped_hetero = 0
+    def _write_clean_pdb(self, selected_chains: Sequence[str], keep_hetero: bool) -> None:
+        """Write ``pdb_clean``: first model, one altloc per residue, the
+        selected chains, no hydrogens, HETATM records only with
+        ``keep_hetero`` (modified amino acids are always kept as ATOM;
+        selenomethionine is written as methionine, see SELENOMETHIONINE)."""
         try:
-            with open(self.pdb_file, "r") as src, open(self.pdb_clean, "w") as dst:
-                for line in src:
-                    if line.startswith("ATOM"):
-                        if len(line) > 21:
-                            chain = line[21].strip() or "A"
-                            if chain in selected_chains:
-                                dst.write(line)
-                                kept_atoms += 1
-                    elif keep_hetero and line.startswith("HETATM"):
-                        if len(line) > 21:
-                            chain = line[21].strip() or "A"
-                            if chain in selected_chains:
-                                dst.write(line)
-                                kept_atoms += 1
-                    elif line.startswith("HETATM"):
-                        skipped_hetero += 1
-                    elif line.startswith(("TER", "END")):
-                        dst.write(line)
+            lines, skipped_altloc = read_pdb_records(self.pdb_file)
+        except IOError as e:
+            raise IOError(f"Failed to read {self.pdb_file}: {e}")
+
+        out, counts = _clean_records(lines, selected_chains, keep_hetero)
+        if counts.kept_atoms == 0:
+            raise ValueError(
+                f"Selected chain(s) '{', '.join(selected_chains)}' have no atoms "
+                f"in {self.pdb_file}")
+        try:
+            with open(self.pdb_clean, "w", encoding="utf-8") as dst:
+                dst.writelines(out)
         except IOError as e:
             raise IOError(
                 f"Failed to filter chain(s) {', '.join(selected_chains)}: {e}")
+        _log_cleaning(counts, skipped_altloc, keep_hetero)
 
-        if kept_atoms == 0:
+    def _metal_ions(self) -> List[Tuple[str, str, str]]:
+        """Residue keys (see ``pocket._residue_key``) of the single-atom metal
+        ions in ``pdb_clean`` that AutoDock Vina can type."""
+        ions = []
+        for key, atoms in pocket._hetatm_residues(self.pdb_clean).items():
+            if len(atoms) == 1 and atoms[0]["element"] in pocket.VINA_METAL_TYPE_MAP:
+                ions.append(key)
+        return ions
+
+    def _protonate(self, ph: float, source: Optional[str] = None) -> None:
+        """Convert ``source`` (default ``pdb_clean``) to ``receptor_pdbqt``
+        with Open Babel, adding hydrogens for ``ph``, with deterministic
+        hydrogen positions (protonation.protonate)."""
+        protonation.protonate(source or self.pdb_clean, self.receptor_pdbqt, ph, self.seed)
+
+    def prepare_receptor(self, chain: str = BLANK_CHAIN_ID, keep_hetero: bool = False,
+                         ph: float = defaults.PH) -> List[str]:
+        """Clean protein and convert to PDBQT."""
+        available_chains = utils.get_chains(self.pdb_file)
+        selected_chains = utils._parse_chain_selection(chain, available_chains)
+        logger.info(
+            f"[*] Preparing receptor (chain(s): {', '.join(selected_chains)})...")
+
+        if os.path.realpath(self.pdb_file) == os.path.realpath(self.pdb_clean):
             raise ValueError(
-                f"Selected chain(s) '{', '.join(selected_chains)}' have no atoms in {self.pdb_file}")
+                f"Receptor input {self.pdb_file} is the file the cleaned receptor "
+                "is written to; move it out of the output directory")
+
+        self._write_clean_pdb(selected_chains, keep_hetero)
+        self.selected_chains = selected_chains
 
         try:
-            # Use basic obabel conversion; QuickVina-compatible PDBQT format
-            runner.run([
-                runner.OBABEL,
-                "-ipdb", self.pdb_clean,
-                "-opdbqt", "-O", self.receptor_pdbqt,
-                "-xr", "-c", "--partialcharge", "gasteiger",
-            ])
+            # Metal ions kept by --keep-hetero stay in pdb_clean (and in the
+            # frame offset) but are not given to Open Babel, which has no
+            # Gasteiger parameters for them and would skip the whole receptor;
+            # they are appended with their Vina metal types afterwards.
+            ions = self._metal_ions() if keep_hetero else []
+            with tempfile.TemporaryDirectory(prefix="autodocker_receptor_") as tmp:
+                source = self.pdb_clean
+                if ions:
+                    # Same file name, so the PDBQT's REMARK Name is unchanged.
+                    source = os.path.join(tmp, os.path.basename(self.pdb_clean))
+                    _write_without_residues(self.pdb_clean, source, set(ions))
+                self._protonate(ph, source)
+                # obabel -p re-perceives residues; put the input's labels back.
+                relabelled = protonation._restore_residue_labels(self.receptor_pdbqt, source)
+            logger.info(f"[*] Restored input residue labels on {relabelled} receptor atoms")
+            # Trp HE1 and His tautomers (residue_templates): in the input frame,
+            # after label restoration, before the translation to the docking frame.
+            self.residue_templates = residue_templates.apply_residue_templates(
+                self.receptor_pdbqt, self.pdb_file)
+            # Centre on the heavy atoms of pdb_clean (the frame offset written
+            # to frame_offset.txt).
+            _translate_pdbqt(self.receptor_pdbqt, self._receptor_centroid())
+            if ions:
+                appended = pocket._append_hetatm_to_receptor(
+                    self.receptor_pdbqt, self.pdb_clean, ions, selected_chains,
+                    offset=self.frame_offset())
+                logger.info(
+                    f"[*] --keep-hetero: added {appended} metal ion(s) with their Vina "
+                    "metal types (not charged by Open Babel): "
+                    + ", ".join(f"{n} {c}{r}" for c, r, n in ions))
 
             # Receptor PDBQT must not contain ligand torsion tags (ROOT/BRANCH/TORSDOF).
-            runner._sanitize_receptor_pdbqt(self.receptor_pdbqt)
+            charges._sanitize_receptor_pdbqt(self.receptor_pdbqt)
 
-            # Verify charges were computed
-            if not runner._ensure_pdbqt_has_charges(self.receptor_pdbqt):
-                logger.warning(
-                    f"[!] Receptor PDBQT has no charges - attempting Gasteiger computation...")
-                runner._fix_pdbqt_charges(self.receptor_pdbqt, self.pdb_clean)
-                runner._sanitize_receptor_pdbqt(self.receptor_pdbqt)
+            if not charges._ensure_pdbqt_has_charges(self.receptor_pdbqt):
+                raise RuntimeError(
+                    f"Open Babel assigned no partial charges to {self.receptor_pdbqt}")
+            n_hd, n_polar = protonation._count_polar_atoms(self.receptor_pdbqt)
+            if n_hd == 0 and n_polar > 0:
+                raise RuntimeError(
+                    f"Receptor {self.receptor_pdbqt} has no polar hydrogens after "
+                    f"protonation at pH {ph:g}; Vina would see no H-bond donors")
 
-            logger.info(f"[✔] Receptor prepared: {self.receptor_pdbqt}")
-            if skipped_hetero and not keep_hetero:
-                logger.info(
-                    f"[*] Removed {skipped_hetero} HETATM records during receptor cleaning")
+            logger.info(f"[*] Receptor prepared: {self.receptor_pdbqt} "
+                        f"(protonated at pH {ph:g}, {n_hd} polar hydrogens)")
         except Exception as e:
             logger.error(f"Failed to prepare receptor: {e}")
             raise
-
-        self.selected_chains = selected_chains
 
         return selected_chains
 
@@ -160,135 +382,68 @@ class ProteinPreparation:
             raise FileNotFoundError(
                 f"Receptor PDBQT not found: {self.receptor_pdbqt}")
 
-        selected_chains = getattr(self, "selected_chains", None) or ["A"]
-        appended = runner._append_hetatm_to_receptor(
+        selected_chains = getattr(self, "selected_chains", None) or [BLANK_CHAIN_ID]
+        appended = pocket._append_hetatm_to_receptor(
             self.receptor_pdbqt, self.pdb_file, keep_residues, selected_chains,
             offset=self.frame_offset())
 
         if appended == 0:
-            raise ValueError(
-                "No matching HETATM residues found to keep in receptor")
+            logger.warning(
+                "[!] No HETATM atoms were added to the receptor (none found, or "
+                "all already present)")
+            return self.receptor_pdbqt
 
-        runner._sanitize_receptor_pdbqt(self.receptor_pdbqt)
+        charges._sanitize_receptor_pdbqt(self.receptor_pdbqt)
         logger.info(
-            f"[✔] Receptor updated keeping {appended} HETATM atoms: {self.receptor_pdbqt}")
+            f"[*] Receptor updated keeping {appended} HETATM atoms: {self.receptor_pdbqt}")
         return self.receptor_pdbqt
 
-    def centroid_grid(self, padding: float = 6.0) -> Tuple[float, float, float, float, float, float]:
-        """Build a grid centered on the receptor bounding box when fpocket is unavailable.
+    def _box_source(self) -> str:
+        if self.receptor_pdbqt and os.path.exists(self.receptor_pdbqt):
+            return self.receptor_pdbqt
+        return self.pdb_clean if os.path.exists(self.pdb_clean) else self.pdb_file
+
+    def centroid_grid(self, padding: float = DEFAULT_PADDING
+                      ) -> Tuple[float, float, float, float, float, float]:
+        """Box around the whole receptor (used with --no-fpocket).
+
+        Centred on the midpoint of the receptor's heavy-atom bounding box,
+        ``padding`` on each side and every edge at least
+        ``MIN_RECEPTOR_BOX_SIZE``. Raises if the receptor cannot be read.
 
         Public API (formerly the private ``_protein_centroid_grid``).
         """
-        source = self.receptor_pdbqt
-        if not source or not os.path.exists(source):
-            source = self.pdb_clean if os.path.exists(
-                self.pdb_clean) else self.pdb_file
+        source = self._box_source()
         try:
-            xs, ys, zs = runner.parse_pdb_coords(source)
-        except (ValueError, IOError):
-            return 0, 0, 0, 24, 24, 24
-        cx = (min(xs) + max(xs)) / 2.0
-        cy = (min(ys) + max(ys)) / 2.0
-        cz = (min(zs) + max(zs)) / 2.0
-        sx = max(max(xs) - min(xs) + 2 * padding, 24.0)
-        sy = max(max(ys) - min(ys) + 2 * padding, 24.0)
-        sz = max(max(zs) - min(zs) + 2 * padding, 24.0)
+            xs, ys, zs = _heavy_atom_coords(source)
+        except (ValueError, IOError) as e:
+            raise RuntimeError(f"Cannot build the receptor box from {source}: {e}") from e
+        cx, cy, cz, sx, sy, sz = gridbox.bounding_box(xs, ys, zs, padding,
+                                                      MIN_RECEPTOR_BOX_SIZE)
         logger.info(
-            f"[✔] Fallback grid centered on receptor centroid "
+            f"[*] Whole-receptor grid centred on the receptor bounding box "
             f"({cx:.2f}, {cy:.2f}, {cz:.2f}), size ({sx:.1f}, {sy:.1f}, {sz:.1f})")
         return cx, cy, cz, sx, sy, sz
 
     def detect_pocket(self, pocket_spec: Optional[str] = None,
-                      padding: float = 6.0) -> Tuple[float, float, float, float, float, float]:
-        """Detect binding pockets using fpocket and build a grid from one or more pockets."""
+                      padding: float = DEFAULT_PADDING
+                      ) -> Tuple[float, float, float, float, float, float]:
+        """Detect binding pockets with fpocket and build a grid from one or
+        more of them. Raises when fpocket is unavailable, fails or finds no
+        pocket (use ``centroid_grid`` for a deliberate whole-receptor box)."""
         logger.info("[*] Running fpocket...")
         fpocket_target = self.pdb_clean if os.path.exists(
             self.pdb_clean) else self.pdb_file
-        try:
-            shutil.rmtree(Path(fpocket_target).with_suffix(
-                "").as_posix() + "_out", ignore_errors=True)
-            runner.run(["fpocket", "-f", fpocket_target])
-        except Exception as e:
-            logger.warning(
-                f"fpocket failed: {e}. Using centroid fallback grid.")
-            return self.centroid_grid(padding)
+        pocket_root = fpocket.run_fpocket(fpocket_target)
+        pockets = fpocket.rank_pockets(fpocket.collect_pockets(pocket_root, fpocket_target))
+        fpocket.write_pocket_summary(self.pocket_summary_file, pockets)
+        fpocket.log_top_pockets(pockets)
 
-        pocket_root = fpocket_target.replace(".pdb", "_out")
-        pocket_dir = os.path.join(pocket_root, "pockets")
-
-        if not os.path.exists(pocket_dir):
-            logger.warning(
-                f"Pocket directory not found: {pocket_dir}. Using centroid fallback grid.")
-            return self.centroid_grid(padding)
-
-        info_file = os.path.join(
-            pocket_root, f"{Path(fpocket_target).stem}_info.txt"
-        )
-        pocket_info = self._parse_fpocket_info(info_file)
-        pockets = []
-
-        for f in os.listdir(pocket_dir):
-            match = re.match(r"pocket(\d+)_atm\.pdb$", f)
-            if not match:
-                continue
-
-            number = int(match.group(1))
-            p = os.path.join(pocket_dir, f)
-
-            try:
-                xs, ys, zs = runner.parse_pdb_coords(p)
-                size = (max(xs) - min(xs)) * \
-                    (max(ys) - min(ys)) * (max(zs) - min(zs))
-                data = dict(pocket_info.get(number, {}))
-                data.update({
-                    "number": number,
-                    "file": f,
-                    "path": p,
-                    "box_volume": size,
-                })
-                pockets.append(data)
-            except ValueError:
-                continue
-
-        if not pockets:
-            logger.warning("No valid pockets found. Using fallback grid.")
-            return 0, 0, 0, 24, 24, 24
-
-        # FIXED: Sort by SCORE first (binding pocket quality), then druggability
-        # Previously: sorted by druggability_score first, which selected worst-scoring
-        # pocket (Pocket 4) over best-scoring pocket (Pocket 1) when druggability was slightly higher.
-        # New behavior: Best-scoring pocket wins, with druggability as tiebreaker.
-        pockets.sort(key=lambda p: (
-            p.get("score", -1),
-            p.get("druggability_score", -1),
-            p.get("volume", -1),
-            p.get("box_volume", -1),
-        ), reverse=True)
-        self._write_pocket_summary(pockets)
-
-        logger.info(f"[*] Found {len(pockets)} pockets. Top candidates:")
-        for pocket in pockets[:5]:
-            druggable = "druggable" if pocket.get(
-                "druggability_score", 0) > 0.15 else "low-druggability"
-            logger.info(
-                "  pocket%-2s score=%6.3f druggability=%5.3f volume=%7.1f %s"
-                % (
-                    pocket["number"],
-                    pocket.get("score", 0),
-                    pocket.get("druggability_score", 0),
-                    pocket.get("volume", 0),
-                    druggable,
-                )
-            )
-
-        selected_numbers = self._parse_pocket_selection(pocket_spec, pockets)
-        selected = [p for p in pockets if p["number"] in selected_numbers]
-        selected.sort(key=lambda p: selected_numbers.index(p["number"]))
-
+        selected = fpocket.select_pockets(pocket_spec, pockets)
         selected_names = ", ".join(f"pocket{p['number']}" for p in selected)
         logger.info(
-            f"[✔] Pocket selection: {selected_names} (padding={padding:g} Å)")
-        cx, cy, cz, sx, sy, sz = self._get_pocket_info(
+            f"[*] Pocket selection: {selected_names} (padding={padding:g} A)")
+        cx, cy, cz, sx, sy, sz = gridbox.pocket_box(
             [p["path"] for p in selected], padding=padding)
         dx, dy, dz = self._receptor_centroid()
         return cx - dx, cy - dy, cz - dz, sx, sy, sz
@@ -303,149 +458,34 @@ class ProteinPreparation:
 
     def write_frame_offset(self) -> Optional[str]:
         """Record the frame offset in ``frame_offset.txt`` next to grid.conf."""
-        path = os.path.join(self.outdir, "frame_offset.txt")
+        path = os.path.join(self.outdir, outputs.FRAME_OFFSET_TXT)
         try:
-            dx, dy, dz = self.frame_offset()
-            with open(path, "w") as f:
-                f.write(
-                    "# receptor.pdbqt, grid.conf and docked poses are centered at the\n"
-                    "# origin (obabel -c). Add this offset to their coordinates to\n"
-                    "# overlay them on the input PDB, e.g. with\n"
-                    "#   python3 scripts/restore_frame.py <output_dir> docked/*_out.pdbqt\n"
-                    f"offset_x = {dx}\noffset_y = {dy}\noffset_z = {dz}\n")
-        except (ValueError, IOError, ZeroDivisionError) as e:
+            gridbox.write_frame_offset(path, *self.frame_offset())
+        except (ValueError, IOError) as e:
             logger.warning(f"[!] Could not write frame offset: {e}")
             return None
         return path
 
     def _receptor_centroid(self) -> Tuple[float, float, float]:
-        """Center of mass of the prepared receptor.
+        """Unweighted mean of the cleaned receptor's heavy atoms.
 
-        The receptor PDBQT is centered at the origin by ``obabel -c`` during
-        ``prepare_receptor``, while ``pdb_clean`` and fpocket's pocket files
-        keep the original coordinates. The fpocket-derived grid center must be
-        shifted by this centroid to land in the centered receptor frame.
+        ``prepare_receptor`` translates the receptor PDBQT by this vector so
+        it is centred at the origin, while ``pdb_clean`` and fpocket's pocket
+        files keep the original coordinates; the fpocket-derived grid centre
+        is shifted by it to land in the receptor PDBQT frame.
         """
         source = self.pdb_clean if os.path.exists(
             self.pdb_clean) else self.pdb_file
-        xs, ys, zs = runner.parse_pdb_coords(source)
+        xs, ys, zs = _heavy_atom_coords(source)
         return sum(xs) / len(xs), sum(ys) / len(ys), sum(zs) / len(zs)
-
-    def _parse_fpocket_info(self, info_file: str) -> Dict[int, Dict]:
-        """Parse fpocket's *_info.txt file into a pocket metadata map."""
-        info = {}
-        if not os.path.exists(info_file):
-            return info
-
-        current = None
-        try:
-            with open(info_file) as f:
-                for line in f:
-                    pocket_match = re.match(
-                        r"Pocket\s+(\d+)\s*:", line.strip())
-                    if pocket_match:
-                        current = int(pocket_match.group(1))
-                        info[current] = {}
-                        continue
-
-                    if current is None or ":" not in line:
-                        continue
-
-                    key, value = line.split(":", 1)
-                    key = key.strip().lower().replace(" ", "_").replace(".", "")
-                    key = key.replace("-", "_")
-                    try:
-                        info[current][key] = float(value.strip().split()[0])
-                    except (ValueError, IndexError):
-                        continue
-        except IOError as e:
-            logger.warning(
-                f"Could not parse fpocket info file {info_file}: {e}")
-
-        return info
-
-    def _write_pocket_summary(self, pockets: List[Dict]):
-        try:
-            with open(self.pocket_summary_file, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "Pocket", "Score", "Druggability_Score", "Volume",
-                    "Box_Volume", "Could_Be_Druggable", "File"
-                ])
-                for pocket in sorted(pockets, key=lambda p: p["number"]):
-                    writer.writerow([
-                        pocket["number"],
-                        pocket.get("score", ""),
-                        pocket.get("druggability_score", ""),
-                        pocket.get("volume", ""),
-                        f"{pocket.get('box_volume', 0):.3f}",
-                        "YES" if pocket.get(
-                            "druggability_score", 0) > 0.15 else "NO",
-                        pocket["file"],
-                    ])
-            logger.info(
-                f"[✔] Pocket summary saved: {self.pocket_summary_file}")
-        except IOError as e:
-            logger.warning(f"Could not save pocket summary: {e}")
-
-    def _parse_pocket_selection(self, pocket_spec: Optional[str], pockets: List[Dict]) -> List[int]:
-        available = {p["number"] for p in pockets}
-        if not pocket_spec or pocket_spec.lower() == "auto":
-            return [pockets[0]["number"]]
-
-        selected = []
-        for token in re.split(r"[,\s]+", pocket_spec.strip()):
-            if not token:
-                continue
-            try:
-                pocket_number = int(token)
-            except ValueError as e:
-                raise ValueError(
-                    f"Invalid pocket selection '{token}'. Use numbers like 1 or 1,3.") from e
-            if pocket_number not in available:
-                raise ValueError(
-                    f"Pocket {pocket_number} was not found. Available: {sorted(available)}")
-            selected.append(pocket_number)
-
-        if not selected:
-            raise ValueError("No pockets selected")
-        return selected
-
-    def _get_pocket_info(self, pocket_files: List[str], padding: float = 6.0) -> Tuple[float, float, float, float, float, float]:
-        """Calculate grid center and size from one or more pocket PDB files."""
-        xs, ys, zs = [], [], []
-        for pocket_file in pocket_files:
-            px, py, pz = runner.parse_pdb_coords(pocket_file)
-            xs.extend(px)
-            ys.extend(py)
-            zs.extend(pz)
-
-        cx = sum(xs) / len(xs)
-        cy = sum(ys) / len(ys)
-        cz = sum(zs) / len(zs)
-
-        sx = max(xs) - min(xs) + (2 * padding)
-        sy = max(ys) - min(ys) + (2 * padding)
-        sz = max(zs) - min(zs) + (2 * padding)
-
-        logger.debug(f"Grid center: ({cx:.2f}, {cy:.2f}, {cz:.2f}), "
-                     f"size: ({sx:.2f}, {sy:.2f}, {sz:.2f})")
-
-        return cx, cy, cz, sx, sy, sz
 
     def write_grid(self, cx: float, cy: float, cz: float,
                    sx: float, sy: float, sz: float):
-        """Write AutoDock Vina grid configuration."""
+        """Write AutoDock Vina grid configuration, the PyMOL box script and
+        the frame offset."""
         try:
-            with open(self.grid_conf, "w") as f:
-                f.write(f"""center_x = {cx}
-center_y = {cy}
-center_z = {cz}
-size_x = {sx}
-size_y = {sy}
-size_z = {sz}
-""")
-            logger.info(f"[✔] Grid ready: {self.grid_conf}")
+            gridbox.write_grid_conf(self.grid_conf, cx, cy, cz, sx, sy, sz)
+            logger.info(f"[*] Grid ready: {self.grid_conf}")
             self.write_grid_box_script(cx, cy, cz, sx, sy, sz)
             self.write_frame_offset()
         except IOError as e:
@@ -455,67 +495,8 @@ size_z = {sz}
     def write_grid_box_script(self, cx: float, cy: float, cz: float,
                               sx: float, sy: float, sz: float):
         """Write a PyMOL script that visualizes the final docking box."""
-        _dir = os.path.dirname(os.path.abspath(self.grid_box_script))
-        pdb_relpath = os.path.relpath(self.receptor_pdbqt, _dir)
-
-        x0, x1 = cx - sx / 2, cx + sx / 2
-        y0, y1 = cy - sy / 2, cy + sy / 2
-        z0, z1 = cz - sz / 2, cz + sz / 2
-        vertices = [
-            (x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
-            (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1),
-        ]
-        edges = [
-            (0, 1), (1, 2), (2, 3), (3, 0),
-            (4, 5), (5, 6), (6, 7), (7, 4),
-            (0, 4), (1, 5), (2, 6), (3, 7),
-        ]
-
-        def generate_box(): return ',\n       '.join(
-            map(lambda x: ', '.join(x), (
-                ('COLOR', '0.0', '1.0'),
-                ('LINEWIDTH', '3.0'),
-                ('BEGIN', 'LINES'),
-                *(
-                    vertex
-                    for edge in edges
-                    for vertex in map(
-                        lambda points: (
-                            'VERTEX',
-                            f'{points[0]:7.3f}',
-                            f'{points[1]:7.3f}',
-                            f'{points[2]:7.3f}',
-                        ),
-                        (vertices[edge[0]], vertices[edge[1]])
-                    )
-                ),
-                ('END',),
-            ))
-        )
-
-        pml_lines = (
-            f'load {pdb_relpath}, receptor',
-            r'show cartoon, receptor',
-            r'',
-            r'python',
-            r'from pymol import cmd',
-            r'from pymol.cgo import *',
-            r'',
-            f'box = [{generate_box()}]',
-            r'cmd.load_cgo(box, "docking_grid")',
-            r'python end',
-            r'',
-            r'zoom all',
-            r''
-        )
-
-        try:
-            with open(self.grid_box_script, "w") as f:
-                f.write('\n'.join(pml_lines))
-                logger.info(
-                    f"[✔] Grid visualization script saved: {self.grid_box_script}")
-        except IOError as e:
-            logger.warning(f"Could not write grid visualization script: {e}")
+        gridbox.write_grid_box_script(self.grid_box_script, self.receptor_pdbqt,
+                                      cx, cy, cz, sx, sy, sz)
 
     # Backward-compatible alias (deprecated): the former private name.
     _protein_centroid_grid = centroid_grid

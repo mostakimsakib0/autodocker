@@ -1,0 +1,43 @@
+# Build context for the Dockerfile. The image only needs: Dockerfile, deps,
+# requirements.txt, autodocker/, scripts/{apt,shlib,patch}.sh and
+# tools/{aclmgr.c,autodock-vina,fpocket,ngl,openbabel,qvina,smina}. Patterns
+# without a leading **/ match at the context root only.
+
+# VCS metadata (submodule .git files point outside the context anyway)
+.git
+**/.git
+.github
+.gitignore
+.gitmodules
+
+# Python caches and tooling state
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+.coverage
+.coverage.*
+htmlcov
+.venv
+venv
+*.egg-info
+
+# Not used by the image
+tests
+benchmarks
+docs
+paper
+**/node_modules
+# Open Babel's own test suite (~220 MB; built with ENABLE_TESTS=OFF)
+tools/openbabel/repo/test
+
+# Local docking runs and their outputs
+works
+output
+*_out
+*.pdbqt
+*.sdf
+*.mol2
+*.pdb
+*.log

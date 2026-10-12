@@ -2,23 +2,23 @@ import os
 
 import pytest
 
-import runner
 import vspipeline.consensus as consensus
+from vspipeline import tools, utils
 
 
-SMINA_AVAILABLE = runner.SMINA is not None
+SMINA_AVAILABLE = tools.settings().smina is not None
 
 
 @pytest.fixture
 def tiny_system(tmp_path):
     """Create a tiny receptor + ligand PDBQT with obabel (must be on PATH)."""
-    if runner.OBABEL is None:
+    if tools.settings().obabel is None:
         pytest.skip("obabel not available")
     rec = str(tmp_path / "receptor.pdbqt")
     lig = str(tmp_path / "ligand.pdbqt")
     out = str(tmp_path / "out.pdbqt")
-    runner.run([runner.OBABEL, "-:c1ccccc1", "-opdbqt", "-O", rec])
-    runner.run([runner.OBABEL, "-:CO", "-opdbqt", "-O", lig])
+    utils.run([tools.settings().obabel, "-:c1ccccc1", "-opdbqt", "-O", rec])
+    utils.run([tools.settings().obabel, "-:CO", "-opdbqt", "-O", lig])
     assert os.path.exists(rec) and os.path.exists(lig)
     return rec, lig, out
 
@@ -34,7 +34,7 @@ def test_run_smina_docking_real(tiny_system):
     )
     assert isinstance(aff, float)
     assert os.path.exists(out)
-    assert any(line.startswith("MODEL") for line in open(out))
+    assert any(line.startswith("MODEL") for line in open(out, encoding="utf-8"))
 
 
 @pytest.mark.skipif(not SMINA_AVAILABLE, reason="smina binary not installed")

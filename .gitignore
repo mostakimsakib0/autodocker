@@ -30,12 +30,19 @@ htmlcov/
 # node
 node_modules/
 pnpm-lock.yaml
+# ...except the NGL lockfile the image build installs from (--frozen-lockfile)
+!tools/ngl/pnpm-lock.yaml
 
 # Submodules are cloned lazily; keep the tracker but never vendor trees
 tools/*/repo/
 
 # keep helper scripts
 !/scripts/
+
+# Committed test and CI smoke fixtures (*.pdbqt/*.sdf are ignored above)
+!tests/data/**
+!/.github/smoke/**
+!/.github/repro/**
 
 # Vendored fpocket was removed; never re-add it (build via tools/fpocket submodule)
 /fpocket/

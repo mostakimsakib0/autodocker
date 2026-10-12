@@ -1,19 +1,45 @@
 #!/usr/bin/env python3
-"""J1: PDBbind core-set re-docking (docking power) benchmark.
+"""J1: CASF-2016 core-set re-docking (docking power) benchmark.
 
-Protocol (standard CASF "docking power" evaluation):
+Protocol
+--------
+  * Complexes: a seeded random sample of the CASF-2016 core set
+               (``--sample 40 --sample-seed 42``, IDs from
+               ``benchmarks/data/casf2016_core_set.csv``), or ``--pdbids``.
+               Sampled complexes missing from ``--data-dir`` (e.g. peptide
+               ligands that ``fetch_casf_rcsb.py`` cannot build) are listed
+               with the reason recorded in ``manifest.csv``.
+  * Receptor : ``{pdbid}_protein.pdb``, all chains; metal ions are kept
+               (``--receptor-hetatm metals`` -> runner ``--detect-metals``).
+               No receptor-size filter unless ``--max-receptor-atoms`` is set.
+  * Ligand   : start conformer from ``--start-conformer``:
+               ``rdkit`` (default) = one ETKDGv3 conformer embedded from the
+               same protonated molecule as the crystal-start MOL2 (its
+               InChIKey must match; fixed randomSeed, single thread, then
+               MMFF94 with a fixed iteration cap; deterministic), so the
+               docked ring conformations, bond lengths and angles do not
+               come from the crystal pose; ``crystal`` = the crystal-ligand
+               geometry itself (1.1.x protocol, optimistic).
+  * Box      : cubic, centred on the crystal-ligand heavy-atom centroid,
+               edge = max(22.5, ligand extent + 2*padding) A
+               (``_benchlib.ligand_box``), passed as --grid-center/--grid-size
+               in input-PDB coordinates.
+  * Docking  : autodocker ``runner.py`` (Vina), fixed seed, exhaustiveness,
+               num_modes and energy range.
+  * Metric   : heavy-atom, symmetry-corrected RMSD of each output mode vs.
+               the crystal pose (``obrms``, no superposition). Top-1 is
+               always mode 1 (the first MODEL); if its RMSD cannot be
+               computed the complex is reported as ``rmsd_failed``.
+  * Success  : RMSD <= --rmsd-cutoff (default 2.0 A). Top-1 and best-of-N
+               successes are counted among the evaluated complexes (mode-1
+               RMSD computed) and reported over the evaluated and over the
+               attempted complexes (docking/RMSD failures count as misses).
 
-  * Receptor : PDBbind prepared ``{pdbid}_protein.pdb``
-  * Ligand   : PDBbind ``{pdbid}_ligand.mol2`` (crystal-bound geometry)
-  * Grid     : box centered on crystal-ligand heavy-atom centroid,
-               size = max(22.5, ligand_extent + 2*padding)
-  * Docking  : autodocker ``runner.py`` (Vina) with fixed seed, exhaustiveness,
-               num_modes and energy_range (crystal-ligand-centered grid via
-               --grid-center/--grid-size overrides)
-  * Metric   : heavy-atom RMSD of docked pose vs crystal pose (``obrms``)
-  * Success  : RMSD <= --rmsd-cutoff (default 2.0 A)
+Resume: a complex is reused only when ``params.json`` in its work directory
+matches the current docking parameters, AutoDocker and RDKit versions and
+the SHA-256 of the complex's input files; otherwise it is re-docked.
 
-Results are written to ``outdir/results.csv`` and ``outdir/summary.json``.
+Results: ``outdir/results.csv`` and ``outdir/summary.json``.
 """
 
 import argparse
@@ -22,338 +48,418 @@ import json
 import multiprocessing
 import os
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _benchlib  # noqa: E402
 
-def parse_mol2_heavy_coords(mol2_path):
-    coords, in_atoms = [], False
-    with open(mol2_path) as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("@<TRIPOS>ATOM"):
-                in_atoms = True
-                continue
-            if line.startswith("@<TRIPOS>"):
-                in_atoms = False
-                continue
-            if in_atoms and line:
-                parts = line.split()
-                if len(parts) >= 6 and not parts[5].startswith("H"):
-                    coords.append((float(parts[2]), float(parts[3]),
-                                   float(parts[4])))
-    if not coords:
-        raise ValueError("no heavy atoms in ligand")
-    return coords
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_IDS = os.path.join(HERE, "..", "benchmarks", "data", "casf2016_core_set.csv")
+HETATM_FLAGS = {"none": [], "metals": ["--detect-metals"], "all": ["--keep-hetero"]}
 
 
-def ligand_grid(mol2_path, padding=6.0, min_size=22.5):
-    coords = parse_mol2_heavy_coords(mol2_path)
-    cx = sum(c[0] for c in coords) / len(coords)
-    cy = sum(c[1] for c in coords) / len(coords)
-    cz = sum(c[2] for c in coords) / len(coords)
-    extent = max(
-        max(c[0] for c in coords) - min(c[0] for c in coords),
-        max(c[1] for c in coords) - min(c[1] for c in coords),
-        max(c[2] for c in coords) - min(c[2] for c in coords),
-    )
-    size = max(min_size, extent + 2 * padding)
-    return cx, cy, cz, size
+def ligand_grid(mol2_path, padding=_benchlib.BENCH_BOX_PADDING,
+                min_size=_benchlib.BENCH_MIN_BOX_EDGE):
+    """Box around the crystal ligand: ``(cx, cy, cz, edge)``."""
+    center, size = _benchlib.ligand_box(_benchlib.mol2_heavy_coords(mol2_path),
+                                        padding=padding, min_size=min_size)
+    return center[0], center[1], center[2], size
 
 
-def receptor_centroid(pdb_path):
-    """Mean of all ATOM-record coordinates (matches the obabel -c centering
-    the runner applies to the receptor PDBQT)."""
-    coords = []
-    with open(pdb_path) as f:
-        for line in f:
-            if line.startswith("ATOM"):
-                coords.append((float(line[30:38]), float(line[38:46]),
-                               float(line[46:54])))
-    if not coords:
-        raise ValueError("no ATOM records in receptor PDB")
-    return (sum(c[0] for c in coords) / len(coords),
-            sum(c[1] for c in coords) / len(coords),
-            sum(c[2] for c in coords) / len(coords))
+def ranking_affinity(ranking_csv, ligand):
+    """Affinity (float or None) and the text written for ``ligand``."""
+    if not os.path.exists(ranking_csv):
+        return None, None
+    for row in _benchlib.read_ranking(ranking_csv):
+        if row["name"] == ligand:
+            return row["affinity"], row["affinity_str"]
+    return None, None
 
 
-def shift_mol2(mol2_path, shift, out_path):
-    """Write a copy of a mol2 with all ATOM-section coordinates translated by
-    ``shift`` (used to bring the crystal pose into the centered frame)."""
-    with open(mol2_path) as src, open(out_path, "w") as dst:
-        in_atoms = False
-        for line in src:
-            stripped = line.strip()
-            if stripped.startswith("@<TRIPOS>ATOM"):
-                in_atoms = True
-                dst.write(line)
-                continue
-            if stripped.startswith("@<TRIPOS>"):
-                in_atoms = False
-                dst.write(line)
-                continue
-            if in_atoms and line.strip():
-                parts = line.split()
-                x = float(parts[2]) - shift[0]
-                y = float(parts[3]) - shift[1]
-                z = float(parts[4]) - shift[2]
-                parts[2], parts[3], parts[4] = f"{x:.3f}", f"{y:.3f}", f"{z:.3f}"
-                dst.write(" ".join(parts) + "\n")
-            else:
-                dst.write(line)
+def mode_rmsds(crystal_ref, out_pdbqt, rmsd_fn=None):
+    """RMSD of every output mode vs. the crystal reference, in file order.
+
+    Returns ``(rmsds, errors)``: ``rmsds[i]`` is the RMSD of mode i+1 or
+    None when it could not be computed; ``errors`` lists the reasons.
+    """
+    rmsd_fn = rmsd_fn or _benchlib.obrms
+    models = _benchlib.parse_vina_models(out_pdbqt)
+    rmsds, errors = [], []
+    with tempfile.TemporaryDirectory() as tmp:
+        for m in models:
+            path = _benchlib.write_model(m, os.path.join(tmp, f"mode_{m['model']}.pdbqt"))
+            try:
+                rmsds.append(rmsd_fn(crystal_ref, path))
+            except Exception as e:
+                rmsds.append(None)
+                errors.append(f"mode {m['model']}: {e}")
+    return rmsds, errors
 
 
-def read_ranking(ranking_csv):
-    affinity = None
-    if os.path.exists(ranking_csv):
-        with open(ranking_csv) as f:
-            for row in csv.DictReader(f):
-                key = "Binding_Affinity" if "Binding_Affinity" in row else "Affinity"
-                affinity = row.get(key)
-                break
-    return affinity
+def apply_rmsds(rec, rmsds, errors):
+    """Fill rmsd_top1 / rmsd_best / status from per-mode RMSDs."""
+    rec["rmsd_modes"] = rmsds
+    rec["rmsd_top1"] = rmsds[0] if rmsds else None
+    valid = [r for r in rmsds if r is not None]
+    rec["rmsd_best"] = min(valid) if valid else None
+    rec["n_modes"] = len(rmsds)
+    rec["n_modes_rmsd_failed"] = len(rmsds) - len(valid)
+    if errors:
+        rec["error"] = "; ".join(errors)[:500]
+    if not rmsds:
+        rec["status"] = "rmsd_failed"
+        rec["error"] = rec.get("error") or "no MODEL records in the docked output"
+    elif rec["rmsd_top1"] is None:
+        rec["status"] = "rmsd_failed"
+    else:
+        rec["status"] = "ok"
+    return rec
 
 
-def split_vina_models(pdbqt_path, tmpdir):
-    """Split all Vina MODEL blocks into per-mode PDBQT files. Returns list of
-    (mode_number, affinity, file_path) sorted by affinity (mode 1 first)."""
-    models = []
-    current, model_no = [], 0
-    affinity = None
-    with open(pdbqt_path) as f:
-        for line in f:
-            if line.startswith("MODEL"):
-                current, model_no = [], model_no + 1
-            elif line.startswith("ENDMDL"):
-                if current:
-                    path = os.path.join(tmpdir, f"mode_{model_no}.pdbqt")
-                    with open(path, "w") as out:
-                        out.write("\n".join(current) + "\n")
-                    models.append((model_no, affinity, path))
-            elif line.startswith("REMARK VINA RESULT:"):
-                affinity = float(line.split()[-3])
-            else:
-                current.append(line.rstrip())
-    models.sort(key=lambda m: m[1] if m[1] is not None else 0.0)
-    return models
+def docking_params(opts):
+    """Run-wide settings that change the docked poses."""
+    keys = ("seed", "exhaustiveness", "binding_modes", "energy_range",
+            "padding", "min_box", "threads", "start_conformer",
+            "conformer_seed", "receptor_hetatm", "runner_version",
+            "rdkit_version")
+    return {k: opts.get(k) for k in keys}
 
 
-def obrms(ref, query):
-    proc = subprocess.run(
-        ["obrms", ref, query], capture_output=True, text=True, timeout=120)
-    if proc.returncode != 0:
-        raise RuntimeError(f"obrms failed: {proc.stderr.strip()}")
-    for tok in proc.stdout.split():
-        try:
-            return float(tok)
-        except ValueError:
-            continue
-    raise RuntimeError(f"no RMSD in obrms output: {proc.stdout!r}")
+def complex_inputs(pdbid, complex_dir):
+    """The input files of one complex: ``{file name: SHA-256 or None}``."""
+    names = [f"{pdbid}_protein.pdb", f"{pdbid}_ligand.mol2", f"{pdbid}_ligand.sdf",
+             f"{pdbid}_ligand_rdkit.mol2", f"{pdbid}_ligand_rdkit.json"]
+    return {n: _benchlib.file_sha256(os.path.join(complex_dir, n)) for n in names}
+
+
+def complex_params(opts, pdbid, complex_dir):
+    """Everything that changes one complex's docked poses (stored in its
+    params.json; resume requires an exact match): the run-wide settings
+    (incl. AutoDocker and RDKit versions) and the content hashes of the
+    complex's input files."""
+    return {**docking_params(opts), "inputs": complex_inputs(pdbid, complex_dir)}
+
+
+def params_match(work, params):
+    try:
+        with open(os.path.join(work, "params.json"), encoding="utf-8") as f:
+            return json.load(f).get("docking") == params
+    except (OSError, ValueError):
+        return False
+
+
+def prepare_start_ligand(pdbid, complex_dir, work, opts):
+    """Ligand file handed to the runner, plus metadata about its origin."""
+    crystal = os.path.join(complex_dir, f"{pdbid}_ligand.mol2")
+    lig_dir = os.path.join(work, "input")
+    os.makedirs(lig_dir, exist_ok=True)
+    out = os.path.join(lig_dir, f"{pdbid}_ligand.mol2")
+    if opts["start_conformer"] == "crystal":
+        shutil.copy(crystal, out)
+        return out, {"method": "crystal"}
+    sdf = os.path.join(complex_dir, f"{pdbid}_ligand.sdf")
+    pre = os.path.join(complex_dir, f"{pdbid}_ligand_rdkit.mol2")
+    pre_meta = pre[:-len(".mol2")] + ".json"
+    meta = None
+    try:
+        meta = _benchlib.rdkit_start_conformer(
+            sdf if os.path.exists(sdf) else crystal, out, opts["conformer_seed"])
+    except ImportError:
+        # No RDKit here (e.g. inside the AutoDocker image): use the conformer
+        # fetch_casf_rcsb.py generated, if it was made with the same seed.
+        if os.path.exists(pre) and os.path.exists(pre_meta):
+            with open(pre_meta, encoding="utf-8") as f:
+                pre_info = json.load(f)
+            if pre_info.get("seed") == opts["conformer_seed"]:
+                shutil.copy(pre, out)
+                meta = dict(pre_info, source="precomputed")
+    if meta is None:
+        raise RuntimeError(
+            "--start-conformer rdkit needs RDKit, or a precomputed "
+            f"{os.path.basename(pre)} (+ .json, same seed) from fetch_casf_rcsb.py")
+    check_same_molecule(crystal, out)
+    return out, meta
+
+
+def check_same_molecule(crystal_mol2, start_mol2, key_fn=None):
+    """Both start modes must dock the same molecule: the RDKit start
+    conformer must have the crystal ligand's InChIKey (same connectivity,
+    hydrogens/protonation and stereo). Raises RuntimeError otherwise, e.g.
+    for a data directory written by an older fetch_casf_rcsb.py, whose
+    crystal MOL2 lost hydrogens in an Open Babel conversion."""
+    key_fn = key_fn or _benchlib.inchikey
+    crystal_key, start_key = key_fn(crystal_mol2), key_fn(start_mol2)
+    if not crystal_key or crystal_key != start_key:
+        raise RuntimeError(
+            f"start conformer {os.path.basename(start_mol2)} ({start_key}) is not the "
+            f"crystal ligand's molecule ({crystal_key}); rebuild the data directory "
+            "with fetch_casf_rcsb.py")
+
+
+def run_docking(pdbid, complex_dir, work, opts):
+    protein = os.path.join(complex_dir, f"{pdbid}_protein.pdb")
+    crystal = os.path.join(complex_dir, f"{pdbid}_ligand.mol2")
+    cx, cy, cz, size = ligand_grid(crystal, opts["padding"], opts["min_box"])
+    ligand, conf_meta = prepare_start_ligand(pdbid, complex_dir, work, opts)
+    cmd = [
+        sys.executable, opts["runner"],
+        "-r", protein, "-l", ligand, "-o", work,
+        "--chain=all", "--no-resume", "--no-html-report",
+        *_benchlib.box_cli_args((cx, cy, cz), size),
+        *HETATM_FLAGS[opts["receptor_hetatm"]],
+        "--seed", str(opts["seed"]),
+        "--exhaustiveness", str(opts["exhaustiveness"]),
+        "--binding-modes", str(opts["binding_modes"]),
+        "--energy-range", str(opts["energy_range"]),
+        "--timeout", str(opts["timeout"]),
+    ]
+    if opts.get("threads"):
+        cmd.extend(["--threads", str(opts["threads"])])
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          timeout=opts["timeout"])
+    with open(os.path.join(work, "runner.log"), "w", encoding="utf-8") as f:
+        f.write(" ".join(cmd) + "\n")
+        f.write(proc.stdout or "")
+        f.write(proc.stderr or "")
+    out_pdbqt = os.path.join(work, _benchlib.DOCKED_DIR, f"{pdbid}_ligand" + _benchlib.POSE_SUFFIX)
+    if proc.returncode != 0 or not os.path.exists(out_pdbqt):
+        raise RuntimeError(
+            f"docking failed (rc={proc.returncode}): "
+            f"{(proc.stdout or '')[-300:]} {(proc.stderr or '')[-300:]}")
+    with open(os.path.join(work, "params.json"), "w", encoding="utf-8") as f:
+        json.dump({"docking": complex_params(opts, pdbid, complex_dir),
+                   "start_conformer": conf_meta,
+                   "box": {"center_input_frame": [cx, cy, cz], "edge": size}},
+                  f, indent=2)
+    return {"box_edge": size, "start_conformer": conf_meta}
 
 
 def process_complex(job):
-    pdbid, data_dir, workdir, runner_script, opts = job
-    rec = {
-        "pdbid": pdbid,
-        "status": "error",
-        "affinity": None,
-        "rmsd_top1": None,
-        "rmsd_best": None,
-        "error": None,
-    }
+    pdbid, data_dir, workroot, opts = job
+    rec = {"pdbid": pdbid, "status": "error", "affinity": None,
+           "affinity_mode1": None, "rmsd_top1": None, "rmsd_best": None,
+           "rmsd_modes": [], "reused": False, "error": None}
     complex_dir = os.path.join(data_dir, pdbid)
     protein = os.path.join(complex_dir, f"{pdbid}_protein.pdb")
-    ligand = os.path.join(complex_dir, f"{pdbid}_ligand.mol2")
-    outdir = os.path.join(workdir, pdbid)
+    crystal = os.path.join(complex_dir, f"{pdbid}_ligand.mol2")
+    work = os.path.join(workroot, pdbid)
+    out_pdbqt = os.path.join(work, _benchlib.DOCKED_DIR, f"{pdbid}_ligand" + _benchlib.POSE_SUFFIX)
     try:
+        if not (os.path.exists(protein) and os.path.exists(crystal)):
+            rec["status"] = "missing"
+            rec["error"] = opts["manifest"].get(pdbid) or "not in --data-dir"
+            return rec
         if opts["max_receptor_atoms"]:
-            n_atom = sum(1 for l in open(protein) if l.startswith("ATOM"))
+            with open(protein, encoding="utf-8") as f:
+                n_atom = sum(1 for ln in f if ln.startswith("ATOM"))
             if n_atom > opts["max_receptor_atoms"]:
                 rec["status"] = "skipped"
                 rec["error"] = (f"receptor too large ({n_atom} ATOM > "
                                 f"{opts['max_receptor_atoms']})")
                 return rec
-        cx, cy, cz, size = ligand_grid(ligand, padding=opts["padding"])
-        rc = receptor_centroid(protein)
-        # The runner centers the receptor at the origin (obabel -c); express the
-        # crystal-ligand-centered box in that centered frame.
-        cx, cy, cz = cx - rc[0], cy - rc[1], cz - rc[2]
-        crystal_shifted = os.path.join(outdir, f"{pdbid}_crystal_centered.mol2")
-        os.makedirs(outdir, exist_ok=True)
-        shift_mol2(ligand, rc, crystal_shifted)
-        cmd = [
-            sys.executable, runner_script,
-            "-r", protein, "-l", ligand, "-o", outdir,
-            "--chain=all",
-            "--no-fpocket",
-            f"--grid-center={cx:.3f},{cy:.3f},{cz:.3f}",
-            f"--grid-size={size:.1f},{size:.1f},{size:.1f}",
-            "--seed", str(opts["seed"]),
-            "--exhaustiveness", str(opts["exhaustiveness"]),
-            "--binding-modes", str(opts["binding_modes"]),
-            "--energy-range", str(opts["energy_range"]),
-            "--timeout", str(opts["timeout"]),
-        ]
-        if opts.get("threads"):
-            cmd.extend(["--threads", str(opts["threads"])])
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=opts["timeout"])
-        best_pdbqt = os.path.join(outdir, "docked",
-                                  f"{pdbid}_ligand_out.pdbqt")
-        if proc.returncode != 0 or not os.path.exists(best_pdbqt):
-            raise RuntimeError(
-                f"docking failed (rc={proc.returncode}): "
-                f"{(proc.stdout or '')[-400:]} {(proc.stderr or '')[-400:]}")
-        rec["affinity"] = read_ranking(
-            os.path.join(outdir, "ranking.csv"))
-        with tempfile.TemporaryDirectory() as tmp:
-            modes = split_vina_models(best_pdbqt, tmp)
-            rmsds = []
-            for _, _, mode_path in modes:
-                try:
-                    rmsds.append(obrms(crystal_shifted, mode_path))
-                except Exception as e:
-                    rec["error"] = f"obrms: {e}"
-            if rmsds:
-                rec["rmsd_top1"] = rmsds[0]
-                rec["rmsd_best"] = min(rmsds)
-        rec["status"] = "ok"
+        params = complex_params(opts, pdbid, complex_dir)
+        if os.path.exists(out_pdbqt) and params_match(work, params):
+            rec["reused"] = True
+        else:
+            shutil.rmtree(work, ignore_errors=True)
+            os.makedirs(work)
+            rec.update(run_docking(pdbid, complex_dir, work, opts))
+        # Poses are in the docking frame; move the crystal ligand into it
+        # with the offset the runner recorded.
+        shift = _benchlib.read_frame_offset(work)
+        crystal_ref = os.path.join(work, f"{pdbid}_crystal_centered.mol2")
+        _benchlib.shift_mol2(crystal, shift, crystal_ref)
+        rec["affinity"], _ = ranking_affinity(os.path.join(work, _benchlib.RANKING_CSV),
+                                              f"{pdbid}_ligand")
+        _, rec["affinity_mode1"] = _benchlib.first_vina_result(out_pdbqt)
+        apply_rmsds(rec, *mode_rmsds(crystal_ref, out_pdbqt))
     except Exception as e:
-        rec["error"] = str(e)
+        rec["status"] = "error"
+        rec["error"] = str(e)[:500]
     return rec
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+def _frac(k, n):
+    return k / n if n else None
+
+
+def summarize(results, cutoff):
+    """Success rates with explicit denominators, medians, exclusions.
+
+    Top-1 and best-of-N use the same sets: the numerators count successes
+    among the evaluated complexes (status ok: docked, mode-1 RMSD computed);
+    ``*_frac_evaluated`` divides by the evaluated complexes and
+    ``*_frac_attempted`` by every attempted complex (docking failures and
+    rmsd_failed count as misses). A complex whose mode-1 RMSD failed is
+    therefore never a best-of-N success either, even when another mode's
+    RMSD could be computed. Medians are over the evaluated complexes.
+    """
+    evaluated = [r for r in results if r["status"] == "ok"]
+    attempted = [r for r in results if r["status"] not in ("missing", "skipped")]
+    top1_ok = sum(1 for r in evaluated if r["rmsd_top1"] <= cutoff)
+    best_ok = sum(1 for r in evaluated if r["rmsd_best"] <= cutoff)
+    return {
+        "n_selected": len(results),
+        "n_missing": sum(1 for r in results if r["status"] == "missing"),
+        "n_skipped": sum(1 for r in results if r["status"] == "skipped"),
+        "n_attempted": len(attempted),
+        "n_docking_failed": sum(1 for r in results if r["status"] == "error"),
+        "n_rmsd_failed": sum(1 for r in results if r["status"] == "rmsd_failed"),
+        "n_evaluated": len(evaluated),
+        "success_top1": top1_ok,
+        "success_top1_frac_evaluated": _frac(top1_ok, len(evaluated)),
+        "success_top1_frac_attempted": _frac(top1_ok, len(attempted)),
+        "success_best": best_ok,
+        "success_best_frac_evaluated": _frac(best_ok, len(evaluated)),
+        "success_best_frac_attempted": _frac(best_ok, len(attempted)),
+        "median_rmsd_top1": (statistics.median(r["rmsd_top1"] for r in evaluated)
+                             if evaluated else None),
+        "median_rmsd_best": (statistics.median(r["rmsd_best"] for r in evaluated)
+                             if evaluated else None),
+        "denominators": ("successes counted among evaluated complexes; "
+                         "frac_evaluated = /n_evaluated, frac_attempted = /n_attempted"),
+        "rmsd_cutoff": cutoff,
+        "excluded": [{"pdbid": r["pdbid"], "status": r["status"],
+                      "reason": r["error"]}
+                     for r in results if r["status"] != "ok"],
+    }
+
+
+def read_manifest(data_dir):
+    """pdbid -> reason for complexes fetch_casf_rcsb.py could not build."""
+    path = os.path.join(data_dir, "manifest.csv")
+    reasons = {}
+    if os.path.exists(path):
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if row.get("status") != "ok":
+                    reasons[row["pdbid"]] = f"fetch skipped: {row.get('reason', '')}"
+    return reasons
+
+
+def select_ids(args):
+    """``--pdbids`` (lower-cased), else the selection from ``--ids-csv``
+    (``--first N`` or the seeded sample) made by the same function as in
+    fetch_casf_rcsb.py."""
+    if args.pdbids:
+        return sorted({_benchlib.normalize_pdbid(p) for p in args.pdbids.split(",")} - {""})
+    return _benchlib.select_complexes(_benchlib.read_pdbid_rows(args.ids_csv),
+                                      args.sample, args.sample_seed, args.first)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data-dir", required=True,
-                    help="Extracted PDBbind core-set dir (dirs per pdbid)")
-    ap.add_argument("--pdbids", help="Comma-separated PDB IDs (else default subset)")
-    ap.add_argument("--max-complexes", type=int, default=40,
-                    help="Use first N sorted PDB IDs when --pdbids is empty")
-    ap.add_argument("--outdir", default="benchmarks/results/redock",
-                    help="Results directory")
-    ap.add_argument("--runner", default="autodocker/runner.py",
-                    help="Path to runner.py")
-    ap.add_argument("--processes", type=int, default=8)
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--exhaustiveness", type=int, default=8)
-    ap.add_argument("--binding-modes", type=int, default=9)
-    ap.add_argument("--energy-range", type=float, default=3.0)
-    ap.add_argument("--padding", type=float, default=6.0)
+                    help="Dir with one sub-dir per PDB ID (fetch_casf_rcsb.py output "
+                         "or extracted PDBbind core set)")
+    ap.add_argument("--pdbids", help="Comma-separated PDB IDs (overrides --sample)")
+    ap.add_argument("--sample", type=int, default=_benchlib.BENCH_SAMPLE_SIZE,
+                    help="Seeded random sample size from --ids-csv (default "
+                         f"{_benchlib.BENCH_SAMPLE_SIZE}; 0 = the whole core set)")
+    ap.add_argument("--sample-seed", type=int, default=_benchlib.BENCH_SEED,
+                    help="Seed of the complex sample (default 42)")
+    ap.add_argument("--ids-csv", default=DEFAULT_IDS,
+                    help="CSV with a pdbid column (default: CASF-2016 core set)")
+    ap.add_argument("--first", "--max-complexes", dest="first", type=int, default=None,
+                    help="Legacy 1.1.x selection: first N IDs of --ids-csv in sorted "
+                         "order (the same IDs fetch_casf_rcsb.py --first N fetches)")
+    ap.add_argument("--outdir", default="benchmarks/results/redock")
+    ap.add_argument("--runner", default="autodocker/runner.py")
+    ap.add_argument("--processes", type=int, default=_benchlib.available_cpus(),
+                    help="Complexes docked in parallel (default: available CPUs)")
+    pipeline = _benchlib.PIPELINE_DEFAULTS
+    ap.add_argument("--seed", type=int, default=pipeline.SEED)
+    ap.add_argument("--exhaustiveness", type=int, default=pipeline.EXHAUSTIVENESS)
+    ap.add_argument("--binding-modes", type=int, default=pipeline.BINDING_MODES)
+    ap.add_argument("--energy-range", type=float, default=pipeline.ENERGY_RANGE)
+    ap.add_argument("--padding", type=float, default=_benchlib.BENCH_BOX_PADDING)
+    ap.add_argument("--min-box", type=float, default=_benchlib.BENCH_MIN_BOX_EDGE)
     ap.add_argument("--threads", type=int, default=0,
-                    help="Vina threads per complex (0 = let Vina decide; "
-                         "only honored by Vina builds that support --threads)")
-    ap.add_argument("--max-receptor-atoms", type=int, default=6000,
-                    help="Skip receptors larger than this many ATOM records "
-                         "(large oligomeric assemblies dominate runtime)")
+                    help="Vina threads per complex (0 = runner default)")
+    ap.add_argument("--start-conformer", choices=["rdkit", "crystal"], default="rdkit",
+                    help="Ligand start geometry (default rdkit: seeded ETKDGv3 + MMFF)")
+    ap.add_argument("--conformer-seed", type=int, default=_benchlib.BENCH_SEED,
+                    help="ETKDG randomSeed for --start-conformer rdkit (default 42)")
+    ap.add_argument("--receptor-hetatm", choices=sorted(HETATM_FLAGS), default="metals",
+                    help="Receptor HETATM records kept by the runner: metals "
+                         "(--detect-metals, default), all (--keep-hetero) or none")
+    ap.add_argument("--max-receptor-atoms", type=int, default=0,
+                    help="Skip receptors with more ATOM records (0 = no filter, default)")
     ap.add_argument("--rmsd-cutoff", type=float, default=2.0)
-    ap.add_argument("--timeout", type=int, default=1800)
-    args = ap.parse_args()
+    ap.add_argument("--timeout", type=int, default=_benchlib.DOCKING_RUN_TIMEOUT)
+    args = ap.parse_args(argv)
 
     os.makedirs(args.outdir, exist_ok=True)
-
-    if args.pdbids:
-        pdbids = [p.strip() for p in args.pdbids.split(",") if p.strip()]
-        missing = [p for p in pdbids if not os.path.isdir(os.path.join(args.data_dir, p))]
-        if missing:
-            raise SystemExit(f"missing complexes in data dir: {missing}")
-    else:
-        pdbids = sorted(os.listdir(args.data_dir))[:args.max_complexes]
-
-    # Resume: skip complexes already docked successfully; drop partial dirs.
+    pdbids = select_ids(args)
+    runner = os.path.abspath(args.runner)
+    opts = {"padding": args.padding, "min_box": args.min_box, "seed": args.seed,
+            "exhaustiveness": args.exhaustiveness,
+            "binding_modes": args.binding_modes,
+            "energy_range": args.energy_range, "threads": args.threads,
+            "start_conformer": args.start_conformer,
+            "conformer_seed": (args.conformer_seed
+                               if args.start_conformer == "rdkit" else None),
+            "receptor_hetatm": args.receptor_hetatm,
+            "runner": runner, "runner_version": _benchlib.runner_version(runner),
+            "rdkit_version": (_benchlib.rdkit_version()
+                              if args.start_conformer == "rdkit" else None),
+            "max_receptor_atoms": args.max_receptor_atoms,
+            "timeout": args.timeout, "manifest": read_manifest(args.data_dir)}
     workroot = os.path.join(args.outdir, "work")
-    todo, done = [], []
-    for p in pdbids:
-        out_pdbqt = os.path.join(workroot, p, "docked", f"{p}_ligand_out.pdbqt")
-        if os.path.exists(out_pdbqt):
-            done.append(p)
-        else:
-            shutil.rmtree(os.path.join(workroot, p), ignore_errors=True)
-            todo.append(p)
-    if done:
-        print(f"[*] Skipping {len(done)} already-docked complexes: {', '.join(done)}")
-
-    jobs = [(p, args.data_dir, workroot,
-             os.path.abspath(args.runner),
-             {"padding": args.padding, "seed": args.seed,
-              "exhaustiveness": args.exhaustiveness,
-              "binding_modes": args.binding_modes,
-              "energy_range": args.energy_range,
-              "threads": args.threads,
-              "max_receptor_atoms": args.max_receptor_atoms,
-              "timeout": args.timeout})
-            for p in todo]
+    jobs = [(p, args.data_dir, workroot, opts) for p in pdbids]
 
     results = []
-    with multiprocessing.Pool(processes=args.processes) as pool:
+    with multiprocessing.Pool(processes=max(1, args.processes)) as pool:
         for rec in pool.imap_unordered(process_complex, jobs):
             results.append(rec)
-            print(f"[{rec['pdbid']}] {rec['status']} "
+            print(f"[{rec['pdbid']}] {rec['status']}{' (reused)' if rec['reused'] else ''} "
                   f"aff={rec['affinity']} rmsd_top1={rec['rmsd_top1']} "
-                  f"rmsd_best={rec['rmsd_best']} err={rec['error']}",
-                  flush=True)
-
-    # Merge previously-completed results back in for the final report.
-    for p in done:
-        results.append({"pdbid": p, "status": "ok", "affinity": None,
-                        "rmsd_top1": None, "rmsd_best": None, "error": None})
-        best_pdbqt = os.path.join(workroot, p, "docked", f"{p}_ligand_out.pdbqt")
-        try:
-            rc = receptor_centroid(
-                os.path.join(args.data_dir, p, f"{p}_protein.pdb"))
-            crystal_ref = os.path.join(workroot, p, f"{p}_crystal_centered.mol2")
-            here = os.path.join(args.data_dir, p, f"{p}_ligand.mol2")
-            if not os.path.exists(crystal_ref):
-                shift_mol2(here, rc, crystal_ref)
-            with tempfile.TemporaryDirectory() as tmp:
-                modes = split_vina_models(best_pdbqt, tmp)
-                rmsds = [obrms(crystal_ref, m[2]) for m in modes]
-            results[-1]["rmsd_top1"] = rmsds[0]
-            results[-1]["rmsd_best"] = min(rmsds)
-            results[-1]["affinity"] = read_ranking(
-                os.path.join(workroot, p, "ranking.csv"))
-        except Exception as e:
-            results[-1]["error"] = f"resume: {e}"
+                  f"rmsd_best={rec['rmsd_best']} err={rec['error']}", flush=True)
 
     results.sort(key=lambda r: r["pdbid"])
-    rows_path = os.path.join(args.outdir, "results.csv")
-    with open(rows_path, "w", newline="") as f:
+    with open(os.path.join(args.outdir, "results.csv"), "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["pdbid", "status", "affinity",
-                         "rmsd_top1", "rmsd_best", "error"])
+        writer.writerow(["pdbid", "status", "affinity", "affinity_mode1",
+                         "rmsd_top1", "rmsd_best", "rmsd_modes",
+                         "n_modes_rmsd_failed", "reused", "error"])
         for r in results:
-            writer.writerow([r["pdbid"], r["status"], r["affinity"],
-                             (f"{r['rmsd_top1']:.3f}" if r["rmsd_top1"] is not None else ""),
-                             (f"{r['rmsd_best']:.3f}" if r["rmsd_best"] is not None else ""),
-                             r["error"]])
+            writer.writerow([
+                r["pdbid"], r["status"],
+                "" if r["affinity"] is None else r["affinity"],
+                "" if r["affinity_mode1"] is None else r["affinity_mode1"],
+                "" if r["rmsd_top1"] is None else f"{r['rmsd_top1']:.3f}",
+                "" if r["rmsd_best"] is None else f"{r['rmsd_best']:.3f}",
+                " ".join("NA" if x is None else f"{x:.3f}" for x in r["rmsd_modes"]),
+                r.get("n_modes_rmsd_failed", ""), r["reused"], r["error"] or ""])
 
-    ok = [r for r in results if r["rmsd_top1"] is not None]
-    best = [r for r in results if r["rmsd_best"] is not None]
-    summary = {
-        "total": len(results),
-        "skipped": len([r for r in results if r["status"] == "skipped"]),
-        "failed": len([r for r in results if r["status"] == "error"]),
-        "docked": len(ok),
-        "success_top1": len([r for r in ok if r["rmsd_top1"] <= args.rmsd_cutoff]),
-        "success_top1_frac": (len([r for r in ok if r["rmsd_top1"] <= args.rmsd_cutoff]) / len(ok)) if ok else 0.0,
-        "success_best": len([r for r in best if r["rmsd_best"] <= args.rmsd_cutoff]),
-        "success_best_frac": (len([r for r in best if r["rmsd_best"] <= args.rmsd_cutoff]) / len(best)) if best else 0.0,
-        "median_rmsd_top1": sorted(r["rmsd_top1"] for r in ok)[len(ok) // 2] if ok else None,
-        "median_rmsd_best": sorted(r["rmsd_best"] for r in best)[len(best) // 2] if best else None,
-        "rmsd_cutoff": args.rmsd_cutoff,
-        "seed": args.seed,
-        "exhaustiveness": args.exhaustiveness,
-        "binding_modes": args.binding_modes,
-        "energy_range": args.energy_range,
+    summary = summarize(results, args.rmsd_cutoff)
+    summary["protocol"] = {
+        "selection": ("pdbids" if args.pdbids else
+                      f"first {args.first}" if args.first else
+                      f"sample {args.sample} seed {args.sample_seed} of "
+                      f"{os.path.basename(args.ids_csv)}"),
+        "pdbids": pdbids,
+        **docking_params(opts),
+        "max_receptor_atoms": args.max_receptor_atoms,
+        "rmsd": "obrms heavy-atom, symmetry-corrected, no superposition",
+        "top1": "mode 1 (first MODEL)",
+        "vina_version": _benchlib.tool_version("vina"),
     }
-    with open(os.path.join(args.outdir, "summary.json"), "w") as f:
+    with open(os.path.join(args.outdir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     print("\n=== SUMMARY ===")
     for k, v in summary.items():
-        print(f"  {k}: {v}")
+        if k not in ("excluded", "protocol"):
+            print(f"  {k}: {v}")
+    for e in summary["excluded"]:
+        print(f"  excluded {e['pdbid']}: {e['status']} ({e['reason']})")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

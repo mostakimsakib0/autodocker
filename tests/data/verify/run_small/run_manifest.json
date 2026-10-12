@@ -1,0 +1,182 @@
+{
+  "args": {
+    "auto_flexible": null,
+    "binding_modes": 3,
+    "chain": null,
+    "cluster_poses": false,
+    "consensus": false,
+    "detect_cofactors": false,
+    "detect_metals": false,
+    "energy_range": 3.0,
+    "exhaustiveness": 1,
+    "flexibility": null,
+    "flexible_residues": null,
+    "grid_center": "21.586,35.525,5.31",
+    "grid_center_frame": "input",
+    "grid_size": "16,16,16",
+    "html_report": false,
+    "keep_hetero": false,
+    "keep_waters": false,
+    "library": "local",
+    "ligands": "/work/ligands_in",
+    "logp_max": 5.0,
+    "max_compounds": 20,
+    "max_failure_fraction": 0.5,
+    "min_valid_affinity": -1.0,
+    "minimize_steps": 20,
+    "mw_max": 500.0,
+    "mw_min": 200.0,
+    "no_admet": false,
+    "no_fpocket": true,
+    "no_lipinski": false,
+    "no_minimize": false,
+    "no_resume": false,
+    "output": "/work/run_small",
+    "padding": 6.0,
+    "ph": 7.4,
+    "pockets": null,
+    "processes": 1,
+    "qvina_fallback": false,
+    "receptor": "tests/data/e2e/pocket_2fxs.pdb",
+    "rmsd_threshold": 2.0,
+    "seed": 3,
+    "smina_only": false,
+    "threads": 1,
+    "timeout": 900,
+    "top_n": 20,
+    "verbose": false,
+    "vina_bin": null,
+    "vina_extra": [],
+    "water_distance": 4.0
+  },
+  "argv": [
+    "autodocker/runner.py",
+    "-r",
+    "tests/data/e2e/pocket_2fxs.pdb",
+    "-l",
+    "/work/ligands_in",
+    "-o",
+    "/work/run_small",
+    "--no-fpocket",
+    "--grid-center=21.586,35.525,5.31",
+    "--grid-size=16,16,16",
+    "--exhaustiveness",
+    "1",
+    "--binding-modes",
+    "3",
+    "--seed",
+    "3",
+    "--no-html-report",
+    "--threads",
+    "1",
+    "--minimize-steps",
+    "20"
+  ],
+  "autodocker_version": "2.0.0",
+  "command_timeout_s": 900,
+  "cpu_count": {
+    "available": 8,
+    "os": 8
+  },
+  "docking_engines": [
+    {
+      "path": "/opt/vina/bin/vina",
+      "sha256": "88fccf2c32f6c150e9920ccc849e5c0c94aea27c8cb9a589782119861fc2d5ec",
+      "version": "AutoDock Vina v1.2.7"
+    }
+  ],
+  "docking_failures": {
+    "docked": 3,
+    "failed": 0
+  },
+  "environment": {
+    "BABEL_DATADIR": "/opt/openbabel/share/openbabel/3.2.1",
+    "BABEL_LIBDIR": "/opt/openbabel/lib/openbabel/3.2.1",
+    "OMP_NUM_THREADS": "1"
+  },
+  "error": null,
+  "exit_code": 0,
+  "failures": {
+    "docking_failed": 0,
+    "failed": 0,
+    "fraction": 0.0,
+    "ligands": 3,
+    "max_failure_fraction": 0.5,
+    "preparation_failed": 0
+  },
+  "finished_at": "2026-10-12T06:28:17+00:00",
+  "flexible_residues": [],
+  "inputs": {
+    "ligands": {},
+    "receptor": {
+      "path": "/workspace/protein.pdb",
+      "sha256": "0f9b4b1e6b7914b59828240605ee82cc818d74b0d2b124ee6588a33bf8330083"
+    }
+  },
+  "ligand_preparation": {
+    "failed": 0,
+    "superseded": 0
+  },
+  "openbabel_random_seed": {
+    "honoured": true,
+    "hydrogen_probe_values": [
+      4,
+      5
+    ],
+    "policy": "Every Open Babel call runs with OB_RANDOM_SEED set to the run's --seed; the hydrogen-placement probe conversions use the next two seeds, and hydrogens that move between seeds are re-placed from heavy-atom geometry. Open Babel < 3.2.0 ignores the variable (clock seed).",
+    "value": 3,
+    "variable": "OB_RANDOM_SEED"
+  },
+  "openbabel_version": "3.2.1",
+  "outputs": {
+    "Results_full.txt": "983dbc94df958fc22fce597d75594f1523e595f4540592a09b69b824fffa1285",
+    "Top_hits.txt": "88123be62b8512e03676b0e1caee478dcfdd6a9a42fe79ff66e39268a901c9ed",
+    "docked/acetaminophen_out.pdbqt": "45f6f176538e45ad2e35bd1ab0b006b95c590363037cdfa64a16cad739393608",
+    "docked/acetaminophen_vina.log": "7adad08ca31338471fa7f6f2998ffa1fbe2164c05c485ad5131fb3cc609ed611",
+    "docked/butanoic_acid_out.pdbqt": "2a90bdc3401e71292be30f95d81f83be5b9d1a75c1bc367362c0da6dd2f10c70",
+    "docked/butanoic_acid_vina.log": "6e5e0209982329bf7f0514070c0494de9cb411a8e6fdb45dc1055c91c112e17e",
+    "docked/phenylethanol_out.pdbqt": "0a4dbd6cc65d274bdf10de3a9b4ae28f719b8be2bb9933cf191f420f2eef871e",
+    "docked/phenylethanol_vina.log": "928bb0d429a7ceadd5b6370316421bf2232448a70905c0736ea7047cada6432c",
+    "frame_offset.txt": "3ac19b860955322629ff31136dbfaa5e31850881a870c2a0d2ed925510c6c80d",
+    "grid.conf": "66f19c6dcbfadbc1d242595e28ae93afb7cccded0446a5ce4354cfc89406fa79",
+    "ligand_metadata.json": "453a086f5fc5cbf6b13bdbeed877078dec26b234e891652449d3ba0dd7a1f8bf",
+    "ligands/acetaminophen.pdbqt": "7482df7aee53c7a026806651b95063a82459d7d0845aa80b574e684b19379e63",
+    "ligands/butanoic_acid.pdbqt": "2e4b162a0295595dd6b37f72b2ea98b6b48dfb1b19a52f997ada9e8cfad575bd",
+    "ligands/phenylethanol.pdbqt": "14a64fe381bb34f780662af9d59388133567e6e2e3e9585e106ad9a557825f71",
+    "metrics.txt": "cc4b69e0063128f11931df850511cfd8498e406c56971c19f1ca4a12a9ca2c01",
+    "ranking.csv": "0ec7d76f99a68108a4647399467e0fd7ba7c00e60b5ed843739ba620582d513c"
+  },
+  "platform": "Linux-6.8.0-146-generic-x86_64-with-glibc2.39",
+  "python": {
+    "executable": "/usr/bin/python3",
+    "implementation": "CPython",
+    "version": "3.12.3"
+  },
+  "python_packages": {
+    "numpy": "1.26.4",
+    "rdkit": "2023.09.3"
+  },
+  "run_fingerprint": "1d19edf7d2ffcd34db7d290e47e421b280d02b959d0fe63283ad3f899f560b20",
+  "seed": 3,
+  "started_at": "2026-10-12T06:28:03+00:00",
+  "status": "completed",
+  "threads_per_process": {
+    "processes": 1,
+    "source": "--threads",
+    "threads": 1
+  },
+  "tools": {
+    "obabel": {
+      "path": "/opt/openbabel/bin/obabel",
+      "resolved_path": "/opt/openbabel/bin/obabel",
+      "sha256": "f231eaaacb996de4b50e1a9520dda9f3b4a8720b6045864acc0271360eb83517",
+      "version": "Open Babel 3.2.1 -- Oct 12 2026 -- 02:12:58"
+    },
+    "vina": {
+      "path": "/opt/vina/bin/vina",
+      "resolved_path": "/opt/vina/bin/vina",
+      "sha256": "88fccf2c32f6c150e9920ccc849e5c0c94aea27c8cb9a589782119861fc2d5ec",
+      "version": "AutoDock Vina v1.2.7"
+    }
+  }
+}

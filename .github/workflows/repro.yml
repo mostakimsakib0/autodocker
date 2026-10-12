@@ -1,0 +1,249 @@
+name: Reproducibility
+
+# The paper's cross-machine and cross-architecture check: the 1HSG
+# case-study screen (--chain all --pockets 2, inputs in .github/repro/1hsg)
+# rerun away from the authors' laptop and compared with the laptop result
+# (.github/repro/1hsg/expected). Started by hand only:
+#   gh workflow run repro.yml -r <branch> [-f image_run_id=<run>]
+# The paper's run is 38263602306 (x86-64: byte-identical to the laptop;
+# arm64: identical prepared inputs, docking within seed noise). The
+# default image artifact (Benchmarks run 38227673333) expires on
+# 2026-10-19; later runs need image_run_id of a newer Benchmarks run, whose
+# image then has to be compared with a laptop run of that same image.
+#
+#   plan      read build-info.json of the image built by a Benchmarks run
+#             (the image the laptop runs used): commit and image ID
+#   machine2  a second x86-64 machine: that same image (artifact "image" of
+#             the Benchmarks run, ID checked), same inputs and command
+#   arm64     native arm64 runner: the image built from the same commit for
+#             linux/arm64 (Dockerfile and build args of benchmarks.yml)
+#   compare   ranking.csv and every pose file against the laptop run;
+#             measured, not guaranteed, so a difference is reported in the
+#             summary and does not fail the run
+#
+# Each run uploads its whole workspace (protein.pdb, ligs/, output/, log,
+# host.txt) as artifact repro-explicit_<machine>, the layout of
+# AutoDocker_Paper/results_2.0/repro/explicit_<machine>.
+on:
+  workflow_dispatch:
+    inputs:
+      image_run_id:
+        description: 'Benchmarks run whose amd64 image the laptop runs used'
+        type: string
+        default: '38227673333'
+
+permissions:
+  contents: read
+  # Download artifacts of another workflow run.
+  actions: read
+
+concurrency:
+  group: repro-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_RUN_ID: ${{ inputs.image_run_id }}
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.info.outputs.sha }}
+      image_id: ${{ steps.info.outputs.image_id }}
+    steps:
+      - name: Download build record of the image
+        uses: actions/download-artifact@v4
+        with:
+          name: build-info
+          path: ${{ runner.temp }}/build-info
+          run-id: ${{ env.IMAGE_RUN_ID }}
+          github-token: ${{ github.token }}
+
+      - name: Read commit and image ID
+        id: info
+        run: |
+          set -euo pipefail
+          bi="$RUNNER_TEMP/build-info/build-info.json"
+          sha="$(jq -r .git_sha "$bi")"
+          image_id="$(jq -r .image_id "$bi")"
+          arch="$(jq -r .architecture "$bi")"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no commit in $bi"; exit 1; }
+          [ "$arch" = amd64 ] || { echo "::error::run $IMAGE_RUN_ID built $arch, not amd64"; exit 1; }
+          {
+            echo "sha=$sha"
+            echo "image_id=$image_id"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Reproducibility plan"
+            echo
+            echo "- image: \`$image_id\` (amd64), Benchmarks run $IMAGE_RUN_ID"
+            echo "- commit: \`$sha\` (the arm64 image is built from it)"
+            echo "- AutoDocker: $(jq -r .versions.autodocker "$bi")"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  machine2:
+    name: second x86-64 machine
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download image
+        uses: actions/download-artifact@v4
+        with:
+          name: image
+          path: ${{ runner.temp }}/image
+          run-id: ${{ env.IMAGE_RUN_ID }}
+          github-token: ${{ github.token }}
+
+      - name: Load image
+        env:
+          WANT: ${{ needs.plan.outputs.image_id }}
+        run: |
+          scripts/ci/load_image.sh "$RUNNER_TEMP/image"
+          test "$(docker image inspect --format '{{.Id}}' autodocker:bench)" = "$WANT"
+          rm -rf "$RUNNER_TEMP/image"
+
+      - name: Case-study screen
+        run: .github/repro/run_case.sh autodocker:bench "$RUNNER_TEMP/explicit_machine2"
+
+      - name: Upload workspace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-explicit_machine2
+          path: ${{ runner.temp }}/explicit_machine2
+          if-no-files-found: error
+          retention-days: 30
+
+  arm64:
+    name: arm64
+    needs: plan
+    # Native arm64 runner (no QEMU); free for public repositories.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Checkout the image's commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          path: src
+          submodules: true
+
+      - name: Read version
+        id: version
+        run: echo "version=$(cat src/autodocker/VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Same labels as benchmarks.yml / publish.yml.
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: autodocker
+          labels: |
+            org.opencontainers.image.title=AutoDocker
+            org.opencontainers.image.description=Minimal container image for molecular docking.
+            org.opencontainers.image.url=https://github.com/mostakimsakib0/autodocker
+            org.opencontainers.image.documentation=https://github.com/mostakimsakib0/autodocker
+            org.opencontainers.image.source=https://github.com/mostakimsakib0/autodocker
+            org.opencontainers.image.vendor=Mostakim Sakib
+            org.opencontainers.image.authors=Mostakim Sakib
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.plan.outputs.sha }}
+
+      # Dockerfile and build args of benchmarks.yml, for linux/arm64, from the
+      # commit of the amd64 image; no cache, so nothing from another commit
+      # can enter the image.
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: src
+          platforms: linux/arm64
+          pull: true
+          load: true
+          push: false
+          provenance: false
+          no-cache: true
+          tags: autodocker:repro-arm64
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            AUTODOCKER_VERSION=${{ steps.version.outputs.version }}
+            VCS_REF=${{ needs.plan.outputs.sha }}
+
+      - name: Check image metadata and bundled tools
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          test "$(docker image inspect autodocker:repro-arm64 --format '{{ .Architecture }}')" = arm64
+          docker run --rm --entrypoint python3 autodocker:repro-arm64 \
+            /autodocker/runner.py --version | grep -Fx "AutoDocker $VERSION"
+          docker run --rm --entrypoint sh autodocker:repro-arm64 -c '
+            set -eu
+            vina --version | grep -F "v1.2.7"
+            obabel -V | grep -F "Open Babel 3.2.1 "'
+
+      - name: Record the arm64 image
+        run: |
+          scripts/ci/save_image.sh autodocker:repro-arm64 "$RUNNER_TEMP/image-arm64"
+          rm -f "$RUNNER_TEMP/image-arm64/image.tar.zst"
+
+      - name: Upload build record
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-info-arm64
+          path: ${{ runner.temp }}/image-arm64/build-info.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Case-study screen
+        run: .github/repro/run_case.sh autodocker:repro-arm64 "$RUNNER_TEMP/explicit_arm64"
+
+      - name: Upload workspace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-explicit_arm64
+          path: ${{ runner.temp }}/explicit_arm64
+          if-no-files-found: error
+          retention-days: 30
+
+  compare:
+    name: compare with the laptop run (non-blocking)
+    needs: [machine2, arm64]
+    if: always()
+    runs-on: ubuntu-24.04
+    # Measured, not guaranteed: a difference is reported but does not fail.
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download workspaces
+        uses: actions/download-artifact@v4
+        with:
+          pattern: repro-explicit_*
+          path: repro
+
+      - name: Compare ranking and poses
+        run: |
+          set -u
+          echo "## Reproducibility of the 1HSG case study against the laptop run" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          for m in machine2 arm64; do
+            .github/repro/compare.sh "$m" "repro/repro-explicit_$m" >> "$GITHUB_STEP_SUMMARY" || status=1
+            echo >> "$GITHUB_STEP_SUMMARY"
+          done
+          cat "$GITHUB_STEP_SUMMARY"
+          exit "$status"

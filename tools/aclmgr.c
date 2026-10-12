@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <pwd.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <stdbool.h>
@@ -12,13 +14,21 @@
 extern char **environ;
 
 /* setpriv --reset-env clears the environment for the unprivileged child, so
- * the pipeline's own settings (README "Environment variables", plus any VS_*
- * knob) are forwarded explicitly through /usr/bin/env. */
+ * the pipeline's own settings (README "Environment variables", every variable
+ * entry.sh reads, the variables runner.py records in run_manifest.json, plus
+ * any VS_* knob) are forwarded explicitly through /usr/bin/env.
+ * tests/test_container_env.py checks this list against entry.sh and README. */
 static const char* const forwarded_env[] = {
-	"ADMET", "BINDING_MODES", "CHAIN", "ENERGY_RANGE", "EXHAUST",
-	"EXHAUSTIVENESS", "INPUT", "LIGAND_MODE", "LIGS", "MAX_WORKERS",
-	"NO_MINIMIZE", "PADDING", "PDB", "POCKETS", "PROCESSES", "PUBCHEM_REST",
-	"RESUME", "TIMEOUT", "TOP_N", NULL
+	"ADMET", "AUTODOCKER_VERSION", "BINDING_MODES", "CHAIN", "ENERGY_RANGE",
+	"EXHAUST", "EXHAUSTIVENESS", "INPUT", "LIGAND_MODE", "LIGS", "LIPINSKI",
+	"MAX_WORKERS", "NO_MINIMIZE", "OMP_NUM_THREADS", "PADDING", "PDB",
+	"POCKETS", "PROCESSES", "PUBCHEM_REST", "RESUME", "TIMEOUT", "TOP_N",
+	/* Open Babel's plugin and data directories (Dockerfile ENV; the same
+	 * as its compiled-in defaults) */
+	"BABEL_DATADIR", "BABEL_LIBDIR",
+	/* proxies, so PubChem library modes work behind one */
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy",
+	"no_proxy", NULL
 };
 
 static bool is_forwarded(const char* entry)
@@ -36,7 +46,16 @@ static bool is_forwarded(const char* entry)
 }
 
 bool is_rootless = false;
+/* Run as capability-less container root instead of dockuser: set when the
+ * container is rootless and /workspace is owned by container root, i.e. a
+ * bind mount of the invoking user's own directory. */
+bool run_as_root = false;
 volatile sig_atomic_t caught = 0;
+/* Owner of /workspace (stat in main). Under rootful Docker or Podman the
+ * pipeline runs as dockuser, which must be able to write that bind mount. */
+bool have_workspace = false;
+uid_t workspace_uid = 0;
+gid_t workspace_gid = 0;
 
 static const char* const drop_caps_runner[]  = {
 	"/usr/bin/setpriv",
@@ -50,6 +69,22 @@ static const char* const drop_caps_runner[]  = {
 };
 static const size_t drop_caps_len = sizeof(drop_caps_runner) / sizeof(drop_caps_runner[0]);
 
+/* Rootless podman: container root is the invoking host user, without any
+ * privilege on the host. Staying uid 0 (with every capability dropped) makes
+ * the pipeline write files the host user owns, so /workspace never has to be
+ * chown'ed to dockuser and back -- a step that left the user's files owned by
+ * a sub-uid whenever the container was killed. */
+static const char* const drop_caps_rootless[]  = {
+	"/usr/bin/setpriv",
+	"--nnp",
+	"--inh-caps=-all",
+	"--ambient-caps=-all",
+	"--bounding-set=-all",
+	"--reset-env", "--"
+};
+static const size_t drop_caps_rootless_len =
+	sizeof(drop_caps_rootless) / sizeof(drop_caps_rootless[0]);
+
 int direct_run(const char* args[])
 {
 	pid_t pid = fork();  // Create a new child process
@@ -59,27 +94,23 @@ int direct_run(const char* args[])
 	}
 
 	if (pid == 0) {
-		if (execv(args[0], (char* const*) args))
-			_exit(127);
-	} else {
-		return pid;
+		execv(args[0], (char* const*) args);
+		_exit(127);
 	}
+	return pid;
 }
 
 int dropcap_run(const char* args[], size_t length)
 {
-	const char* dropcap_args[drop_caps_len + length + 1];
+	const char* const* prefix = run_as_root ? drop_caps_rootless : drop_caps_runner;
+	size_t prefix_len = run_as_root ? drop_caps_rootless_len : drop_caps_len;
+	const char* dropcap_args[prefix_len + length + 1];
 
-	dropcap_args[drop_caps_len + length] = NULL;
-	for(size_t i = 0; i < drop_caps_len; i++) {
-		dropcap_args[i] = drop_caps_runner[i];
-
-		if(i < length)
-			dropcap_args[drop_caps_len + i] = args[i];
-	}
-
-	for(size_t i = drop_caps_len; i < length; i++)
-		dropcap_args[drop_caps_len + i] = args[i];
+	for(size_t i = 0; i < prefix_len; i++)
+		dropcap_args[i] = prefix[i];
+	for(size_t i = 0; i < length; i++)
+		dropcap_args[prefix_len + i] = args[i];
+	dropcap_args[prefix_len + length] = NULL;
 
 	return direct_run(dropcap_args);
 }
@@ -129,11 +160,38 @@ static void handle_sigint(int sig)
 }
 
 
+/* Rootful engine: give dockuser the UID (and, unless it is root's group, the
+ * GID) of the owner of /workspace, in this container's /etc/passwd only. The
+ * host user's directory is then writable without a chmod, and every output
+ * belongs to that user. dockuser keeps its name, its home and the same
+ * privilege drop (setpriv, no capabilities); only the numbers change. A
+ * root-owned /workspace (e.g. a directory Docker created) or a failed
+ * usermod leaves dockuser as it is. */
+static void adopt_workspace_owner(void)
+{
+	if (!have_workspace || workspace_uid == 0) return;
+	struct passwd* pw = getpwnam(DROP_USER);
+	if (!pw) return;
+
+	char uid[24], gid[24];
+	snprintf(uid, sizeof uid, "%lu", (unsigned long) workspace_uid);
+	snprintf(gid, sizeof gid, "%lu", (unsigned long) workspace_gid);
+	if (workspace_gid != 0 && pw->pw_gid != workspace_gid) {
+		const char* groupmod[] = {"/usr/sbin/groupmod", "-o", "-g", gid, DROP_GROUP, NULL};
+		if (run(false, groupmod) != 0)
+			fprintf(stderr, "warning: could not give %s the group of /workspace\n", DROP_GROUP);
+	}
+	if (pw->pw_uid != workspace_uid) {
+		const char* usermod[] = {"/usr/sbin/usermod", "-o", "-u", uid, DROP_USER, NULL};
+		if (run(false, usermod) != 0)
+			fprintf(stderr, "warning: could not give %s the owner of /workspace; "
+			        "outputs may not be writable\n", DROP_USER);
+	}
+}
+
+
 int run_child_with_args(int argc, char** argv)
 {
-
-	static const char* pre_chown[]  = {"/usr/bin/chown", "-R", DROP_USER":"DROP_GROUP, "/workspace", NULL};
-	static const char* post_chown[] = {"/usr/bin/chown", "-R", "root:root", "/workspace", NULL};
 
 	size_t env_count = 0;
 	for (char** e = environ; *e != NULL; e++)
@@ -146,18 +204,21 @@ int run_child_with_args(int argc, char** argv)
 	for (char** e = environ; *e != NULL; e++)
 		if (is_forwarded(*e)) cmdline[n++] = *e;
 	cmdline[n++] = "/autodocker/entry.sh";
-	for(size_t i = 1; i < argc; i++)
+	for(int i = 1; i < argc; i++)
 		cmdline[n++] = argv[i];
 	cmdline[n] = NULL;
 
-	if (is_rootless)
-		run(false, pre_chown);
-
-	int ret = run(true, cmdline);
-
-	if (is_rootless)
-		run(false, post_chown);
-	return ret;
+	if (run_as_root) {
+		/* Hand back to the user any files an older image left owned by
+		 * dockuser's sub-uid (it chown'ed /workspace and could be killed
+		 * before restoring it). Container root is the invoking user, so
+		 * this only ever gives files to their owner. */
+		static const char* repair[] = {"/usr/bin/chown", "-R", "0:0", "/workspace", NULL};
+		run(false, repair);
+	} else if (!is_rootless) {
+		adopt_workspace_owner();
+	}
+	return run(true, cmdline);
 }
 
 int main(int argc, char** argv)
@@ -184,15 +245,22 @@ int main(int argc, char** argv)
 		}
 	}
 
-	static char* const debug_shell[] = {"/usr/bin/bash", "-i", NULL};
-	for(size_t i = 1; i < argc; i++) {
-		if(strcmp(argv[i], "--root") == 0
-		   ||strcmp(argv[i], "-r") == 0)
-			execv("/usr/bin/bash", debug_shell);
-		;
+	struct stat ws;
+	if (stat("/workspace", &ws) == 0) {
+		have_workspace = true;
+		workspace_uid = ws.st_uid;
+		workspace_gid = ws.st_gid;
 	}
+	run_as_root = is_rootless && have_workspace && workspace_uid == 0;
 
-	if(run_child_with_args(argc, argv) == 0) printf("OK.\n");
-	else printf("ERROR.\n");
-	return 0;
+	/* Debug shell as root, only on an explicit first argument: "-r" is
+	 * the pipeline's --receptor flag and must reach the runner. */
+	static char* const debug_shell[] = {"/usr/bin/bash", "-i", NULL};
+	if (argc > 1 && strcmp(argv[1], "--root-shell") == 0)
+		execv("/usr/bin/bash", debug_shell);
+
+	int ret = run_child_with_args(argc, argv);
+	printf(ret == 0 ? "OK.\n" : "ERROR.\n");
+	/* Propagate the pipeline's exit status so callers can detect failures. */
+	return ret;
 }

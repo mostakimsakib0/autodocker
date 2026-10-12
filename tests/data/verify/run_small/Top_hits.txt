@@ -1,0 +1,41 @@
+======================================================================
+TOP 20 HITS
+======================================================================
+
+
+----------------------------------------------------------------------
+1. acetaminophen
+   Binding Affinity: -5.12 kcal/mol
+   Status: OK
+   Binding Modes: 3
+   SimScore (pose consistency): 0.25
+   Mode Coverage: 1.00
+   MW: 151.16; LogP: 1.42
+   Engine: Vina
+   Docked file: docked/acetaminophen_out.pdbqt
+   Interpretation: moderate predicted affinity (-7 to -5 kcal/mol)
+
+----------------------------------------------------------------------
+2. phenylethanol
+   Binding Affinity: -4.44 kcal/mol
+   Status: OK
+   Binding Modes: 3
+   SimScore (pose consistency): 0.25
+   Mode Coverage: 1.00
+   MW: 122.16; LogP: 1.22
+   Engine: Vina
+   Docked file: docked/phenylethanol_out.pdbqt
+   Interpretation: weak predicted affinity (>= -5 kcal/mol)
+
+----------------------------------------------------------------------
+3. butanoic_acid
+   Binding Affinity: -3.58 kcal/mol
+   Status: WEAK
+   Binding Modes: 1
+   Mode Coverage: 0.33
+   MW: 88.11; LogP: 0.87
+   Engine: Vina
+   Docked file: docked/butanoic_acid_out.pdbqt
+   Interpretation: weak predicted affinity (>= -5 kcal/mol)
+
+======================================================================
