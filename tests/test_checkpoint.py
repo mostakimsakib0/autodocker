@@ -81,7 +81,7 @@ def test_resume_with_only_failing_ligands_is_partial_not_fatal(
 
     monkeypatch.setattr(docking, "dock_ligand", first_run)
     docking.dock_all(charged_pdbqt, ligands, str(grid), outdir, num_processes=1,
-                    resume=True, vina_params={"seed": 42, "extra_args": []})
+                     resume=True, vina_params={"seed": 42, "extra_args": []})
 
     # Second run: the cached ligand is skipped and the other still fails.
     docked = []
@@ -112,7 +112,7 @@ def test_checkpoint_invalidated_when_parameters_change(
                     "size_x=20.0\nsize_y=20.0\nsize_z=20.0\n")
     monkeypatch.setattr(docking, "dock_ligand", _ok_run)
     docking.dock_all(charged_pdbqt, [charged_pdbqt], str(grid), outdir,
-                    vina_params={"seed": 42, "exhaustiveness": 8})
+                     vina_params={"seed": 42, "exhaustiveness": 8})
     docked = []
 
     def tracking(args):
@@ -122,10 +122,10 @@ def test_checkpoint_invalidated_when_parameters_change(
     monkeypatch.setattr(docking, "dock_ligand", tracking)
     # Same settings: cached. Different exhaustiveness: docked again.
     docking.dock_all(charged_pdbqt, [charged_pdbqt], str(grid), outdir,
-                    vina_params={"seed": 42, "exhaustiveness": 8})
+                     vina_params={"seed": 42, "exhaustiveness": 8})
     assert docked == []
     docking.dock_all(charged_pdbqt, [charged_pdbqt], str(grid), outdir,
-                    vina_params={"seed": 42, "exhaustiveness": 32})
+                     vina_params={"seed": 42, "exhaustiveness": 32})
     assert docked == [charged_pdbqt]
 
 
@@ -140,7 +140,7 @@ def test_checkpoint_rechecks_edited_ligand_and_drops_removed_ones(
     shutil.copy(charged_pdbqt, other)
     monkeypatch.setattr(docking, "dock_ligand", _ok_run)
     docking.dock_all(charged_pdbqt, [charged_pdbqt, other], str(grid), outdir,
-                    vina_params={"seed": 42})
+                     vina_params={"seed": 42})
     with open(other, "a", encoding="utf-8") as f:
         f.write("REMARK edited\n")
     docked = []
@@ -151,7 +151,7 @@ def test_checkpoint_rechecks_edited_ligand_and_drops_removed_ones(
 
     monkeypatch.setattr(docking, "dock_ligand", tracking)
     result, _, _ = docking.dock_all(charged_pdbqt, [other], str(grid), outdir,
-                                   vina_params={"seed": 42})
+                                    vina_params={"seed": 42})
     assert docked == [other]  # content changed, so it is docked again
     assert [n for n, _ in result] == ["other"]  # the removed ligand is not reported
 
@@ -197,7 +197,7 @@ def test_failed_redock_of_edited_ligand_drops_stale_score(
     monkeypatch.setattr(docking, "dock_ligand",
                         lambda a: ("x", None, {"status": "FAILED"}))
     result, _, _ = docking.dock_all(charged_pdbqt, [lig, keep], str(grid), outdir,
-                                   vina_params={"seed": 42})
+                                    vina_params={"seed": 42})
     # y stays cached; x is reported once, as failed, not also with its old score
     assert sorted(result, key=lambda r: r[0]) == [("x", None), ("y", -7.0)]
 
@@ -223,7 +223,7 @@ def test_out_of_window_score_is_cached(tmp_path, charged_pdbqt, monkeypatch, out
     monkeypatch.setattr(docking, "dock_ligand", dock)
     for _ in range(2):
         result, _, metrics = docking.dock_all(charged_pdbqt, [weak, good], str(grid),
-                                             outdir, vina_params={"seed": 42})
+                                              outdir, vina_params={"seed": 42})
         assert sorted(result, key=lambda r: r[0]) == [("good", -7.0), ("weak", None)]
         assert metrics["weak"]["status"] == "OUT_OF_WINDOW"
         assert metrics["weak"]["raw_score"] == -0.5
@@ -239,7 +239,7 @@ def test_all_out_of_window_is_not_fatal(tmp_path, charged_pdbqt, monkeypatch, ou
         utils.ligand_name(a.ligand), None,
         {"status": "OUT_OF_WINDOW", "raw_score": -0.4}))
     result, _, metrics = docking.dock_all(charged_pdbqt, [charged_pdbqt], str(grid),
-                                         outdir, vina_params={"seed": 42})
+                                          outdir, vina_params={"seed": 42})
     assert result == [("charged", None)]
     assert metrics["charged"]["raw_score"] == -0.4
 

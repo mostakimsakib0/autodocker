@@ -6,12 +6,12 @@ import os
 import pytest
 
 import runner
-from vspipeline import tools
 import vspipeline.flexible as fl
 import vspipeline.hydrogens as hyd
 import vspipeline.pocket as pocket
 import vspipeline.protein as prot
 import vspipeline.utils as utils
+from vspipeline import pipeline, tools
 
 DATA = os.path.join(os.path.dirname(__file__), "data", "prep")
 SEMET = os.path.join(DATA, "1hsg_semet_fragment.pdb")
@@ -281,7 +281,7 @@ def test_hetatm_residue_keys_include_insertion_code():
                     ("A", "301", "HOH"), ("A", "301A", "HOH")]
     assert [(m["resnum"]) for m in pocket.detect_metal_ions(ZN)] == ["201", "201A"]
     waters = pocket.detect_water_molecules(ZN, (14.0, 22.0, 25.0), distance_threshold=10)
-    assert [runner._keep_residue_key(w) for w in waters] == [
+    assert [pipeline.keep_residue_key(w) for w in waters] == [
         ("A", "301", "HOH"), ("A", "301A", "HOH")]
 
 

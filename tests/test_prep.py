@@ -50,7 +50,7 @@ def test_sdf_to_pdbqt_with_charges(tmp_path):
     sdf = _make_ethanol_sdf(tmp_path)
     out = str(tmp_path / "ligand.pdbqt")
     utils.run([tools.settings().obabel, "-isdf", sdf, "-opdbqt", "-O", out,
-                "--partialcharge", "gasteiger"])
+               "--partialcharge", "gasteiger"])
     assert os.path.getsize(out) > 0
     assert charges._pdbqt_has_atoms(out)
     assert charges._ensure_pdbqt_has_charges(out)
@@ -61,7 +61,7 @@ def test_mol2_to_pdbqt_with_charges(tmp_path):
     utils.run([tools.settings().obabel, "-isdf", _make_ethanol_sdf(tmp_path), "-omol2", "-O", mol2])
     out = str(tmp_path / "ligand.pdbqt")
     utils.run([tools.settings().obabel, "-imol2", mol2, "-opdbqt", "-O", out,
-                "--partialcharge", "gasteiger"])
+               "--partialcharge", "gasteiger"])
     assert os.path.getsize(out) > 0
     assert charges._pdbqt_has_atoms(out)
     assert charges._ensure_pdbqt_has_charges(out)

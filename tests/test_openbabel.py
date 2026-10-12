@@ -6,10 +6,9 @@ import subprocess
 
 import pytest
 
-import runner
-from vspipeline import tools
 import vspipeline.protein as prot
 import vspipeline.utils as u
+from vspipeline import manifest, tools
 
 needs_obabel = pytest.mark.skipif(tools.settings().obabel is None, reason="obabel not available")
 OBABEL_VERSION = u.obabel_version() if tools.settings().obabel else None
@@ -144,8 +143,8 @@ def test_run_obabel_pdbqt_has_only_vina_records(tmp_path):
 
 def test_check_openbabel_policy(monkeypatch, caplog):
     monkeypatch.setattr(u, "obabel_version", lambda path=None: (3, 1, 1))
-    with caplog.at_level(logging.WARNING, logger="runner"):
-        info = runner._check_openbabel(42)
+    with caplog.at_level(logging.WARNING, logger="vspipeline.manifest"):
+        info = manifest.check_openbabel(42)
     assert "Open Babel 3.1.1 found" in caplog.text and "NOT comparable" in caplog.text
     assert info["openbabel_version"] == "3.1.1"
     assert info["openbabel_random_seed"]["honoured"] is False
@@ -154,8 +153,8 @@ def test_check_openbabel_policy(monkeypatch, caplog):
 
     caplog.clear()
     monkeypatch.setattr(u, "obabel_version", lambda path=None: (3, 2, 1))
-    with caplog.at_level(logging.WARNING, logger="runner"):
-        info = runner._check_openbabel(7)
+    with caplog.at_level(logging.WARNING, logger="vspipeline.manifest"):
+        info = manifest.check_openbabel(7)
     assert not caplog.text
     assert info["openbabel_version"] == "3.2.1"
     assert info["openbabel_random_seed"]["honoured"] is True

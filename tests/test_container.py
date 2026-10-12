@@ -69,8 +69,8 @@ def test_aclmgr_forwards_every_documented_variable():
 
 
 def test_aclmgr_forwards_what_the_manifest_records():
-    import runner
-    source = open(runner.__file__, encoding="utf-8").read()
+    from vspipeline import manifest
+    source = open(manifest.__file__, encoding="utf-8").read()
     snapshot = re.search(r"def _environment_snapshot.*?\n\n", source, re.S).group(0)
     names = set(re.findall(r'"([A-Z_][A-Z0-9_]*)"', snapshot))
     assert "OMP_NUM_THREADS" in names

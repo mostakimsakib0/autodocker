@@ -71,7 +71,7 @@ class TestHtmlReport:
         ])
         html_path = os.path.join(outdir, "results_report.html")
         report_mod.generate_html_report(csv_path, os.path.join(outdir, "docked"),
-                                    html_path)
+                                        html_path)
         assert os.path.exists(html_path)
         with open(html_path, encoding="utf-8") as f:
             content = f.read()
@@ -88,7 +88,7 @@ class TestHtmlReport:
         csv_path = _ranking_csv(outdir, rows)
         html_path = os.path.join(outdir, "results_report.html")
         report_mod.generate_html_report(csv_path, os.path.join(outdir, "docked"),
-                                    html_path, top_n=3)
+                                        html_path, top_n=3)
         with open(html_path, encoding="utf-8") as f:
             content = f.read()
         assert "Top 3 Hits" in content
@@ -112,7 +112,7 @@ class TestHtmlReport:
         ])
         html_path = os.path.join(outdir, "results_report.html")
         report_mod.generate_html_report(csv_path, os.path.join(outdir, "docked"),
-                                    html_path)
+                                        html_path)
         with open(html_path, encoding="utf-8") as f:
             content = f.read()
         assert "<script>alert" not in content
@@ -397,11 +397,11 @@ def test_report_early_return_removes_stale_report(tmp_path):
     report = _write(os.path.join(outdir, "report.html"), "stale report")
     csv_path = _ranking_csv(outdir, [])  # header only: nothing to report
     assert report_mod.generate_html_report(csv_path, os.path.join(outdir, "docked"),
-                                       report) is False
+                                           report) is False
     assert not os.path.exists(report)
     _write(report, "stale report")
     assert report_mod.generate_html_report(os.path.join(outdir, "missing.csv"),
-                                       os.path.join(outdir, "docked"), report) is False
+                                           os.path.join(outdir, "docked"), report) is False
     assert not os.path.exists(report)
 
 

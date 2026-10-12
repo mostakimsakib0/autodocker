@@ -88,7 +88,7 @@ def test_duplicate_ligand_names_rejected(tmp_path, outdir, charged_pdbqt):
     ligs = [str(lig_dir / "dup.pdbqt")] * 3
     with pytest.raises(ValueError, match="Duplicate ligand names"):
         docking.dock_all(charged_pdbqt, ligs, tmp_path / "g.txt", outdir,
-                        resume=False, vina_params={})
+                         resume=False, vina_params={})
 
 
 # ---------------------------------------------------------------------------

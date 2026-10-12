@@ -626,10 +626,10 @@ class LibraryManager:
             protonated = os.path.join(tmp, f"protonated.{fmt}")
             charged = os.path.join(tmp, "charged.pdbqt")
             utils.run_obabel([f"-i{fmt}", src, f"-o{fmt}", "-O", protonated, "-h"],
-                              outputs=[protonated], seed=self.seed)
+                             outputs=[protonated], seed=self.seed)
             utils.run_obabel([f"-i{fmt}", protonated, "-opdbqt", "-O", charged,
-                               "--partialcharge", "gasteiger"], outputs=[charged],
-                              seed=self.seed)
+                              "--partialcharge", "gasteiger"], outputs=[charged],
+                             seed=self.seed)
             with open(charged, encoding="utf-8") as f:
                 reference = [line for line in f if line.startswith(("ATOM", "HETATM"))]
         with open(out, encoding="utf-8") as f:
@@ -805,7 +805,7 @@ class LibraryManager:
         flat_sdf = os.path.join(self.minimized_dir, f"{ligand_id}_2d.sdf")
         title_args = ["--title", title] if title is not None else []
         utils.run_obabel([f"-i{fmt}", src, "-osdf", "-O", flat_sdf, *title_args],
-                          outputs=[flat_sdf], seed=self.seed)
+                         outputs=[flat_sdf], seed=self.seed)
         try:
             gen3d_file, method = self._generate_3d(flat_sdf, ligand_id)
         except LigandRejected as e:
@@ -834,7 +834,7 @@ class LibraryManager:
         if "." not in smiles.strip():
             return path, []
         stdout = utils.run_obabel([f"-i{fmt}", path, "--separate", "-d", "-ocan",
-                                    "--append", "atoms"], seed=self.seed)
+                                   "--append", "atoms"], seed=self.seed)
         fragments = []
         for line in stdout.splitlines():
             tokens = line.split()
@@ -861,7 +861,7 @@ class LibraryManager:
         with tempfile.TemporaryDirectory(prefix="autodocker_") as tmp:
             base = os.path.join(tmp, f"frag.{fmt}")
             utils.run_obabel([f"-i{fmt}", path, f"-o{fmt}", "-O", base, "--separate",
-                               "-m", "--title", title.strip()], seed=self.seed)
+                              "-m", "--title", title.strip()], seed=self.seed)
             written = os.path.join(tmp, f"frag{keep + 1}.{fmt}")
             if not os.path.exists(written) or os.path.getsize(written) == 0:
                 raise LigandRejected("Open Babel could not write the largest fragment")

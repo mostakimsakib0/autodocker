@@ -8,7 +8,7 @@ import sys
 import pytest
 
 import runner
-from vspipeline import checkpoint, consensus, tools, utils, version
+from vspipeline import checkpoint, consensus, manifest, pipeline, tools, utils, version
 @pytest.fixture
 def cli(tmp_path, protein_pdb):
     """Valid base arguments: an existing receptor and ligand directory."""
@@ -175,11 +175,11 @@ def test_consensus_requires_smina(cli, fake_tools, caplog):
 def test_processes_resolution(cli, fake_tools, monkeypatch):
     seen = {}
 
-    def pipeline(args, state):
+    def fake_pipeline(args, state):
         seen["p"] = args.processes
         return runner.EXIT_OK
 
-    monkeypatch.setattr(runner, "_run_pipeline", pipeline)
+    monkeypatch.setattr(runner, "_run_pipeline", fake_pipeline)
     monkeypatch.setattr(utils, "available_cpus", lambda: 8)
     argv, _ = cli
     for value, expected in (("3", 3), ("0", 8), ("-1", 8), ("-4", 2)):
@@ -213,11 +213,11 @@ def test_verbose_reaches_vspipeline_loggers():
 def test_verbose_flag_in_main(cli, fake_tools, monkeypatch):
     levels = {}
 
-    def pipeline(args, state):
+    def fake_pipeline(args, state):
         levels["lib"] = logging.getLogger("vspipeline.library").getEffectiveLevel()
         return runner.EXIT_OK
 
-    monkeypatch.setattr(runner, "_run_pipeline", pipeline)
+    monkeypatch.setattr(runner, "_run_pipeline", fake_pipeline)
     argv, _ = cli
     runner.main(argv + ["-v"])
     assert levels["lib"] == logging.DEBUG
@@ -276,7 +276,7 @@ def test_run_manifest_and_exit_code_on_failure(cli, fake_tools, monkeypatch, cap
     (False, "before docking started"), (True, "checkpoint")])
 def test_ctrl_c_exits_130(cli, fake_tools, monkeypatch, caplog, started, expected):
     def interrupted(args, state):
-        state["docking_started"] = started
+        state.docking_started = started
         raise KeyboardInterrupt
 
     monkeypatch.setattr(runner, "_run_pipeline", interrupted)
@@ -301,7 +301,7 @@ def test_failure_fraction_rules():
     results = [("a", -7.0), ("b", None), ("c", None), ("d", None)]
     metrics = {"b": {"status": "FAILED"}, "c": {"status": "REJECTED (score)"},
                "d": {"status": "OUT_OF_WINDOW"}}
-    assert runner._failed_docking(results, metrics) == ["b"]
+    assert pipeline.failed_docking(results, metrics) == ["b"]
     assert runner._failure_exit_code(1, 4, 0.5) == runner.EXIT_OK
     assert runner._failure_exit_code(3, 4, 0.5) == runner.EXIT_TOO_MANY_FAILURES
     assert runner._failure_exit_code(4, 4, 1.0) == runner.EXIT_OK
@@ -326,8 +326,8 @@ def test_consensus_csv_has_only_data_rows(tmp_path):
 
 
 def test_keep_residue_key_uses_resname_or_name():
-    assert runner._keep_residue_key({"chain": "A", "resnum": 5, "resname": "HOH"}) == ("A", 5, "HOH")
-    assert runner._keep_residue_key({"chain": "A", "resnum": 9, "name": "HEM"}) == ("A", 9, "HEM")
+    assert pipeline.keep_residue_key({"chain": "A", "resnum": 5, "resname": "HOH"}) == ("A", 5, "HOH")
+    assert pipeline.keep_residue_key({"chain": "A", "resnum": 9, "name": "HEM"}) == ("A", 9, "HEM")
 
 
 def test_help_and_docstring_are_neutral():
@@ -667,18 +667,18 @@ def _strict_json(text):
 
 def test_run_manifest_is_strict_json(tmp_path):
     path = tmp_path / "run_manifest.json"
-    runner.write_run_manifest(str(path), {
+    manifest.write_run_manifest(str(path), {
         "a": float("nan"), "b": [float("inf"), 1.5], "c": {"d": float("-inf")}})
     m = _strict_json(path.read_text())
     assert m == {"a": "nan", "b": ["inf", 1.5], "c": {"d": "-inf"}}
 
 
 def test_run_manifest_of_a_run_is_strict_json(cli, fake_tools, monkeypatch):
-    def pipeline(args, state):
-        state["consensus"] = {"rho": float("nan"), "n": 1}
+    def fake_pipeline(args, state):
+        state.consensus = {"rho": float("nan"), "n": 1}
         return runner.EXIT_OK
 
-    monkeypatch.setattr(runner, "_run_pipeline", pipeline)
+    monkeypatch.setattr(runner, "_run_pipeline", fake_pipeline)
     argv, out = cli
     runner.main(argv)
     m = _strict_json((out / "run_manifest.json").read_text())
@@ -705,11 +705,11 @@ def test_stale_derived_outputs_removed_but_docking_results_kept(cli, fake_tools,
     (out / "ligand_metadata.json").write_text("{}")
     seen = {}
 
-    def pipeline(args, state):
+    def fake_pipeline(args, state):
         seen["left"] = sorted(n for n in outputs.DERIVED_OUTPUTS if (out / n).exists())
         return runner.EXIT_OK
 
-    monkeypatch.setattr(runner, "_run_pipeline", pipeline)
+    monkeypatch.setattr(runner, "_run_pipeline", fake_pipeline)
     with caplog.at_level(logging.INFO):
         runner.main(argv + ["--no-html-report"])
     assert seen["left"] == []
@@ -737,7 +737,7 @@ def test_ctrl_c_during_smina_only_docking(cli, fake_tools, monkeypatch, caplog):
     tools.configure(smina=sys.executable)
 
     def interrupted(args, state):
-        state["docking_started"] = True
+        state.docking_started = True
         raise KeyboardInterrupt
 
     monkeypatch.setattr(runner, "_run_pipeline", interrupted)
@@ -822,7 +822,7 @@ def test_lock_is_held_for_the_whole_run_and_released(cli, fake_tools, monkeypatc
     from vspipeline import checkpoint as ckpt
     seen = {}
 
-    def pipeline(args, state):
+    def fake_pipeline(args, state):
         seen["held"] = ckpt.holds_lock(args.output)
         # The checkpoint re-uses the run's lock and must not release it.
         cp = checkpoint.DockingCheckpoint(args.output)
@@ -830,7 +830,7 @@ def test_lock_is_held_for_the_whole_run_and_released(cli, fake_tools, monkeypatc
         seen["after_close"] = ckpt.holds_lock(args.output)
         return runner.EXIT_OK
 
-    monkeypatch.setattr(runner, "_run_pipeline", pipeline)
+    monkeypatch.setattr(runner, "_run_pipeline", fake_pipeline)
     argv, out = cli
     runner.main(argv)
     assert seen == {"held": True, "after_close": True}
@@ -844,12 +844,12 @@ def test_sigterm_exits_143_with_manifest(cli, fake_tools, monkeypatch, caplog):
     from vspipeline import checkpoint as ckpt
     previous = signal.getsignal(signal.SIGTERM)
 
-    def pipeline(args, state):
-        state["docking_started"] = True
+    def fake_pipeline(args, state):
+        state.docking_started = True
         os.kill(os.getpid(), signal.SIGTERM)
         raise AssertionError("SIGTERM must interrupt the run")
 
-    monkeypatch.setattr(runner, "_run_pipeline", pipeline)
+    monkeypatch.setattr(runner, "_run_pipeline", fake_pipeline)
     argv, out = cli
     with caplog.at_level(logging.WARNING):
         assert _exit_code(argv) == runner.EXIT_TERMINATED == 143
@@ -864,8 +864,8 @@ def test_sigterm_exits_143_with_manifest(cli, fake_tools, monkeypatch, caplog):
 def test_failure_counts_include_preparation_failures():
     """README: exit 3 "if more than this fraction of ligands fail": ligands
     that could not be prepared are failures too."""
-    counts = runner._failure_counts(n_prep_failed=2, n_dock_failed=1, n_docked=3,
-                                    max_fraction=0.5)
+    counts = pipeline.failure_counts(n_prep_failed=2, n_dock_failed=1, n_docked=3,
+                                     max_fraction=0.5)
     assert counts == {"preparation_failed": 2, "docking_failed": 1, "failed": 3,
                       "ligands": 5, "fraction": 0.6, "max_failure_fraction": 0.5}
     assert runner._failure_exit_code(counts["failed"], counts["ligands"], 0.5) \
@@ -876,15 +876,15 @@ def test_failure_counts_include_preparation_failures():
 
 def test_run_manifest_write_is_atomic(tmp_path, monkeypatch):
     path = tmp_path / "run_manifest.json"
-    runner.write_run_manifest(str(path), {"a": 1})
+    manifest.write_run_manifest(str(path), {"a": 1})
     old = path.read_text()
 
     def boom(*a, **k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(runner.json, "dump", boom)
+    monkeypatch.setattr(manifest.json, "dump", boom)
     with pytest.raises(OSError):
-        runner.write_run_manifest(str(path), {"a": 2})
+        manifest.write_run_manifest(str(path), {"a": 2})
     assert path.read_text() == old
     assert os.listdir(tmp_path) == ["run_manifest.json"]
 
@@ -896,16 +896,16 @@ def test_threads_per_process_recorded(cli, fake_tools, monkeypatch):
     def fake_args(processes, threads):
         return type("A", (), {"processes": processes, "threads": threads})()
 
-    assert runner._threads_per_process(fake_args(4, None)) == 2
-    assert runner._threads_per_process(fake_args(1, None)) is None
-    assert runner._threads_per_process(fake_args(4, 3)) == 3
+    assert pipeline.threads_per_process(fake_args(4, None)) == 2
+    assert pipeline.threads_per_process(fake_args(1, None)) is None
+    assert pipeline.threads_per_process(fake_args(4, 3)) == 3
 
-    def pipeline(args, state):
-        state["threads_per_process"] = {"threads": 2, "source": "x", "processes": 4}
+    def fake_pipeline(args, state):
+        state.threads_per_process = {"threads": 2, "source": "x", "processes": 4}
         seen["ok"] = True
         return runner.EXIT_OK
 
-    monkeypatch.setattr(runner, "_run_pipeline", pipeline)
+    monkeypatch.setattr(runner, "_run_pipeline", fake_pipeline)
     argv, out = cli
     runner.main(argv)
     assert _manifest(out)["threads_per_process"]["threads"] == 2
