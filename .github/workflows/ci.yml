@@ -222,6 +222,28 @@ jobs:
       - name: Smoke screen twice and compare (determinism)
         run: .github/smoke/run_smoke.sh autodocker:ci "$RUNNER_TEMP/smoke"
 
+      # The README quick start as a user runs it: the workspace belongs to the
+      # runner's user (UID 1001 on GitHub runners, not dockuser's 1000) and is
+      # not made world-writable. aclmgr must give dockuser that owner's UID,
+      # so the run succeeds and every output belongs to the user.
+      - name: Workspace owned by the invoking user, no chmod
+        run: |
+          set -euo pipefail
+          ws="$RUNNER_TEMP/owned"
+          mkdir -p "$ws/ligs"
+          cp .github/smoke/protein.pdb "$ws/"
+          cp .github/smoke/ligs/phenol.sdf "$ws/ligs/"
+          echo "runner user: $(id -u):$(id -g)"
+          docker run --rm -v "$ws:/workspace" autodocker:ci --exhaustiveness 1
+          test -s "$ws/output/ranking.csv"
+          foreign="$(find "$ws" \( ! -uid "$(id -u)" -o ! -gid "$(id -g)" \) -print | head -n 5)"
+          if [ -n "$foreign" ]; then
+            echo "::error::files not owned by $(id -u):$(id -g):"
+            printf "%s\n" "$foreign" | xargs -d "\n" ls -ln
+            exit 1
+          fi
+          rm -rf "$ws"
+
       # Tests that need real SMINA / QuickVina 2 / Vina binaries, run inside
       # the image against the tools it ships (and its Open Babel 3.2.1).
       - name: Real-binary tests inside the image

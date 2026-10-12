@@ -29,10 +29,10 @@ where you got stuck or had to guess. That is the main thing we want to learn.
    docker run --rm -v "$PWD/works:/workspace" autodocker --chain all --box-from-het MK1
    ```
 
-   On Linux with rootful Docker, the pipeline runs as the image's user
-   (UID 1000). If your own user ID (`id -u`) is not 1000 and the run stops
-   with `Permission denied`, run `chmod -R a+rwX works` and retry, and
-   **record that this happened**.
+   The outputs should belong to you (`ls -ln works/output` shows your
+   `id -u`). If the run stops with `Permission denied`, run
+   `chmod -R a+rwX works`, retry, and **record that this happened**, with
+   your `id -u` and how you run containers (Docker, Podman, rootless or not).
 4. **Look at the results.** Open `works/output/ranking.csv` and
    `works/output/results_report.html`. Does the box drawn in the report sit
    on the inhibitor?

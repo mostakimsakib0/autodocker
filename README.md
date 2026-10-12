@@ -47,6 +47,12 @@ docker run --rm \
   autodocker
 ```
 
+The pipeline runs unprivileged: under Docker (or rootful Podman) as the
+owner of `works/`, so the outputs belong to you and no `chmod` is needed;
+under rootless Podman as your own user. Create `works/` yourself before the
+first run: a directory that Docker creates for a missing mount is owned by
+root and cannot be written.
+
 To screen a PubChem library instead of local files, leave `works/ligs/`
 empty and pass the library option. `fda` is a fixed list of 74 well-known
 approved drugs (not the full FDA list); `custom` is the same list filtered by

@@ -9,6 +9,16 @@ changes (below) are part of 2.0.0.
 
 ### Fixed
 
+- Under Docker (or rootful Podman) the pipeline ran as the image's
+  `dockuser` (UID 1000), which could not write a bind-mounted `works/`
+  belonging to a user with another UID: the README quick start stopped with
+  `Permission denied` unless the directory was made world-writable. The
+  entrypoint (`aclmgr`) now gives `dockuser` the UID and GID of the owner of
+  `/workspace` before dropping privileges, so the run succeeds and every
+  output belongs to that user. Rootless Podman is unchanged (the pipeline
+  runs as the invoking user), and a root-owned `/workspace` leaves
+  `dockuser` as it is. CI runs the quick start on a runner-owned workspace
+  without `chmod` and checks the ownership of every output.
 - **(results)** Trp and His ring hydrogens come from residue templates. Open
   Babel (3.1.1 and 3.2.1) often fails to kekulize the indole and imidazole
   rings of a protein PDB and then adds no ring hydrogen: every Trp NE1 was

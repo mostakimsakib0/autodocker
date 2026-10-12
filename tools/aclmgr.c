@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <pwd.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <stdbool.h>
@@ -50,6 +51,11 @@ bool is_rootless = false;
  * bind mount of the invoking user's own directory. */
 bool run_as_root = false;
 volatile sig_atomic_t caught = 0;
+/* Owner of /workspace (stat in main). Under rootful Docker or Podman the
+ * pipeline runs as dockuser, which must be able to write that bind mount. */
+bool have_workspace = false;
+uid_t workspace_uid = 0;
+gid_t workspace_gid = 0;
 
 static const char* const drop_caps_runner[]  = {
 	"/usr/bin/setpriv",
@@ -154,6 +160,36 @@ static void handle_sigint(int sig)
 }
 
 
+/* Rootful engine: give dockuser the UID (and, unless it is root's group, the
+ * GID) of the owner of /workspace, in this container's /etc/passwd only. The
+ * host user's directory is then writable without a chmod, and every output
+ * belongs to that user. dockuser keeps its name, its home and the same
+ * privilege drop (setpriv, no capabilities); only the numbers change. A
+ * root-owned /workspace (e.g. a directory Docker created) or a failed
+ * usermod leaves dockuser as it is. */
+static void adopt_workspace_owner(void)
+{
+	if (!have_workspace || workspace_uid == 0) return;
+	struct passwd* pw = getpwnam(DROP_USER);
+	if (!pw) return;
+
+	char uid[24], gid[24];
+	snprintf(uid, sizeof uid, "%lu", (unsigned long) workspace_uid);
+	snprintf(gid, sizeof gid, "%lu", (unsigned long) workspace_gid);
+	if (workspace_gid != 0 && pw->pw_gid != workspace_gid) {
+		const char* groupmod[] = {"/usr/sbin/groupmod", "-o", "-g", gid, DROP_GROUP, NULL};
+		if (run(false, groupmod) != 0)
+			fprintf(stderr, "warning: could not give %s the group of /workspace\n", DROP_GROUP);
+	}
+	if (pw->pw_uid != workspace_uid) {
+		const char* usermod[] = {"/usr/sbin/usermod", "-o", "-u", uid, DROP_USER, NULL};
+		if (run(false, usermod) != 0)
+			fprintf(stderr, "warning: could not give %s the owner of /workspace; "
+			        "outputs may not be writable\n", DROP_USER);
+	}
+}
+
+
 int run_child_with_args(int argc, char** argv)
 {
 
@@ -179,6 +215,8 @@ int run_child_with_args(int argc, char** argv)
 		 * this only ever gives files to their owner. */
 		static const char* repair[] = {"/usr/bin/chown", "-R", "0:0", "/workspace", NULL};
 		run(false, repair);
+	} else if (!is_rootless) {
+		adopt_workspace_owner();
 	}
 	return run(true, cmdline);
 }
@@ -208,7 +246,12 @@ int main(int argc, char** argv)
 	}
 
 	struct stat ws;
-	run_as_root = is_rootless && stat("/workspace", &ws) == 0 && ws.st_uid == 0;
+	if (stat("/workspace", &ws) == 0) {
+		have_workspace = true;
+		workspace_uid = ws.st_uid;
+		workspace_gid = ws.st_gid;
+	}
+	run_as_root = is_rootless && have_workspace && workspace_uid == 0;
 
 	/* Debug shell as root, only on an explicit first argument: "-r" is
 	 * the pipeline's --receptor flag and must reach the runner. */
