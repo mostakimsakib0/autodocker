@@ -299,6 +299,14 @@ changes (below) are part of 2.0.0.
   `vspipeline.tools.settings().obabel`. Receptor preparation helpers are
   split into `pdb_records`, `protonation`, `fpocket` and `gridbox`; the HTML
   report page is `vspipeline/templates/report.html`.
+- PDBQT ligands given with `-l` are copied byte for byte to
+  `ligands/<name>.pdbqt` and docked from there, like the other formats, so
+  an output directory is self-contained (it can be moved and re-docked with
+  `scripts/verify_run.py --redock`). For PDBQT inputs the `--ligand` path in
+  `docked/<name>_vina.log` and `"pdbqt"` in `ligand_metadata.json` now point
+  inside the output directory; poses and scores are unchanged.
+- Each attempt in an engine log (`docked/*_vina.log`, the SMINA logs) has
+  `# Engine: <binary> sha256=<hex>` after its `# Command:` line.
 
 ### Added
 
@@ -317,6 +325,32 @@ changes (below) are part of 2.0.0.
   exact Python pins (now including RDKit), and `autodocker/VERSION` as the
   single version source.
 - `--max-compounds`, `--max-failure-fraction`, `--no-lipinski`.
+- `--box-ligand FILE` and `--box-from-het RESNAME[:CHAIN[:RESNUM]]`: the
+  docking box around a reference ligand (a file, or a HETATM group of the
+  receptor, which is then removed from it): centered on the ligand's
+  heavy-atom bounding box, each edge max(extent + 2 x `--padding`, 22.5) Å.
+  fpocket still runs, only to report whether its top pocket holds the
+  reference; `run_manifest.json` records the box under `box`. Wrong
+  references and conflicting options are usage errors (exit 2). See
+  `docs/features_2_0.md`.
+- `--replicates N`: every ligand is docked N times with seeds `--seed + k`;
+  the best replicate's score and pose are reported, `ranking.csv` adds
+  `n_replicates`, `score_mean`, `score_sd`, `score_min`, `score_max`, and
+  `replicate_scores.csv`, `replicate_summary.json` and the manifest's
+  `replicates` give the per-replicate scores and the seed sensitivity
+  (Spearman ρ of replicates 0 and 1). Resumable per (ligand, replicate);
+  N = 1 (the default) is byte-identical to a plain run.
+- `run_manifest.json` records `inputs` (path and SHA-256 of the receptor,
+  of every ligand input file and of the `--box-ligand` file) and `outputs`
+  (`{relative path: sha256}` of the results, receptor and box files, ligand
+  metadata and every file in `docked/`, `ligands/`, `ligands_minimized/`).
+- `scripts/verify_run.py`: checks an output directory without trusting it
+  (ranking vs poses vs logs vs manifest, output and input SHA-256, engine
+  SHA-256), re-executes the logged Vina commands byte for byte
+  (`--redock`, also for a moved run) and compares two runs.
+- `scripts/benchmark_baseline.py` (BENCHMARKS.md J5): the standard Vina
+  workflow (reduce + Meeko + raw Vina, optionally EasyDock) on the J1/J2
+  complexes with the same boxes, seed and settings.
 - Benchmarks: enrichment boxes from the DUD-E crystal ligand with all chains;
   BEDROC and ROC enrichment; re-docking from seeded RDKit start conformers on
   a seeded sample of the core set; per-mode RMSDs; ligand identity checks in

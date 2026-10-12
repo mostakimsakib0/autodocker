@@ -145,11 +145,13 @@ Direct use (inside the image or with tools on `PATH`):
 | `--chain` | Chains to keep, e.g. `A`, `A,B`, or `all` (case-sensitive; checked against the receptor before any ligand is prepared); a blank chain ID is chain `A`; a blank chain next to a real chain `A` is refused | first chain, with a warning |
 | `--ph` | pH for receptor hydrogens (Open Babel `-p`), 0 to 14 | `7.4` |
 | `--pockets` | fpocket pocket numbers, e.g. `1` or `2,3` (not with `--no-fpocket`, or with `--grid-center` and `--grid-size` together) | best score |
-| `--padding` | Box padding around the pocket (Å) | `6.0` |
+| `--padding` | Box padding around the pocket or reference ligand (Å) | `6.0` |
 | `--no-fpocket` | Skip fpocket; box around the whole receptor | off |
 | `--grid-center X,Y,Z` | Explicit box center, input-PDB coordinates; with `--grid-size` too, fpocket is not run (nor required) | auto |
 | `--grid-center-frame` | `input` or `docking` (≤1.1.4 used `docking`); needs `--grid-center` | `input` |
 | `--grid-size SX,SY,SZ` | Explicit box size (Å) | auto |
+| `--box-ligand FILE` | Box around a reference ligand (SDF/MOL/MOL2/PDB/PDBQT, first molecule, receptor-PDB frame): center of its heavy atoms' bounding box, each edge max(extent + 2 × `--padding`, 22.5) Å. fpocket only reports which pocket holds the ligand (`run_manifest.json` → `box`; `--no-fpocket` skips it). Not with `--grid-center`, `--pockets` or `--box-from-het`; `--grid-size` replaces the size. An unreadable, empty or 2D file is a usage error | none |
+| `--box-from-het RESNAME[:CHAIN[:RESNUM]]` | As `--box-ligand`, with a HETATM group of the receptor PDB as reference, e.g. `MK1`, `MK1:B:902`; the group is removed from the receptor (also with `--keep-hetero`) and written to `reference_ligand.pdb`. A missing, ambiguous or water group is a usage error listing the groups present | none |
 | `--keep-waters`, `--detect-metals`, `--detect-cofactors` | Keep waters near the site, metal ions, known cofactors | off |
 | `--flexible-residues` | Flexible side chains, e.g. `A45,A78`, `1:45` for digit chains, `45`/`A45` for a blank chain (case-sensitive); each must exist in the docked chains (else exit 2) and be buildable (else exit 1) | none |
 | `--auto-flexible N` | The N residues closest to the box center become flexible; if none can be built, docking is rigid (warning). Not with `--flexible-residues` | none |
@@ -158,6 +160,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `--exhaustiveness` | Vina exhaustiveness (≥ 1) | `8` |
 | `--binding-modes`, `--energy-range` | Vina output modes and energy range | `9`, `3.0` |
 | `--seed` | Random seed, 1 to 2147483647 | `$VS_SEED` or `42` |
+| `--replicates N` | Dock every ligand N times (1 to 100) with seeds `--seed`, `--seed + 1`, …; `Binding_Affinity` and the pose are the best replicate's, `ranking.csv` adds `n_replicates`, `score_mean`, `score_sd`, `score_min`, `score_max`; `replicate_scores.csv` and `replicate_summary.json` (Spearman ρ of replicates 0 and 1) are written. Vina only (not with `--smina-only`); N = 1 is the plain run | `1` |
 | `--min-valid-affinity` | Scores ≥ this (or < −20) are reported as `OUT_OF_WINDOW`; must be > −20 | `-1.0` |
 | `--vina-bin`, `--vina-extra` | Custom docking binary; extra engine arguments | auto, none |
 | `--qvina-fallback` | Re-dock a ligand with QuickVina 2 when Vina fails on it (the `Engine` column shows which engine scored each ligand). Turning it on or off keeps the checkpointed Vina results; only results of the fallback are docked again | off |
@@ -174,7 +177,13 @@ Direct use (inside the image or with tools on `PATH`):
 `python3 autodocker/runner.py --help` lists every option with its default.
 Long options must be written in full (`--ligands`, not `--lig`); numeric
 options must be finite numbers. Settings are logged in `run_manifest.json`
-(strict JSON) with the flexible residues actually docked.
+(strict JSON) with the flexible residues actually docked, the SHA-256 of the
+input files (`inputs`: receptor, ligand files, `--box-ligand`) and of every
+output (`outputs`: `{relative path: sha256}`). PDBQT ligands are docked from
+a copy in `ligands/`, so the output directory is self-contained; each
+engine log records the binary's SHA-256 (`# Engine:`) after each command.
+More on the reference-ligand box and replicates:
+[`docs/features_2_0.md`](docs/features_2_0.md).
 
 ## Environment variables
 
@@ -241,6 +250,21 @@ CI and not guaranteed. `run_manifest.json` records what is needed to repeat a
 run. See [`docs/reproducibility.md`](docs/reproducibility.md) and
 `scripts/reproducibility_check.sh`; [`docs/input_validation.md`](docs/input_validation.md)
 lists the input checks and the receptor and ligand preparation rules.
+
+To check a run you received (standard library only; Vina for `--redock`):
+
+```bash
+python3 scripts/verify_run.py OUT                      # consistency + manifest hashes
+python3 scripts/verify_run.py OUT --redock --sample 5  # re-run Vina, byte for byte
+python3 scripts/verify_run.py RUN_A RUN_B              # compare two runs
+```
+
+It checks that `ranking.csv`, the poses, the engine logs and the manifest
+agree, that every output still has the SHA-256 recorded in
+`run_manifest.json` (an edited pose is detected even when `ranking.csv` was
+edited to match), and with `--redock` re-executes the logged Vina commands
+(also after the output directory was moved). See
+[`docs/reproducibility.md`](docs/reproducibility.md#verifying-a-run).
 
 ## Validation
 

@@ -182,8 +182,16 @@ python3 scripts/verify_run.py OUT --json               # machine-readable
   log's last `# Command:` writes that pose with the manifest's seed,
   exhaustiveness and number of modes, and its `# Result:` agrees; the
   manifest's docking counts equal the ranking's; the logged engine binary,
-  when present, has the manifest's SHA-256. Pose files that no row refers to
-  are warnings.
+  when present, has the manifest's SHA-256, and so does each log's
+  `# Engine:` line. Every file listed in the manifest's `outputs`
+  (`{relative path: sha256}`: results, receptor and box files, ligand
+  metadata, everything in `docked/`, `ligands/`, `ligands_minimized/`) must
+  still have its SHA-256, so an edit of a pose file together with
+  `ranking.csv` is detected without re-docking; inputs listed in `inputs`
+  (receptor, ligand files, `--box-ligand`) that are present at their path
+  must have theirs. Pose files that no row refers to are warnings. Runs with
+  `--replicates` are checked replicate by replicate (`replicate_scores.csv`,
+  seed `--seed + k` in each replicate's log).
 * **Re-docking** (`--redock`): the logged command of `--sample K` seeded
   random ligands (`--seed`, default 42; `--sample 0` = all) is re-executed
   with paths under the original output directory mapped to `OUT` (a copied
@@ -200,7 +208,8 @@ python3 scripts/verify_run.py OUT --json               # machine-readable
   of the two rankings and per-ligand score differences.
 
 Exit status 0 means every check passed (warnings allowed), 1 a failed check,
-2 a usage error. The tool also lists what the manifest does not record yet
-(output and input checksums; ligands docked from outside the output
-directory, which a `--redock` of a moved run cannot find).
+2 a usage error. For runs made before the 2.0.0 manifest recorded `outputs`
+and `inputs`, the tool lists what is missing (output and input checksums;
+ligands docked from outside the output directory, which a `--redock` of a
+moved run cannot find; 2.0.0 docks PDBQT inputs from a copy in `ligands/`).
 

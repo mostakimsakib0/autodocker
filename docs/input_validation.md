@@ -86,6 +86,14 @@ are identified by chain, residue number with insertion code, and residue name.
 
 Every PDBQT that AutoDocker prepares is checked the same way before docking.
 
+**PDBQT inputs are copied.** A PDBQT ligand that passes these checks is copied
+byte for byte to `ligands/<name>.pdbqt` in the output directory and docked from
+there, like the ligands prepared from the other formats. The output directory
+then holds every file a docking command reads, so it can be moved and re-docked
+(`scripts/verify_run.py --redock`). `ligand_metadata.json` keeps the input path
+as `source_file`; `run_manifest.json` records every ligand input file with its
+SHA-256 under `inputs`.
+
 **Salts and other disconnected fragments.** Before conversion, AutoDocker keeps the
 fragment with the most heavy atoms, as Open Babel separates them (bonds as written,
 or perceived for PDB).
@@ -133,6 +141,32 @@ for a MOL2 without hydrogens.
   atom block).
 - A ligand with an element that Open Babel cannot charge (B, Pt, Si, metals, ...)
   fails with the element named.
+
+## Docking box from a reference ligand
+
+`--box-ligand FILE` and `--box-from-het RESNAME[:CHAIN[:RESNUM]]` are checked
+with the other options, before any ligand is prepared; every problem below is a
+usage error (exit 2) that names the cause:
+- the two options together, or either with `--grid-center` (and so
+  `--grid-center-frame`) or `--pockets`;
+- `--box-ligand`: an unsupported extension (SDF/MOL, MOL2, PDB/ENT, PDBQT), a
+  missing or unreadable file, no heavy atom in the first molecule/model,
+  non-finite or 2D coordinates (every z = 0: the box needs the ligand's 3D
+  position in the receptor's frame);
+- `--box-from-het`: a malformed spec, water, or a group that is not in the
+  receptor or matches several groups (the message lists the groups present and
+  the spec to use);
+- `--replicates` outside 1-100, or `--seed + N - 1` beyond 2147483647;
+  `--replicates` with `--smina-only`.
+
+During the run, a box that contains no receptor atom of the docked chain(s)
+stops the run (the reference is in another frame or its site in another chain),
+and a reference more than 5 Å from every receptor heavy atom is a warning.
+With `--box-from-het` the group is removed from the receptor (written to
+`receptor_no_reference.pdb`, which receptor preparation reads), also with
+`--keep-hetero`; with `--box-ligand --keep-hetero` a receptor HETATM group in
+the reference's place is a warning naming the `--box-from-het` spec. See
+[`features_2_0.md`](features_2_0.md).
 
 ## Hydrogen placement
 

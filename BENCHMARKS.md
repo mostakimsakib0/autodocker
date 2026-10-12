@@ -15,6 +15,15 @@ repository.
 > statistics). Numbers obtained with the 1.1.x scripts are withdrawn. Every
 > number on this page is a placeholder until the suite is rerun with
 > AutoDocker 2.0.0.
+>
+> The 2.0.0 rerun includes the Trp/His residue templates of receptor
+> preparation (`docs/openbabel.md`), which change the receptor typing of
+> every receptor with Trp or His, so 1.x numbers are not comparable. The
+> benchmarks keep passing their own crystal-ligand box with
+> `--grid-center/--grid-size` (a cube on the centroid); the new
+> `--box-ligand` option (a per-axis box on the bounding-box midpoint) is not
+> used, so it does not change them. Each AutoDocker run a benchmark makes
+> can be checked with `scripts/verify_run.py` (see `docs/reproducibility.md`).
 
 Run the suite:
 
