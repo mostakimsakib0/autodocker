@@ -909,3 +909,66 @@ def test_threads_per_process_recorded(cli, fake_tools, monkeypatch):
     argv, out = cli
     runner.main(argv)
     assert _manifest(out)["threads_per_process"]["threads"] == 2
+
+
+# ---------------------------------------------------------------------------
+# --box-ligand / --box-from-het / --replicates: usage errors (exit 2, nothing
+# written)
+# ---------------------------------------------------------------------------
+
+_LIGAND_BOX_DATA = os.path.join(os.path.dirname(__file__), "data", "ligand_box")
+_SITE_PDB = os.path.join(_LIGAND_BOX_DATA, "1hsg_site.pdb")
+_MK1_SDF = os.path.join(_LIGAND_BOX_DATA, "mk1.sdf")
+
+
+def _flat_sdf(tmp_path):
+    """An SDF with 2D coordinates (every z = 0)."""
+    path = tmp_path / "flat.sdf"
+    path.write_text("flat\n  test\n\n  2  1  0  0  0  0  0  0  0  0999 V2000\n"
+                    "    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n"
+                    "    1.5000    0.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0\n"
+                    "  1  2  1  0  0  0  0\nM  END\n$$$$\n")
+    return str(path)
+
+
+@pytest.mark.parametrize("extra, message", [
+    (["--box-ligand", _MK1_SDF, "--box-from-het", "MK1"], "cannot be combined"),
+    (["--box-ligand", _MK1_SDF, "--grid-center", "1,2,3"],
+     "--box-ligand cannot be combined with --grid-center"),
+    (["--box-from-het", "MK1", "--pockets", "1"],
+     "--box-from-het cannot be combined with --pockets"),
+    (["--box-ligand", "missing.sdf"], "--box-ligand: no such file: missing.sdf"),
+    (["--box-ligand", "FLAT"], "2D coordinates"),
+    (["--box-ligand", _SITE_PDB[:-4] + ".xyz"], "unsupported format .xyz"),
+    (["--box-from-het", "ZZZ"], "no such HETATM group"),
+    (["--box-from-het", "MK1:A"], "MK1 is present as MK1:B:902"),
+    (["--box-from-het", "HOH"], "HOH is water, not a ligand"),
+    (["--box-from-het", "MK1:B:9:2"], "must be RESNAME[:CHAIN[:RESNUM]]"),
+    (["--box-ligand", _MK1_SDF, "--grid-center-frame", "docking"],
+     "--grid-center-frame only applies to --grid-center"),
+    (["--replicates", "0"], "--replicates must be between 1 and 100, got 0"),
+    (["--replicates", "101"], "--replicates must be between 1 and 100, got 101"),
+    (["--replicates", "2", "--seed", "2147483647"],
+     "the last replicate's seed 2147483648 exceeds 2147483647"),
+    (["--replicates", "2", "--smina-only"],
+     "--smina-only cannot be combined with --replicates"),
+])
+def test_box_and_replicate_options_are_usage_errors(tmp_path, capsys, fake_tools,
+                                                    extra, message):
+    ligs = tmp_path / "ligs"
+    ligs.mkdir()
+    (ligs / "x.pdbqt").write_text("ROOT\nENDROOT\nTORSDOF 0\n")
+    out = tmp_path / "out"
+    extra = [_flat_sdf(tmp_path) if a == "FLAT" else a for a in extra]
+    tools.configure(smina=sys.executable)
+    argv = ["-r", _SITE_PDB, "-l", str(ligs), "-o", str(out), "--chain", "all"] + extra
+    assert _exit_code(argv) == runner.EXIT_USAGE
+    assert message in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_box_options_parse_with_defaults(cli):
+    argv, _ = cli
+    args, _ = runner._parse_args(runner.build_parser(), argv)
+    assert args.box_ligand is None and args.box_from_het is None
+    assert args.replicates == 1

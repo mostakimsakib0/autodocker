@@ -230,3 +230,111 @@ def test_smina_only_all_failed_exits_3(tmp_path, protein_pdb, monkeypatch):
     out = tmp_path / "out"
     assert (out / "ranking.csv").exists()
     assert _manifest(out)["docking_failures"] == {"failed": 1, "docked": 1}
+
+
+# ---------------------------------------------------------------------------
+# --box-from-het / --box-ligand and --replicates through runner.main
+# ---------------------------------------------------------------------------
+
+_LIGAND_BOX_DATA = os.path.join(os.path.dirname(__file__), "data", "ligand_box")
+_SITE_PDB = os.path.join(_LIGAND_BOX_DATA, "1hsg_site.pdb")
+
+
+def _site_argv(tmp_path, out):
+    return ["-r", _SITE_PDB, "-l", str(_ethanol_dir(tmp_path)), "-o", str(out),
+            "--chain", "all", "--exhaustiveness", "1", "--binding-modes", "1",
+            "--seed", "3", "--minimize-steps", "20", "--no-html-report"]
+
+
+def _grid_conf(out):
+    values = {}
+    for line in (out / "grid.conf").read_text().splitlines():
+        key, _, value = line.partition("=")
+        values[key.strip()] = float(value)
+    return values
+
+
+def test_box_from_het_mk1_end_to_end(tmp_path, caplog):
+    """--box-from-het MK1 on the 1HSG site: MK1 is removed from the receptor
+    (also with --keep-hetero), the box is the reference box in the docking
+    frame, and the manifest records it."""
+    out = tmp_path / "out"
+    with caplog.at_level(logging.INFO):
+        code = _main(_site_argv(tmp_path, out) + ["--box-from-het", "MK1", "--keep-hetero"])
+    assert code == runner.EXIT_OK
+    assert "MK1" not in (out / "receptor.pdbqt").read_text()
+    assert "MK1" not in (out / "receptor_no_reference.pdb").read_text()
+    assert (out / "reference_ligand.pdb").read_text().count("HETATM") == 45
+    box = _manifest(out)["box"]
+    assert box["source"] == "het_group" and box["reference"] == "MK1:B:902"
+    assert box["reference_heavy_atoms"] == 45 and box["reference_atoms_in_box"] == 45
+    assert box["size"] == box["size_computed"] and box["size_source"] == "reference ligand"
+    grid = _grid_conf(out)
+    assert [grid["center_x"], grid["center_y"], grid["center_z"]] == pytest.approx(
+        box["center_docking_frame"], abs=1e-3)
+    assert [grid["size_x"], grid["size_y"], grid["size_z"]] == pytest.approx(box["size"],
+                                                                            abs=1e-3)
+    offset = [float(v) for v in (out / "frame_offset.txt").read_text().split()
+              if v.lstrip("-").replace(".", "", 1).isdigit()][:3]
+    assert [c - o for c, o in zip(box["center_input_frame"], offset)] == pytest.approx(
+        box["center_docking_frame"], abs=2e-3)
+    assert "--box-from-het MK1:B:902: removed its 45 records" in caplog.text
+    if tools.settings().fpocket:
+        assert box["fpocket"] is not None and "top_ranked_pocket" in box["fpocket"]
+        assert (out / "pocket_summary.csv").exists()
+
+
+def test_box_ligand_with_grid_size_and_no_fpocket(tmp_path, caplog):
+    """--box-ligand mk1.sdf --grid-size: the center from the reference, the
+    size given; --no-fpocket skips the fpocket report. With --keep-hetero the
+    receptor keeps its own MK1, with a warning naming --box-from-het."""
+    out = tmp_path / "out"
+    with caplog.at_level(logging.INFO):
+        code = _main(_site_argv(tmp_path, out) + [
+            "--box-ligand", os.path.join(_LIGAND_BOX_DATA, "mk1.sdf"), "--no-fpocket",
+            "--grid-size", "22.5,22.5,22.5", "--keep-hetero"])
+    assert code == runner.EXIT_OK
+    box = _manifest(out)["box"]
+    assert box["source"] == "ligand_file" and box["reference_sha256"]
+    assert box["size"] == [22.5, 22.5, 22.5] and box["size_source"] == "--grid-size"
+    assert box["fpocket"] is None and not (out / "pocket_summary.csv").exists()
+    assert "MK1" in (out / "receptor.pdbqt").read_text()
+    assert "use --box-from-het MK1:B:902 to remove it" in caplog.text
+
+
+def test_replicates_end_to_end_and_resume(tmp_path, caplog):
+    """--replicates 2: two seeded dockings per ligand, the best one reported
+    with the replicate columns; a rerun docks nothing and writes the same
+    bytes; another N re-docks every (ligand, replicate)."""
+    out = tmp_path / "out"
+    argv = _site_argv(tmp_path, out) + ["--box-from-het", "MK1", "--no-fpocket",
+                                        "--replicates", "2"]
+    with caplog.at_level(logging.INFO):
+        assert _main(argv) == runner.EXIT_OK
+    assert "Docking 2 new (ligand, replicate) pairs (0 cached)" in caplog.text
+    for k in (0, 1):
+        assert (out / "docked" / f"ethanol_rep{k}_out.pdbqt").exists()
+        log = (out / "docked" / f"ethanol_rep{k}_vina.log").read_text()
+        assert f"--seed {3 + k}" in log
+    with open(out / "ranking.csv", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1 and rows[0]["n_replicates"] == "2"
+    assert float(rows[0]["score_min"]) == float(rows[0]["Binding_Affinity"])
+    with open(out / "replicate_scores.csv", newline="", encoding="utf-8") as f:
+        reps = list(csv.DictReader(f))
+    assert [(r["Replicate"], r["Seed"]) for r in reps] == [("0", "3"), ("1", "4")]
+    assert sum(r["Reported"] == "yes" for r in reps) == 1
+    summary = json.loads((out / "replicate_summary.json").read_text())
+    assert summary["seeds"] == [3, 4] and _manifest(out)["replicates"] == summary
+    first = _output_bytes(out)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert _main(argv) == runner.EXIT_OK
+    assert "Docking 0 new (ligand, replicate) pairs (2 cached)" in caplog.text
+    assert _output_bytes(out) == first
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert _main(argv[:-1] + ["3"]) == runner.EXIT_OK
+    assert "Docking 3 new (ligand, replicate) pairs (0 cached)" in caplog.text
