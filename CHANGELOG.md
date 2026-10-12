@@ -274,6 +274,16 @@ changes (below) are part of 2.0.0.
 - Default settings are defined once (`autodocker/vspipeline/defaults.py`);
   the container passes an option only when its environment variable is set,
   and the benchmark scripts default to the available CPUs instead of 8.
+- Code structure (no change in behaviour or outputs): `runner.py` is the
+  command line only; the pipeline stages are in `vspipeline/pipeline.py`
+  and `run_manifest.json` is written by `vspipeline/manifest.py`. Tool paths
+  and the command timeout are in `vspipeline/tools.py`, so the `vspipeline`
+  modules no longer import `runner.py`, and `runner.py` no longer re-exports
+  their names: Python code that used e.g. `runner.dock_all` or
+  `runner.OBABEL` imports `vspipeline.docking.dock_all` or reads
+  `vspipeline.tools.settings().obabel`. Receptor preparation helpers are
+  split into `pdb_records`, `protonation`, `fpocket` and `gridbox`; the HTML
+  report page is `vspipeline/templates/report.html`.
 
 ### Added
 
