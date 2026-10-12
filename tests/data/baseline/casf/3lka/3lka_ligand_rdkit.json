@@ -1,0 +1,8 @@
+{
+  "method": "ETKDGv3+MMFF94",
+  "seed": 42,
+  "max_iters": 2000,
+  "converged": true,
+  "rdkit": "2023.09.3",
+  "inchikey": "MSFQEZBRFPAFEX-UHFFFAOYSA-N"
+}

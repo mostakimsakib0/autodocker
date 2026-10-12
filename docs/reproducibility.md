@@ -161,3 +161,46 @@ Container images are tagged by git tag and commit SHA
 command for each re-docked complex and checks that every mode's affinity and
 the affinity reported in `ranking.csv` equal raw Vina's output (results:
 `BENCHMARKS.md`, J3).
+
+## Verifying a run
+
+`scripts/verify_run.py` lets a reader check a published output directory
+without trusting it (standard library only; Vina for `--redock`):
+
+```bash
+python3 scripts/verify_run.py OUT                      # consistency
+python3 scripts/verify_run.py OUT --redock --sample 5  # re-run Vina, byte for byte
+python3 scripts/verify_run.py RUN_A RUN_B              # compare two runs
+python3 scripts/verify_run.py OUT --json               # machine-readable
+```
+
+* **Consistency** (`OUT`): `run_manifest.json` exists, is strict JSON and
+  says `completed`; `ranking.csv` has the pipeline's columns, one row per
+  ligand, in the pipeline's order; every scored row has its pose and engine
+  log, its `Binding_Affinity` equals the pose file's first `REMARK VINA
+  RESULT` at full precision and its `Status` follows from the score; each
+  log's last `# Command:` writes that pose with the manifest's seed,
+  exhaustiveness and number of modes, and its `# Result:` agrees; the
+  manifest's docking counts equal the ranking's; the logged engine binary,
+  when present, has the manifest's SHA-256. Pose files that no row refers to
+  are warnings.
+* **Re-docking** (`--redock`): the logged command of `--sample K` seeded
+  random ligands (`--seed`, default 42; `--sample 0` = all) is re-executed
+  with paths under the original output directory mapped to `OUT` (a copied
+  or moved run can be checked) and `--out` redirected to a temporary
+  directory. The new pose file must be byte-identical to the stored one and
+  every mode's score equal; the binary must have the manifest's SHA-256
+  (`--vina-bin` substitutes another one, reported as a warning). This also
+  catches edits that keep the run self-consistent, e.g. moved pose
+  coordinates.
+* **Comparison** (`RUN_A RUN_B`): identical, different and one-sided files
+  (`*.log`, `.docking*`, the manifest's `started_at`/`finished_at` and the
+  Monte-Carlo `Volume` column of `pocket_summary.csv` are ignored; the run
+  directory path is normalised; `--ignore GLOB` adds patterns), Spearman ρ
+  of the two rankings and per-ligand score differences.
+
+Exit status 0 means every check passed (warnings allowed), 1 a failed check,
+2 a usage error. The tool also lists what the manifest does not record yet
+(output and input checksums; ligands docked from outside the output
+directory, which a `--redock` of a moved run cannot find).
+

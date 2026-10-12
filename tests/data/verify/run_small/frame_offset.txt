@@ -1,0 +1,7 @@
+# receptor.pdbqt, grid.conf and docked poses are translated so
+# the mean of the receptor heavy atoms is at the origin. Add this
+# offset to their coordinates to overlay them on the input PDB, e.g. with
+#   python3 scripts/restore_frame.py <output_dir> docked/*_out.pdbqt
+offset_x = 18.14071028037383
+offset_y = 34.276345794392526
+offset_z = 4.029822429906543
