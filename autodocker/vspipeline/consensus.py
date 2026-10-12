@@ -32,7 +32,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from vspipeline import defaults  # noqa: E402
 from vspipeline import outputs  # noqa: E402
-from vspipeline import tools, utils  # noqa: E402
+from vspipeline import docking, tools, utils  # noqa: E402
 from vspipeline.docking import (
     DEFAULT_MIN_VALID_AFFINITY,
     Status,
@@ -126,7 +126,8 @@ def _run_smina_command(cmd: List[str], timeout: int, log_file: Optional[str]
                        ) -> subprocess.CompletedProcess:
     """Run SMINA, recording the command first and its output afterwards.
     Raises RuntimeError on a nonzero exit status."""
-    _write_log(log_file, f"# Command: {shlex.join(cmd)}\n", mode="w")
+    _write_log(log_file, f"# Command: {shlex.join(cmd)}\n" + docking.engine_log_line(cmd),
+               mode="w")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     _write_log(log_file, (result.stdout or "") + "\n")
     if result.stderr and result.stderr.strip():

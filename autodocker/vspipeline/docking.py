@@ -20,6 +20,7 @@ import multiprocessing.connection
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
@@ -719,11 +720,37 @@ def _preflight(job: DockJob) -> Dict[str, float]:
         raise _DockingError(str(e))
 
 
+_ENGINE_SHA256_CACHE: Dict[Tuple[str, int, int], str] = {}
+
+
+def engine_sha256(path: str) -> str:
+    """SHA-256 of an engine binary (resolved through PATH and symlinks),
+    cached per (path, mtime_ns, size); '' when it cannot be read."""
+    found = shutil.which(path) or path
+    resolved = os.path.realpath(found)
+    try:
+        key = _file_key(resolved)
+    except OSError:
+        return ""
+    if key not in _ENGINE_SHA256_CACHE:
+        _ENGINE_SHA256_CACHE[key] = _file_sha256(resolved)
+    return _ENGINE_SHA256_CACHE[key]
+
+
+def engine_log_line(cmd: Sequence[str]) -> str:
+    """The ``# Engine:`` line written after each ``# Command:`` of a
+    per-ligand log: the binary as invoked and its SHA-256, so the log alone
+    identifies the exact engine (scripts/verify_run.py checks it)."""
+    return f"# Engine: {cmd[0]} sha256={engine_sha256(cmd[0]) or 'unavailable'}\n"
+
+
 def _run_engine(cmd: List[str], timeout: int, log) -> Tuple[str, str]:
     """Run one engine command, recording it in the per-ligand log first so
-    the log names the command even when it crashes or times out. Returns
-    (stdout, stderr); raises CalledProcessError / TimeoutExpired."""
+    the log names the command (and the engine's SHA-256) even when it
+    crashes or times out. Returns (stdout, stderr); raises
+    CalledProcessError / TimeoutExpired."""
     log.write(f"# Command: {shlex.join(cmd)}\n")
+    log.write(engine_log_line(cmd))
     log.flush()
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:

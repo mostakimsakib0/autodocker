@@ -295,6 +295,8 @@ def test_command_logged_before_running_and_stderr_kept(tmp_path, monkeypatch):
     assert log[1].startswith("# Command: " + eng + " --receptor ")
     # plain paths: identical to the old ' '.join() text the parity script splits
     assert log[1].split(":", 1)[1].strip().split()[0] == eng
+    # the engine binary's SHA-256 follows each command
+    assert log[2] == f"# Engine: {eng} sha256={docking._file_sha256(eng)}"
     assert "WARNING: fake engine warning" in "\n".join(log)
 
     monkeypatch.setenv("FAKE_MODE_vina", "crash")
