@@ -100,7 +100,8 @@ def test_fixture_run_verifies(capsys):
     assert checks["ligand[butanoic_acid].status"]["status"] == "pass"  # WEAK row
     # The logged binary is not on this machine: skipped, not failed.
     assert checks["engine[/opt/vina/bin/vina].sha256"]["status"] == "skip"
-    assert any("SHA-256 of the output files" in g for g in doc["manifest_gaps"])
+    assert checks["outputs.sha256"]["status"] == "pass"
+    assert checks["inputs.sha256"]["status"] == "skip"   # /workspace input not on this machine
 
 
 @pytest.mark.parametrize("tamper, check", [
@@ -133,12 +134,38 @@ def test_fixture_run_verifies(capsys):
      "manifest.counts"),
     # rows out of ranking order
     (lambda d: _swap_rows(d / "ranking.csv"), "ranking.order"),
+    # hash sections deleted from a 2.0.0 manifest (instead of recomputed)
+    (lambda d: _drop_manifest_key(d, "outputs"), "outputs.sha256"),
+    (lambda d: _drop_manifest_key(d, "inputs"), "inputs.sha256"),
+    # --seed removed from a logged command
+    (lambda d: _edit(d / "docked" / "phenylethanol_vina.log", " --seed 3", ""),
+     "ligand[phenylethanol].log_command"),
 ])
 def test_tampering_is_detected(run_copy, capsys, tamper, check):
     tamper(run_copy)
     code, doc = _run([str(run_copy)], capsys)
     assert code == 1 and doc["result"] == "FAIL"
     assert check in _failed(doc)
+
+
+def _drop_manifest_key(run_dir, key):
+    path = run_dir / "run_manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    del manifest[key]
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def test_manifest_before_2_0_without_hashes_is_skipped(run_copy, capsys):
+    """Older manifests never had the hash sections: skipped, not failed."""
+    path = run_copy / "run_manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    del manifest["outputs"], manifest["inputs"]
+    manifest["autodocker_version"] = "1.1.5"
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    code, doc = _run([str(run_copy)], capsys)
+    checks = {c["check"]: c for c in doc["checks"]}
+    assert checks["outputs.sha256"]["status"] == "skip"
+    assert checks["inputs.sha256"]["status"] == "skip"
 
 
 def _swap_rows(path):

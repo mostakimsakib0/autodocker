@@ -106,6 +106,13 @@
   },
   "finished_at": "2026-10-12T06:28:17+00:00",
   "flexible_residues": [],
+  "inputs": {
+    "ligands": {},
+    "receptor": {
+      "path": "/workspace/protein.pdb",
+      "sha256": "0f9b4b1e6b7914b59828240605ee82cc818d74b0d2b124ee6588a33bf8330083"
+    }
+  },
   "ligand_preparation": {
     "failed": 0,
     "superseded": 0
@@ -121,6 +128,24 @@
     "variable": "OB_RANDOM_SEED"
   },
   "openbabel_version": "3.2.1",
+  "outputs": {
+    "Results_full.txt": "983dbc94df958fc22fce597d75594f1523e595f4540592a09b69b824fffa1285",
+    "Top_hits.txt": "88123be62b8512e03676b0e1caee478dcfdd6a9a42fe79ff66e39268a901c9ed",
+    "docked/acetaminophen_out.pdbqt": "45f6f176538e45ad2e35bd1ab0b006b95c590363037cdfa64a16cad739393608",
+    "docked/acetaminophen_vina.log": "7adad08ca31338471fa7f6f2998ffa1fbe2164c05c485ad5131fb3cc609ed611",
+    "docked/butanoic_acid_out.pdbqt": "2a90bdc3401e71292be30f95d81f83be5b9d1a75c1bc367362c0da6dd2f10c70",
+    "docked/butanoic_acid_vina.log": "6e5e0209982329bf7f0514070c0494de9cb411a8e6fdb45dc1055c91c112e17e",
+    "docked/phenylethanol_out.pdbqt": "0a4dbd6cc65d274bdf10de3a9b4ae28f719b8be2bb9933cf191f420f2eef871e",
+    "docked/phenylethanol_vina.log": "928bb0d429a7ceadd5b6370316421bf2232448a70905c0736ea7047cada6432c",
+    "frame_offset.txt": "3ac19b860955322629ff31136dbfaa5e31850881a870c2a0d2ed925510c6c80d",
+    "grid.conf": "66f19c6dcbfadbc1d242595e28ae93afb7cccded0446a5ce4354cfc89406fa79",
+    "ligand_metadata.json": "453a086f5fc5cbf6b13bdbeed877078dec26b234e891652449d3ba0dd7a1f8bf",
+    "ligands/acetaminophen.pdbqt": "7482df7aee53c7a026806651b95063a82459d7d0845aa80b574e684b19379e63",
+    "ligands/butanoic_acid.pdbqt": "2e4b162a0295595dd6b37f72b2ea98b6b48dfb1b19a52f997ada9e8cfad575bd",
+    "ligands/phenylethanol.pdbqt": "14a64fe381bb34f780662af9d59388133567e6e2e3e9585e106ad9a557825f71",
+    "metrics.txt": "cc4b69e0063128f11931df850511cfd8498e406c56971c19f1ca4a12a9ca2c01",
+    "ranking.csv": "0ec7d76f99a68108a4647399467e0fd7ba7c00e60b5ed843739ba620582d513c"
+  },
   "platform": "Linux-6.8.0-146-generic-x86_64-with-glibc2.39",
   "python": {
     "executable": "/usr/bin/python3",

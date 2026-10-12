@@ -374,7 +374,9 @@ def check_row(outdir, row, manifest, report, binaries):
         if key == "seed" and want is not None and k:
             want = int(want) + k  # replicate k is docked with --seed + k
         got = command_option(cmd, option)
-        if want is not None and got is not None and str(got) != str(want):
+        if key == "seed" and want is not None and got is None:
+            problems.append(f"no {option} in the logged command (manifest {want})")
+        elif want is not None and got is not None and str(got) != str(want):
             problems.append(f"{option} {got} != manifest {want}")
     res_status, res_aff = parse_result_line(result)
     if res_status is None:
@@ -508,12 +510,26 @@ def _hashed_files(outdir):
     return sorted(found)
 
 
+def _hashes_required(manifest):
+    """AutoDocker >= 2.0.0 always writes ``inputs`` and ``outputs``: in such a
+    manifest a missing section means it was removed, not that it predates them."""
+    try:
+        major = int(str((manifest or {}).get("autodocker_version", "0")).split(".")[0])
+    except ValueError:
+        return False
+    return major >= 2
+
+
 def check_outputs(outdir, manifest, report):
     """The manifest's ``outputs`` hashes (AutoDocker >= 2.0.0) against the
     files in ``outdir``."""
     recorded = (manifest or {}).get("outputs")
     if not isinstance(recorded, dict):
-        report.add("outputs.sha256", SKIP, "the manifest records no output hashes")
+        if _hashes_required(manifest):
+            report.add("outputs.sha256", FAIL, "the manifest of an AutoDocker >= 2.0.0 run "
+                       "has no output hashes (section removed?)")
+        else:
+            report.add("outputs.sha256", SKIP, "the manifest records no output hashes")
         return
     missing, changed = [], []
     for rel, want in sorted(recorded.items()):
@@ -539,7 +555,11 @@ def check_inputs(manifest, report):
     recorded SHA-256; inputs not on this machine are skipped."""
     inputs = (manifest or {}).get("inputs")
     if not isinstance(inputs, dict):
-        report.add("inputs.sha256", SKIP, "the manifest records no input hashes")
+        if _hashes_required(manifest):
+            report.add("inputs.sha256", FAIL, "the manifest of an AutoDocker >= 2.0.0 run "
+                       "has no input hashes (section removed?)")
+        else:
+            report.add("inputs.sha256", SKIP, "the manifest records no input hashes")
         return
     entries = [("receptor", inputs.get("receptor")), ("box_ligand", inputs.get("box_ligand"))]
     entries += [(f"ligand[{name}]", entry)
