@@ -148,6 +148,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `--max-compounds` | PubChem compounds to prepare | `20` |
 | `--no-lipinski` | Skip the Lipinski filter (SDF/PubChem inputs; zero violations allowed). `--no-admet` is a deprecated alias | filter on |
 | `--no-minimize` | Skip MMFF94 minimization (SDF/PubChem ligands only). 2D inputs, also 2D MOL2/PDB, still get seeded RDKit 3D coordinates | off |
+| `--minimize-steps` | MMFF94 minimization steps (SDF/PubChem ligands) | `250` |
 | `--chain` | Chains to keep, e.g. `A`, `A,B`, or `all` (case-sensitive; checked against the receptor before any ligand is prepared); a blank chain ID is chain `A`; a blank chain next to a real chain `A` is refused | first chain, with a warning |
 | `--ph` | pH for receptor hydrogens (Open Babel `-p`), 0 to 14 | `7.4` |
 | `--pockets` | fpocket pocket numbers, e.g. `1` or `2,3` (not with `--no-fpocket`, or with `--grid-center` and `--grid-size` together) | best score |
@@ -159,6 +160,8 @@ Direct use (inside the image or with tools on `PATH`):
 | `--box-ligand FILE` | Box around a reference ligand (SDF/MOL/MOL2/PDB/PDBQT, first molecule, receptor-PDB frame): center of its heavy atoms' bounding box, each edge max(extent + 2 × `--padding`, 22.5) Å. fpocket only reports which pocket holds the ligand (`run_manifest.json` → `box`; `--no-fpocket` skips it). Not with `--grid-center`, `--pockets` or `--box-from-het`; `--grid-size` replaces the size. An unreadable, empty or 2D file is a usage error | none |
 | `--box-from-het RESNAME[:CHAIN[:RESNUM]]` | As `--box-ligand`, with a HETATM group of the receptor PDB as reference, e.g. `MK1`, `MK1:B:902`; the group is removed from the receptor (also with `--keep-hetero`) and written to `reference_ligand.pdb`. A missing, ambiguous or water group is a usage error listing the groups present | none |
 | `--keep-waters`, `--detect-metals`, `--detect-cofactors` | Keep waters near the site, metal ions, known cofactors | off |
+| `--water-distance` | With `--keep-waters`: keep waters within this distance of the box center (Å) | `4.0` |
+| `--keep-hetero` | Keep HETATM records of the selected chains (single-atom metal ions get Vina metal types; other elements without Open Babel Gasteiger parameters stop the run) | off |
 | `--flexible-residues` | Flexible side chains, e.g. `A45,A78`, `1:45` for digit chains, `45`/`A45` for a blank chain (case-sensitive); each must exist in the docked chains (else exit 2) and be buildable (else exit 1) | none |
 | `--auto-flexible N` | The N residues closest to the box center become flexible; if none can be built, docking is rigid (warning). Not with `--flexible-residues` | none |
 | `-p, --processes` | Parallel docking processes (`0`/`-1` = all CPUs, `-N` = CPUs ÷ N) | `1` |
@@ -177,6 +180,7 @@ Direct use (inside the image or with tools on `PATH`):
 | `--smina-only` | Dock with SMINA instead of Vina (1 mode, no resume) | off |
 | `--top-n` | Top-ranked compounds highlighted in `Top_hits.txt` and the HTML report (`ranking.csv` lists all) | `20` |
 | `--no-html-report` | Skip the self-contained HTML report | report on |
+| `--cluster-poses` | Write `pose_clusters.json` (greedy RMSD clustering of each ligand's poses, `--rmsd-threshold`, default 2.0 Å) | off |
 | `-v, --verbose` | Debug logging for all modules | off |
 | `--version` | Print version and exit | — |
 
@@ -269,7 +273,11 @@ It checks that `ranking.csv`, the poses, the engine logs and the manifest
 agree, that every output still has the SHA-256 recorded in
 `run_manifest.json` (an edited pose is detected even when `ranking.csv` was
 edited to match), and with `--redock` re-executes the logged Vina commands
-(also after the output directory was moved). See
+(also after the output directory was moved). The hashes are checksums, not
+signatures: someone who edits outputs and recomputes every hash passes the
+consistency checks, and only `--redock` detects that, for the ligands it
+re-docks (`--sample 0` re-docks all of them; on the same CPU architecture,
+since Vina's results differ slightly between x86-64 and arm64). See
 [`docs/reproducibility.md`](docs/reproducibility.md#verifying-a-run).
 
 ## Validation
@@ -280,16 +288,20 @@ bootstrap confidence intervals) with boxes from the crystal ligands, a
 raw-Vina parity check, and throughput scaling. Results for 2.0.0 (GitHub
 Actions): the top-ranked pose is within 2 Å of the crystal pose for 140 of 278
 CASF-2016 complexes (50.4%), ROC AUC is 0.64-0.88 (mean 0.743) over ten DUD-E
-targets, and all 304 pose scores of the parity check equal raw Vina's. The
-comparison with the standard Meeko + Vina workflow and the throughput numbers
-are being added to `BENCHMARKS.md`. Every benchmark is reproducible from
+targets, and rerunning raw Vina on a seeded sample of 40 complexes reproduced
+all 304 pose scores. On the 39 complexes of that sample that every workflow
+evaluated, the standard reduce + Meeko + Vina workflow and EasyDock 1.3.1 both
+placed the top pose within 2 Å for 21, AutoDocker for 19 (no detectable
+difference; exact McNemar p = 0.75 and 0.69). Throughput on a 4-core laptop
+rose from 1.8 to 5.0 ligands/min with 8 processes. Every benchmark is reproducible from
 `scripts/benchmark_*.py`.
 
 ## Requirements
 
 The Docker image contains everything. A native install needs Python 3.9-3.12
 with `requirements.txt` (RDKit included), AutoDock Vina 1.2.x, fpocket (unless
-`--no-fpocket` or an explicit box) and **Open Babel >= 3.2.0**; the image
+`--no-fpocket` or an explicit box) and Open Babel (**3.2.0 or later
+recommended**); the image
 builds Open Babel 3.2.1, the release AutoDocker 2.0 is validated with.
 Open Babel 3.2 honours the `OB_RANDOM_SEED` variable AutoDocker sets and no
 longer over-protonates pre-protonated Lys/Arg. Older releases (e.g. a Linux

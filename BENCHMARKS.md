@@ -261,16 +261,16 @@ logical and physical core counts, CPU model, Vina and AutoDocker versions.
 
 | Size | p=1 | p=2 | p=4 | p=8 |
 |---|---|---|---|---|
-| 10 | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
-| 50 | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) | TBD (rerun with 2.0.0) |
+| 10 | 303 s [277–449], 1.98/min, 1.00× | 171 s [170–273], 3.50/min, 1.77× | 119 s [115–148], 5.03/min, 2.54× | 114 s [109–123], 5.25/min, 2.65× |
+| 50 | 1636 s [1547–1836], 1.83/min, 1.00× | 1009 s [996–1010], 2.97/min, 1.62× | 629 s [627–665], 4.77/min, 2.60× | 595 s [593–641], 5.04/min, 2.75× |
 
 (each cell: median wall time [min–max], throughput, speedup vs. p=1)
 
 | Metric | Value |
 |---|---|
-| Fixed preparation time (median) | TBD (rerun with 2.0.0) |
-| Peak process-tree memory (RSS / PSS) | TBD (rerun with 2.0.0) |
-| Host (logical / physical cores, CPU model) | TBD (rerun with 2.0.0) |
+| Fixed preparation time (median) | 2.0 s |
+| Peak process-tree memory (RSS / PSS) | 4712 / 4389 MiB (50 ligands, p = 8) |
+| Host (logical / physical cores, CPU model) | 8 / 4, Intel Core i5-8350U (exhaustiveness 2, one mode, one Vina thread per process) |
 
 Files: `runs.csv` (every run), `performance.csv` (per cell), `summary.json`.
 
@@ -326,15 +326,15 @@ poses and keeping `--binding-modes` (no energy range). When `easydock` is
 missing or does not start, the script exits with status 3 and writes the
 reason to `summary.json`.
 
-**Results:**
+**Results** (Benchmarks run 38261107667 for the baseline and EasyDock; paired exact McNemar test on the 39 complexes: p = 0.75 against the baseline, 0.69 against EasyDock, i.e. no detectable difference):
 
 | Metric | AutoDocker | Baseline (Meeko + Vina) | EasyDock |
 |---|---|---|---|
-| J1 top-1 success (≤ 2 Å), seeded 40-complex sample | TBD (rerun with 2.0.0) | TBD | TBD |
-| J1 best-of-N success, same sample | TBD (rerun with 2.0.0) | TBD | TBD |
-| J1 median top-1 RMSD, same sample | TBD (rerun with 2.0.0) | TBD | TBD |
-| J2 mean ROC AUC (10 targets) | 0.743 | TBD | — (not run) |
-| J2 mean EF5% | 3.83 | TBD | — (not run) |
+| J1 top-1 success (≤ 2 Å), the 39 complexes of the seeded 40-complex sample that all three evaluated (Meeko fails on 5c2h) | 19 / 39 | 21 / 39 | 21 / 39 |
+| J1 best-of-N success, same complexes | 25 / 39 | 29 / 39 | 29 / 39 |
+| J1 median top-1 RMSD (Å), same complexes | 2.27 | 1.85 | 1.52 |
+| J2 mean ROC AUC (10 targets) | 0.743 | 0.716 | — (not run) |
+| J2 mean EF5% | 3.83 | 3.73 | — (not run) |
 
 Files: as J1/J2, plus `work/<id>/params.json` (box, start conformer,
 receptor preparation incl. deleted residues) and the preparation logs.

@@ -1,5 +1,5 @@
 ---
-title: 'AutoDocker: reproducible, containerized virtual screening with AutoDock Vina'
+title: 'AutoDocker: Reproducible and Verifiable Virtual Screening with AutoDock Vina'
 tags:
   - molecular docking
   - virtual screening
@@ -21,7 +21,7 @@ authors:
 affiliations:
   - name: Dept. of CSE, Manarat International University, Dhaka, Bangladesh
     index: 1
-date: 20 August 2026
+date: 13 October 2026
 bibliography: paper.bib
 
 # Summary
@@ -71,12 +71,12 @@ or bundled validation that make results citable.
 AutoDocker is designed for the gap between a bare docking binary and a GUI:
 a fully scriptable, containerized pipeline that makes every preparation and
 scoring decision explicit, validates that inputs are chemically usable
-before docking (nonzero charges, atom records, size guards), fails loudly
+before docking (atom records, size guards, elements Vina can type), fails loudly
 instead of silently producing noise, and ships scientific benchmarks so
 that any future change is continuously checked against known-good reference
 results. It is targeted at researchers who need auditable, reproducible
 screening results at scale — without a GUI, without a proprietary platform,
-and with the option to reproduce every result bit-for-bit.
+and with the option to reproduce a run bit for bit on the same software stack and CPU architecture.
 
 # State of the field
 
@@ -90,16 +90,16 @@ capabilities that affect reproducibility or screening quality.
 | Capability | AutoDocker | Vina CLI | PyRx | Raccoon2 / MzDOCK | jamdock-suite | smina |
 |---|---|---|---|---|---|---|
 | Fully scriptable / headless | ✔ | ✔ (binary only) | ✖ (GUI) | ✖ (GUI) | ✔ | ✔ |
-| Pocket detection → grid box (fpocket) | ✔ auto (+centroid fallback) | ✖ manual | ✖ manual box | ✔ | ✔ | ✖ |
-| Library source: local files + PubChem/FDA download | ✔ | ✖ | local only | local only | ZINC | ✖ |
-| Lipinski rule-of-five filter on library | ✔ | ✖ | ✖ | ✖ | ✖ | ✖ |
+| Pocket detection → grid box (fpocket) | ✔ auto (+centroid fallback) | ✖ manual | automatic | ✔ | prompted | ✖ |
+| Library source: local files + PubChem/FDA download | ✔ | ✖ | local + PubChem | local only | ZINC | ✖ |
+| Lipinski rule-of-five filter on library | ✔ | ✖ | ✔ | ✖ | MW/logP range | ✖ |
 | Ligand minimization (MMFF94) | ✔ | ✖ | ✖ | ✖ | ✖ | ✖ |
-| Input validation (nonzero charges, atom records, fail-loud) | ✔ | ✖ | partial | partial | ✖ | ✖ |
-| Flexible-receptor docking | ✔ (manual + auto residues) | ✔ (manual) | ✖ | ✖ | ✖ | ✖ |
+| Input validation (atom records, elements, fail-loud) | ✔ | ✖ | partial | partial | partial | ✖ |
+| Flexible-receptor docking | ✔ (manual + auto residues) | ✔ (manual) | ✔ (manual) | ✖ | ✖ | ✔ (manual, `--flexres`) |
 | Consensus scoring (Vina + SMINA) | ✔ optional | ✖ | ✖ | ✖ | ✖ | ✖ (engine only) |
-| Checkpoint / resume | ✔ | ✖ | ✖ | ✖ | ✔ (jamresume) | ✖ |
+| Checkpoint / resume | ✔ | ✖ | partial | ✖ | ✔ (jamresume) | ✖ |
 | Seeded determinism + versioned container | ✔ | ✖ | ✖ | ✖ | ✖ | ✖ |
-| Interactive HTML report with 3D viewer | ✔ optional | ✖ | ✖ | ✖ | ✖ | ✖ |
+| Interactive HTML report with 3D viewer | ✔ (default) | ✖ | ✖ | ✖ | ✖ | ✖ |
 | Bundled open benchmarks (re-docking, enrichment, parity) | ✔ | ✖ | ✖ | ✖ | ✖ | ✖ |
 
 AutoDocker's differentiating value is not a new scoring function — it is a
@@ -114,7 +114,7 @@ claims are checkable.
 AutoDocker is two thin layers over well-known scientific binaries. A small
 bash entry point (`entry.sh`) maps environment variables to command-line
 arguments (both workflows are scored: `INPUT`/`LIGS`/`PDB` and
-`-r`/`-l`/`-o`), then a single Python module (`runner.py`) orchestrates the
+`-r`/`-l`/`-o`), then a Python package (`runner.py` and `vspipeline/`) orchestrates the
 pipeline in five phases:
 
 1. **Library preparation** — local SDF/MOL2/PDB/PDBQT input or PubChem
@@ -137,7 +137,7 @@ pipeline in five phases:
    `multiprocessing`; optional flexible residues, and optional consensus
    rescoring of Vina's top pose with SMINA's Vinardo function.
 5. **Result analysis** — ranked CSV, top-hit and metrics text files, pocket
-   summary, checkpoint file for resume, and an optional self-contained HTML
+   summary, checkpoint file for resume, and (by default) a self-contained HTML
    report with affinity statistics, pose clustering, and an embedded NGL
    viewer.
 

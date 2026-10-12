@@ -201,6 +201,19 @@ python3 scripts/verify_run.py OUT --json               # machine-readable
   (`--vina-bin` substitutes another one, reported as a warning). This also
   catches edits that keep the run self-consistent, e.g. moved pose
   coordinates.
+
+**Limits.** The SHA-256 values are checksums, not signatures. Someone who
+edits a pose file, its log and `ranking.csv` and recomputes every hash in
+the manifest passes the consistency and hash checks; only `--redock`
+detects it, and only for the ligands in the re-docked sample (choose your
+own `--seed`, or re-dock all with `--sample 0`). Re-docking starts from
+the prepared `receptor.pdbqt` and `ligands/*.pdbqt` of the run, so prepared
+files that were edited and then docked for real are found only by
+re-running the whole screen from the original inputs. Byte identity of
+re-docked poses holds on the CPU architecture of the run (x86-64 and arm64
+Vina differ slightly). In a 2.0.0 manifest a missing `outputs` or `inputs`
+section fails the check (it cannot be an older manifest), and a logged
+Vina command without `--seed` fails.
 * **Comparison** (`RUN_A RUN_B`): identical, different and one-sided files
   (`*.log`, `.docking*`, the manifest's `started_at`/`finished_at` and the
   Monte-Carlo `Volume` column of `pocket_summary.csv` are ignored; the run
