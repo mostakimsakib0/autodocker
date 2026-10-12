@@ -14,8 +14,12 @@
 # Usage: scripts/ci/baseline_env.sh {baseline|easydock} PREFIX
 set -euo pipefail
 
-kind="${1:?usage: $0 {baseline|easydock} PREFIX}"
-prefix="${2:?usage: $0 {baseline|easydock} PREFIX}"
+if [ "$#" -ne 2 ]; then
+	echo "usage: $0 {baseline|easydock} PREFIX" >&2
+	exit 2
+fi
+kind="$1"
+prefix="$2"
 python="${PYTHON:-python3}"
 
 # Meeko + reduce (receptor and ligand preparation of the standard workflow).
