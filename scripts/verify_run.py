@@ -21,7 +21,18 @@ Modes
       with ranking.csv; the pose file has no more models than requested;
     * the manifest's docking counts equal the ranking's;
     * the docking binary named in the logs, when present on this machine,
-      has the SHA-256 recorded in the manifest;
+      has the SHA-256 recorded in the manifest, and the log's ``# Engine:``
+      line (AutoDocker >= 2.0.0) records that SHA-256;
+    * every file in the manifest's ``outputs`` ({relative path: sha256})
+      exists with that SHA-256 (so an edit of a pose file AND ranking.csv
+      that keeps them consistent is detected); hashed outputs the manifest
+      does not list are warnings;
+    * the manifest's ``inputs`` (receptor, ligand files, --box-ligand) that
+      exist at their recorded path have the recorded SHA-256 (inputs not
+      present on this machine are skipped);
+    * with --replicates N > 1: the replicate columns of ranking.csv, each
+      replicate pose's first score equals replicate_scores.csv, and each
+      replicate's log uses seed --seed + k;
     * pose files in ``docked/`` that no ranking row refers to are warnings.
 
 ``verify_run.py OUTDIR --redock [--sample K] [--seed S]``
@@ -35,7 +46,8 @@ Modes
 
 ``verify_run.py RUN_A RUN_B``
     Compare two output directories: identical / different / one-sided files
-    (ignoring run_manifest.json timestamps, ``*.log``, the Monte-Carlo
+    (ignoring run_manifest.json timestamps and the ``outputs`` hashes of
+    ``*.log`` files, ``*.log``, the Monte-Carlo
     ``Volume`` column of pocket_summary.csv and the ``.docking*`` checkpoint
     files; the run directory path is normalised), the Spearman rank
     correlation of the two rankings and per-ligand score differences.
@@ -73,6 +85,20 @@ RANKING_COLUMNS = (
     "MW", "LogP", "HBA", "HBD", "TPSA", "Rotors", "ZINC_URL",
     "Docked_File", "Status", "Engine", "Minimized",
 )
+RANKING_REPLICATE_COLUMNS = ("n_replicates", "score_mean", "score_sd", "score_min",
+                             "score_max")
+REPLICATE_SCORES_CSV = "replicate_scores.csv"
+REPLICATE_TAG = "_rep"
+# Outputs whose SHA-256 the manifest records ("outputs"), as in outputs.py.
+HASHED_OUTPUTS = (
+    "ranking.csv", "Top_hits.txt", "metrics.txt", "Results_full.txt",
+    "results_report.html", "pose_clusters.json", "consensus_ranking.csv",
+    "consensus_summary.json", "replicate_scores.csv", "replicate_summary.json",
+    "receptor.pdbqt", "protein_clean.pdb", "rigid.pdbqt", "flex.pdbqt",
+    "receptor_no_reference.pdb", "reference_ligand.pdb",
+    "grid.conf", "grid_box.pml", "frame_offset.txt", "ligand_metadata.json",
+)
+HASHED_OUTPUT_DIRS = ("docked", "ligands", "ligands_minimized")
 STATUSES = ("OK", "WEAK", "OUT_OF_WINDOW", "FAILED")
 STATUS_GROUP = {"OK": 0, "WEAK": 0, "OUT_OF_WINDOW": 1, "FAILED": 2}
 AFFINITY_FLOOR = -20.0
@@ -194,6 +220,21 @@ def parse_log(log_path):
     return command, result
 
 
+def parse_engine_line(log_path):
+    """``(binary, sha256)`` of the ``# Engine:`` line that follows the last
+    ``# Command:`` of a per-ligand log (AutoDocker >= 2.0.0 writes it), or
+    ``(None, None)``."""
+    engine = (None, None)
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith("# Command:"):
+                engine = (None, None)
+            elif line.startswith("# Engine:"):
+                binary, _, sha = line.split(":", 1)[1].strip().rpartition(" sha256=")
+                engine = (binary or None, sha or None)
+    return engine
+
+
 def command_option(cmd, option):
     """Value following ``option`` in an argument list (last occurrence)."""
     value = None
@@ -219,11 +260,26 @@ def parse_result_line(text):
 
 
 def log_path_for(outdir, name, docked_file):
-    """The engine log of a ranking row (Vina or SMINA naming)."""
+    """The engine log of a ranking row (Vina or SMINA naming). The log is
+    named after the pose file (``<stem>_out.pdbqt`` -> ``<stem>_vina.log``;
+    with --replicates the stem is ``<name>_rep<k>``)."""
     docked = os.path.join(outdir, _benchlib.DOCKED_DIR)
     if docked_file.endswith(SMINA_POSE_SUFFIX):
         return os.path.join(docked, name + SMINA_LOG_SUFFIX)
-    return os.path.join(docked, name + _benchlib.VINA_LOG_SUFFIX)
+    base = os.path.basename(docked_file)
+    stem = base[:-len(_benchlib.POSE_SUFFIX)] if base.endswith(_benchlib.POSE_SUFFIX) else name
+    return os.path.join(docked, stem + _benchlib.VINA_LOG_SUFFIX)
+
+
+def replicate_index(name, docked_file):
+    """k of a --replicates pose file ``<name>_rep<k>_out.pdbqt``, else 0."""
+    base = os.path.basename(docked_file or "")
+    prefix = name + REPLICATE_TAG
+    if base.startswith(prefix) and base.endswith(_benchlib.POSE_SUFFIX):
+        k = base[len(prefix):-len(_benchlib.POSE_SUFFIX)]
+        if k.isdigit():
+            return int(k)
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -309,9 +365,12 @@ def check_row(outdir, row, manifest, report, binaries):
     out = command_option(cmd, "--out")
     if not out or os.path.basename(out) != os.path.basename(pose):
         problems.append(f"--out {out!r} is not {os.path.basename(pose)}")
+    k = replicate_index(name, docked_file) if (args.get("replicates") or 1) > 1 else 0
     for option, key in (("--seed", "seed"), ("--exhaustiveness", "exhaustiveness"),
                         ("--num_modes", "binding_modes")):
         want = manifest.get("seed") if key == "seed" and manifest else args.get(key)
+        if key == "seed" and want is not None and k:
+            want = int(want) + k  # replicate k is docked with --seed + k
         got = command_option(cmd, option)
         if want is not None and got is not None and str(got) != str(want):
             problems.append(f"{option} {got} != manifest {want}")
@@ -324,6 +383,17 @@ def check_row(outdir, row, manifest, report, binaries):
         if value is not None and res_aff is not None and round(value, 3) != res_aff:
             problems.append(f"log affinity {res_aff} != pose score {token}")
     report.add(f"{tag}.log_command", FAIL if problems else PASS, "; ".join(problems))
+    logged_binary, logged_sha = parse_engine_line(log)
+    if logged_sha is not None:
+        want = expected_engine_sha(manifest, cmd[0])
+        if logged_binary != cmd[0]:
+            report.add(f"{tag}.log_engine", FAIL,
+                       f"'# Engine:' names {logged_binary}, the command runs {cmd[0]}")
+        elif want is not None and logged_sha != want:
+            report.add(f"{tag}.log_engine", FAIL,
+                       f"logged engine sha256 {logged_sha} != manifest {want}")
+        else:
+            report.add(f"{tag}.log_engine", PASS, logged_sha)
     return rec
 
 
@@ -347,8 +417,10 @@ def check_consistency(outdir, report):
         report.add("ranking.present", FAIL, f"{_benchlib.RANKING_CSV} missing")
         return manifest, []
     header = tuple(read_header(ranking))
-    report.add("ranking.columns", PASS if header == RANKING_COLUMNS else FAIL,
-               "" if header == RANKING_COLUMNS else f"columns {list(header)}")
+    n_replicates = (manifest_args(manifest).get("replicates") or 1) if manifest else 1
+    columns = RANKING_COLUMNS + (RANKING_REPLICATE_COLUMNS if n_replicates > 1 else ())
+    report.add("ranking.columns", PASS if header == columns else FAIL,
+               "" if header == columns else f"columns {list(header)}")
     try:
         rows = _benchlib.read_ranking(ranking)
     except ValueError as e:
@@ -377,6 +449,10 @@ def check_consistency(outdir, report):
             check_binary(binary, manifest, report)
 
     referenced = {os.path.realpath(r["pose"]) for r in records if r.get("pose")}
+    if n_replicates > 1:
+        referenced |= check_replicate_scores(outdir, report)
+    check_outputs(outdir, manifest, report)
+    check_inputs(manifest, report)
     docked = os.path.join(outdir, _benchlib.DOCKED_DIR)
     if os.path.isdir(docked):
         orphans = sorted(
@@ -387,6 +463,103 @@ def check_consistency(outdir, report):
             report.add("docked.orphans", WARN,
                        f"{len(orphans)} pose file(s) not in ranking.csv: {orphans[:5]}")
     return manifest, records
+
+
+def check_replicate_scores(outdir, report):
+    """--replicates N > 1: every replicate pose of replicate_scores.csv
+    exists and its first score equals the Score column. Returns the
+    realpaths of those pose files (they are not orphans)."""
+    import csv
+    path = os.path.join(outdir, REPLICATE_SCORES_CSV)
+    if not os.path.exists(path):
+        report.add("replicates.scores", FAIL, f"{REPLICATE_SCORES_CSV} missing")
+        return set()
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    poses, problems = set(), []
+    for row in rows:
+        rel = row.get("Docked_File") or ""
+        if not rel:
+            continue
+        pose = os.path.join(outdir, rel)
+        poses.add(os.path.realpath(pose))
+        if not os.path.exists(pose):
+            problems.append(f"{rel} missing")
+            continue
+        token, value = _benchlib.first_vina_result(pose)
+        score = _benchlib._float_or_none(row.get("Score") or "")
+        if score is not None and value != score:
+            problems.append(f"{rel}: replicate_scores.csv {row.get('Score')} != pose {token}")
+    report.add("replicates.scores", FAIL if problems else PASS,
+               "; ".join(problems[:5]) if problems else f"{len(rows)} replicate rows")
+    return poses
+
+
+def _hashed_files(outdir):
+    """Relative paths of the outputs a manifest's ``outputs`` covers."""
+    found = [n for n in HASHED_OUTPUTS if os.path.isfile(os.path.join(outdir, n))]
+    for top in HASHED_OUTPUT_DIRS:
+        for root, dirs, files in os.walk(os.path.join(outdir, top)):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            found += [os.path.relpath(os.path.join(root, f), outdir).replace(os.sep, "/")
+                      for f in files if not f.startswith(".")]
+    return sorted(found)
+
+
+def check_outputs(outdir, manifest, report):
+    """The manifest's ``outputs`` hashes (AutoDocker >= 2.0.0) against the
+    files in ``outdir``."""
+    recorded = (manifest or {}).get("outputs")
+    if not isinstance(recorded, dict):
+        report.add("outputs.sha256", SKIP, "the manifest records no output hashes")
+        return
+    missing, changed = [], []
+    for rel, want in sorted(recorded.items()):
+        path = os.path.join(outdir, rel)
+        if not os.path.isfile(path):
+            missing.append(rel)
+        elif _benchlib.file_sha256(path) != want:
+            changed.append(rel)
+    problems = ([f"changed: {', '.join(changed[:10])}"] if changed else []) + \
+               ([f"missing: {', '.join(missing[:10])}"] if missing else [])
+    report.add("outputs.sha256", FAIL if problems else PASS,
+               "; ".join(problems) if problems else f"{len(recorded)} files",
+               changed=changed, missing=missing)
+    extra = [rel for rel in _hashed_files(outdir) if rel not in recorded]
+    if extra:
+        report.add("outputs.unrecorded", WARN,
+                   f"{len(extra)} output file(s) not in the manifest (added after the "
+                   f"run?): {extra[:5]}")
+
+
+def check_inputs(manifest, report):
+    """The manifest's ``inputs`` that exist at their recorded path have the
+    recorded SHA-256; inputs not on this machine are skipped."""
+    inputs = (manifest or {}).get("inputs")
+    if not isinstance(inputs, dict):
+        report.add("inputs.sha256", SKIP, "the manifest records no input hashes")
+        return
+    entries = [("receptor", inputs.get("receptor")), ("box_ligand", inputs.get("box_ligand"))]
+    entries += [(f"ligand[{name}]", entry)
+                for name, entry in sorted((inputs.get("ligands") or {}).items())]
+    checked, absent, changed = 0, 0, []
+    for label, entry in entries:
+        if not entry or not entry.get("path"):
+            continue
+        if not os.path.isfile(entry["path"]):
+            absent += 1
+            continue
+        checked += 1
+        if _benchlib.file_sha256(entry["path"]) != entry.get("sha256"):
+            changed.append(f"{label} {entry['path']}")
+    if changed:
+        report.add("inputs.sha256", FAIL, "changed since the run: " + ", ".join(changed[:5]))
+    elif checked:
+        report.add("inputs.sha256", PASS,
+                   f"{checked} input file(s) unchanged, {absent} not on this machine")
+    else:
+        report.add("inputs.sha256", SKIP, f"none of the {absent} input files is on this "
+                   "machine")
 
 
 def check_binary(binary, manifest, report, required=False):
@@ -534,6 +707,10 @@ def _normalise_manifest(data, run_dir):
     manifest = json.loads(data.decode("utf-8"), parse_constant=_reject_constant)
     for key in MANIFEST_VOLATILE_KEYS:
         manifest.pop(key, None)
+    if isinstance(manifest.get("outputs"), dict):
+        # Logs name the run directory (and are not compared either).
+        manifest["outputs"] = {rel: sha for rel, sha in manifest["outputs"].items()
+                               if not _ignored(rel, COMPARE_IGNORE)}
     text = json.dumps(manifest, sort_keys=True, indent=1)
     return _normalise_path(text.encode(), run_dir)
 
@@ -648,7 +825,8 @@ def compare_runs(run_a, run_b, report, ignore=()):
 
 
 # ---------------------------------------------------------------------------
-# Manifest gaps (what a verifier would need that the manifest lacks)
+# Manifest gaps (what a verifier would need that the manifest lacks; runs
+# made before the 2.0.0 manifest recorded output/input hashes)
 # ---------------------------------------------------------------------------
 
 def manifest_gaps(manifest, records, outdir):
@@ -670,7 +848,7 @@ def manifest_gaps(manifest, records, outdir):
     if outside:
         gaps.append(f"{len(outside)} docked ligand file(s) live outside the output "
                     f"directory (e.g. {outside[0]}): the run is not self-contained "
-                    "(PDBQT inputs are docked in place)")
+                    "(runs before 2.0.0 docked PDBQT inputs in place)")
     if not manifest.get("docking_engines"):
         gaps.append("no docking_engines (path, sha256, version) entry")
     return gaps

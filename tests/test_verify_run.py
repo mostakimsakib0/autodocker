@@ -70,6 +70,11 @@ def test_mirrored_names_match_the_pipeline():
     assert vr.AFFINITY_FLOOR == docking.AFFINITY_FLOOR
     assert vr.WEAK_AFFINITY_THRESHOLD == docking.WEAK_AFFINITY_THRESHOLD
     assert vr.DEFAULT_MIN_VALID_AFFINITY == defaults.MIN_VALID_AFFINITY
+    assert vr.RANKING_REPLICATE_COLUMNS == outputs.RANKING_REPLICATE_COLUMNS
+    assert vr.REPLICATE_SCORES_CSV == outputs.REPLICATE_SCORES_CSV
+    assert vr.REPLICATE_TAG == outputs.REPLICATE_TAG
+    assert vr.HASHED_OUTPUTS == outputs.HASHED_OUTPUTS
+    assert vr.HASHED_OUTPUT_DIRS == outputs.HASHED_OUTPUT_DIRS
 
 
 def test_expected_status_follows_the_pipeline():
@@ -183,6 +188,26 @@ def test_relocate_command_maps_the_run_directory(tmp_path):
     assert missing == [f"--ligand {tmp_path / 'ligands' / 'x.pdbqt'}"]
 
 
+def test_parse_engine_line_of_the_last_attempt(tmp_path):
+    log = tmp_path / "x_vina.log"
+    log.write_text("# Command: /a/vina --out x\n# Engine: /a/vina sha256=aaa\n# Error: crash\n"
+                   "# Command: /b/qvina --out x\n# Engine: /b/qvina sha256=bbb\n",
+                   encoding="utf-8")
+    assert vr.parse_engine_line(str(log)) == ("/b/qvina", "bbb")
+    log.write_text("# Command: /a/vina --out x\n# Engine: /a/vina sha256=aaa\n"
+                   "# Command: /b/qvina --out x\n", encoding="utf-8")
+    assert vr.parse_engine_line(str(log)) == (None, None)  # 1.x/2.0 pre-release logs
+
+
+def test_replicate_log_and_seed_of_a_pose_file():
+    assert vr.replicate_index("a", "docked/a_rep2_out.pdbqt") == 2
+    assert vr.replicate_index("a_rep1", "docked/a_rep1_out.pdbqt") == 0
+    assert vr.replicate_index("a_rep1", "docked/a_rep1_rep0_out.pdbqt") == 0
+    assert vr.replicate_index("a", "docked/a_out.pdbqt") == 0
+    assert vr.log_path_for("/r", "a", "docked/a_rep2_out.pdbqt") == "/r/docked/a_rep2_vina.log"
+    assert vr.log_path_for("/r", "a", "docked/a_out.pdbqt") == "/r/docked/a_vina.log"
+
+
 def test_parse_log_takes_the_last_attempt(tmp_path):
     log = tmp_path / "x_vina.log"
     log.write_text("# Attempt: Vina (primary)\n# Command: /a/vina --out 'p q/x.pdbqt'\n"
@@ -279,6 +304,9 @@ def real_run(tmp_path_factory):
     ligs.mkdir()
     shutil.copy(os.path.join(ROOT, "tests", "data", "runner", "acetaminophen_v3000_3d.sdf"),
                 ligs / "acetaminophen.sdf")
+    # A PDBQT input is docked from its copy in OUTDIR/ligands (self-contained run).
+    shutil.copy(os.path.join(FIXTURE, "ligands", "butanoic_acid.pdbqt"),
+                ligs / "butanoic_acid.pdbqt")
     out = root / "run"
     box = json.loads(open(os.path.join(ROOT, "tests", "data", "e2e", "box.json"),
                           encoding="utf-8").read())
@@ -301,21 +329,35 @@ def test_redock_reproduces_the_run_byte_for_byte(real_run, capsys):
     code, doc = _run([str(real_run), "--redock", "--sample", "0"], capsys)
     assert code == 0, _failed(doc)
     assert doc["mode"] == "redock"
-    (rec,) = doc["redock"]
-    assert rec["identical"] is True and rec["ranking_match"] is True
-    assert rec["modes"] == rec["modes_matched"] >= 1
+    assert len(doc["redock"]) == 2
+    for rec in doc["redock"]:
+        assert rec["identical"] is True and rec["ranking_match"] is True
+        assert rec["modes"] == rec["modes_matched"] >= 1
     checks = {c["check"]: c["status"] for c in doc["checks"]}
     assert checks["redock[acetaminophen]"] == "pass"
+    assert checks["redock[butanoic_acid]"] == "pass"
     assert any(k.startswith("engine[") and v == "pass" for k, v in checks.items())
+    # 2.0.0 manifests record output and input hashes and logs the engine's
+    # SHA-256: no gap left, every hash checked.
+    assert checks["outputs.sha256"] == "pass" and checks["inputs.sha256"] == "pass"
+    assert checks["ligand[acetaminophen].log_engine"] == "pass"
+    assert doc["manifest_gaps"] == []
+    manifest = json.loads((real_run / "run_manifest.json").read_text(encoding="utf-8"))
+    assert "docked/acetaminophen_out.pdbqt" in manifest["outputs"]
+    assert "ligands/butanoic_acid.pdbqt" in manifest["outputs"]
+    assert manifest["inputs"]["ligands"]["butanoic_acid"]["sha256"] == \
+        vr._benchlib.file_sha256(os.path.join(FIXTURE, "ligands", "butanoic_acid.pdbqt"))
+    log = (real_run / "docked" / "butanoic_acid_vina.log").read_text(encoding="utf-8")
+    assert f"--ligand {real_run / 'ligands' / 'butanoic_acid.pdbqt'}" in log
 
 
 def test_redock_of_a_moved_run_and_tampered_pose(real_run, tmp_path, capsys):
     moved = tmp_path / "moved"
     shutil.copytree(real_run, moved)
-    code, doc = _run([str(moved), "--redock"], capsys)
+    code, doc = _run([str(moved), "--redock", "--sample", "0"], capsys)
     assert code == 0, _failed(doc)
-    assert str(moved) in doc["redock"][0]["command"]
-    assert str(real_run) not in doc["redock"][0]["command"]
+    for rec in doc["redock"]:  # the PDBQT input is found in the moved run too
+        assert str(moved) in rec["command"] and str(real_run) not in rec["command"]
     # A coordinate edit keeps the run self-consistent (scores untouched) ...
     pose = moved / "docked" / "acetaminophen_out.pdbqt"
     lines = pose.read_text(encoding="utf-8").splitlines(keepends=True)
@@ -323,10 +365,56 @@ def test_redock_of_a_moved_run_and_tampered_pose(real_run, tmp_path, capsys):
     x = float(lines[i][30:38])
     lines[i] = lines[i][:30] + f"{x + 0.5:8.3f}" + lines[i][38:]
     pose.write_text("".join(lines), encoding="utf-8")
+    # ... but the manifest's output hashes expose it ...
     code, doc = _run([str(moved)], capsys)
-    assert code == 0
-    # ... but re-docking exposes it.
-    code, doc = _run([str(moved), "--redock"], capsys)
+    assert code == 1 and _failed(doc) == {"outputs.sha256"}
+    (check,) = [c for c in doc["checks"] if c["check"] == "outputs.sha256"]
+    assert check["changed"] == ["docked/acetaminophen_out.pdbqt"]
+    # ... and so does re-docking.
+    code, doc = _run([str(moved), "--redock", "--sample", "0"], capsys)
     assert code == 1
     assert "redock[acetaminophen]" in _failed(doc)
-    assert doc["redock"][0]["identical"] is False
+    assert [r["identical"] for r in doc["redock"] if r["ligand"] == "acetaminophen"] == [False]
+
+
+def _set_score(path, old, new):
+    text = path.read_text(encoding="utf-8")
+    assert old in text
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+def test_consistent_edit_of_pose_and_ranking_is_detected_without_redock(real_run, tmp_path,
+                                                                       capsys):
+    """Editing a pose's score AND ranking.csv (and the log's result) keeps
+    the run self-consistent; only the output hashes catch it."""
+    run = tmp_path / "edited"
+    shutil.copytree(real_run, run)
+    pose = run / "docked" / "acetaminophen_out.pdbqt"
+    token = vr._benchlib.first_vina_result(str(pose))[0]
+    better = f"{float(token) - 1.0:.3f}"
+    _set_score(pose, f"REMARK VINA RESULT: {token.rjust(9)}",
+               f"REMARK VINA RESULT: {better.rjust(9)}")
+    _set_score(run / "ranking.csv", f"acetaminophen,{token},", f"acetaminophen,{better},")
+    _set_score(run / "docked" / "acetaminophen_vina.log", f"Affinity: {token} kcal",
+               f"Affinity: {better} kcal")
+    code, doc = _run([str(run)], capsys)
+    assert code == 1
+    assert _failed(doc) == {"outputs.sha256"}
+    (check,) = [c for c in doc["checks"] if c["check"] == "outputs.sha256"]
+    assert set(check["changed"]) == {"docked/acetaminophen_out.pdbqt", "ranking.csv",
+                                     "docked/acetaminophen_vina.log"}
+
+
+def test_changed_input_and_engine_line_are_detected(real_run, tmp_path, capsys):
+    run = tmp_path / "edited"
+    shutil.copytree(real_run, run)
+    manifest_file = run / "run_manifest.json"
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    manifest["inputs"]["receptor"]["sha256"] = "0" * 64
+    manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
+    log = run / "docked" / "acetaminophen_vina.log"
+    text = log.read_text(encoding="utf-8")
+    log.write_text(text.replace(" sha256=", " sha256=0"), encoding="utf-8")
+    code, doc = _run([str(run)], capsys)
+    assert code == 1
+    assert {"inputs.sha256", "ligand[acetaminophen].log_engine"} <= _failed(doc)
