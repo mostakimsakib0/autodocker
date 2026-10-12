@@ -8,6 +8,10 @@
 # mount their workspace at the same container path, so the absolute paths
 # recorded in ranking.csv are identical as well.
 #
+# The box is the whole receptor (--no-fpocket): crambin has no pocket that
+# fpocket finds, and since 2.0.0 the pipeline stops when fpocket finds none.
+# fpocket itself is checked on the 1HSG binding-site fixture by ci.yml.
+#
 # Usage: .github/smoke/run_smoke.sh IMAGE [WORKDIR]
 #   CONTAINER_ENGINE    docker (default) or podman
 #   SMOKE_ENGINE_ARGS   extra "run" options, e.g. "--cpus 2"
@@ -35,7 +39,7 @@ screen() {
 		-e BINDING_MODES=3 \
 		-e PROCESSES=1 \
 		-e RESUME=0 \
-		"$IMAGE"
+		"$IMAGE" --no-fpocket
 }
 
 for run in 1 2; do

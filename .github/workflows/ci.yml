@@ -219,6 +219,22 @@ jobs:
             command -v fpocket
             test -s /ngl/ngl.js'
 
+      # The smoke screen below uses a whole-receptor box (crambin has no
+      # pocket fpocket finds), so fpocket is checked here on the 1HSG
+      # binding-site fixture: it must find at least one pocket.
+      - name: fpocket finds a pocket in the 1HSG site
+        run: |
+          docker run --rm --entrypoint sh \
+            -v "$PWD/tests/data/ligand_box:/fixtures:ro" autodocker:ci -c '
+              set -eu
+              cd /tmp
+              grep "^ATOM" /fixtures/1hsg_site.pdb > site.pdb
+              echo END >> site.pdb
+              fpocket -f site.pdb > /dev/null
+              n=$(find site_out/pockets -name "*_atm.pdb" | wc -l)
+              echo "fpocket pockets: $n"
+              test "$n" -ge 1'
+
       - name: Smoke screen twice and compare (determinism)
         run: .github/smoke/run_smoke.sh autodocker:ci "$RUNNER_TEMP/smoke"
 
@@ -234,7 +250,7 @@ jobs:
           cp .github/smoke/protein.pdb "$ws/"
           cp .github/smoke/ligs/phenol.sdf "$ws/ligs/"
           echo "runner user: $(id -u):$(id -g)"
-          docker run --rm -v "$ws:/workspace" autodocker:ci --exhaustiveness 1
+          docker run --rm -v "$ws:/workspace" autodocker:ci --exhaustiveness 1 --no-fpocket
           test -s "$ws/output/ranking.csv"
           foreign="$(find "$ws" \( ! -uid "$(id -u)" -o ! -gid "$(id -g)" \) -print | head -n 5)"
           if [ -n "$foreign" ]; then
