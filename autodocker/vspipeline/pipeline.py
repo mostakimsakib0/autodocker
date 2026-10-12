@@ -12,7 +12,7 @@ runner.py writes the manifest from it whatever stage the run ended in.
      keep_hetatm_residues, flexible_receptor
   3. dock, consensus_rescoring       [3/5]
   4. cluster_poses                   [4/5]
-  5. write_results, failure_counts,  [5/5]
+  5. write_results, count_failures,  [5/5]
      log_summary
 
 Pipeline modules are referenced through their module (``docking.dock_all``)
@@ -99,6 +99,7 @@ class RunState:
         if self.flexible_residues is not None:
             # The residues docked as flexible side chains ([] = rigid).
             extra["flexible_residues"] = list(self.flexible_residues)
+        # Open Babel version and OB_RANDOM_SEED policy (manifest.check_openbabel).
         extra.update(self.openbabel or {})
         return extra
 

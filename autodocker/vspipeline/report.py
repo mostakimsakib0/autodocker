@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """HTML report and pose clustering.
 
-The report's CSS, JavaScript and viewer markup live in ``templates/``.
+generate_html_report reads the results into a _ReportData (no HTML), then
+fills the page (``templates/report.html``) section by section; the report's
+CSS, JavaScript and viewer markup live in ``templates/`` as well.
 Per-model scores of docking outputs come from the pipeline's shared parser
 (``docking.parse_pdbqt_results``), the same one that produces ranking.csv.
 """
@@ -16,6 +18,7 @@ import html
 import statistics
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict
 
 from vspipeline import defaults  # noqa: E402
@@ -572,49 +575,45 @@ def _build_viewer_section(ranked_ligands: List[Tuple], poses_dir: str,
     })
 
 
-def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
-                          receptor_pdbqt: Optional[str] = None,
-                          meta: Optional[Dict] = None,
-                          grid_file: Optional[str] = None,
-                          scorer_agreement: Optional[Dict] = None,
-                          rmsd_threshold: float = defaults.RMSD_THRESHOLD,
-                          top_n: int = defaults.TOP_N) -> bool:
-    """Write a single-file HTML screening report.
+# ---------------------------------------------------------------------------
+# Report data (ranking.csv, docked poses, grid.conf)
+# ---------------------------------------------------------------------------
 
-    ``top_n`` ligands (``--top-n``, as in Top_hits.txt) are shown in the 3D
-    viewer and the top-hits table; the all-results table lists every ligand.
+class _NoReport(Exception):
+    """No report can be written (the message says why)."""
 
-    Includes a table of contents, run metadata, summary statistics, an
-    interactive NGL 3D viewer (with the docking box when ``grid_file`` is
-    supplied), an affinity histogram, a molecular-weight vs affinity scatter
-    plot, a sortable/filterable results table, pose clustering and an
-    interpretation guide. The written file needs no network or server (NGL
-    and the structures are inlined); see ``_fetch_ngljs`` for where NGL
-    comes from while the report is generated.
 
-    A row counts as scored when its Status is OK/WEAK (or, without a status,
-    its Binding_Affinity is a negative number). OUT_OF_WINDOW rows are counted
-    separately and left out of the statistics, charts and top hits; FAILED
-    rows count as failed. Relative Docked_File paths are resolved against the
-    directory of ``results_csv``. ``scorer_agreement`` is the consensus
-    summary ({"rho", "n"} and optionally "scoring").
-    """
-    logger.info("[*] Generating HTML report...")
+@dataclass
+class _ReportData:
+    """What the report shows, computed from ranking.csv, the docked poses and
+    grid.conf (no HTML)."""
+    ligands: List[Dict]                  # ranking.csv rows, in file order
+    scores: List[Optional[float]]        # in-window score of each row, None if not scored
+    valid_affinities: List[float]        # the scores that are not None
+    ranked_ligands: List[Tuple[Dict, float]]  # scored rows, best first (name breaks ties)
+    out_of_window_count: int
+    failed_count: int
+    avg_affinity: str                    # "n/a" without any in-window score
+    best_affinity: str
+    strong_binders: int                  # scores below STRONG_BINDER_CUTOFF
+    success_rate: float                  # % of the rows that are scored
+    grid_box: Optional[Dict]             # {"center", "size"} for the viewer
+    scatter_data: List[Dict]             # [{name, mw, aff}]
+    clusters: Dict                       # cluster_poses() of the ranked ligands
 
-    def no_report(message: str) -> bool:
-        logger.warning(message)
-        if os.path.exists(output_file):
-            os.remove(output_file)  # never leave a stale report from an earlier run
-        return False
 
+def _report_data(results_csv: str, poses_dir: str, grid_file: Optional[str],
+                 rmsd_threshold: float) -> _ReportData:
+    """Read and summarise the results; raises _NoReport when there is
+    nothing to report."""
     ligands = []
     try:
         with open(results_csv, 'r', encoding='utf-8') as f:
             ligands = list(csv.DictReader(f))
     except Exception as e:
-        return no_report(f"Could not parse results CSV: {e}")
+        raise _NoReport(f"Could not parse results CSV: {e}") from e
     if not ligands:
-        return no_report("No results to report")
+        raise _NoReport("No results to report")
 
     scores = [_valid_score(lig) for lig in ligands]
     valid_affinities = [v for v in scores if v is not None]
@@ -656,26 +655,34 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                                  "mw": mw, "aff": av})
 
     clusters = (cluster_poses(poses_dir, rmsd_threshold=rmsd_threshold,
-                              ligands=[l.get(outputs.COL_LIGAND) for l in ligands])
+                              ligands=[row.get(outputs.COL_LIGAND) for row in ligands])
                 if os.path.isdir(poses_dir) else {})
 
-    css = _REPORT_CSS(bool(ranked_ligands))
-    # No wall-clock time: identical runs write identical reports (the run's
-    # start and end times are in run_manifest.json).
-    version = __version__
+    return _ReportData(
+        ligands=ligands, scores=scores, valid_affinities=valid_affinities,
+        ranked_ligands=ranked_ligands, out_of_window_count=out_of_window_count,
+        failed_count=failed_count, avg_affinity=avg_affinity, best_affinity=best_affinity,
+        strong_binders=strong_binders, success_rate=success_rate, grid_box=grid_box,
+        scatter_data=scatter_data, clusters=clusters)
 
+
+# ---------------------------------------------------------------------------
+# HTML assembly (the page is templates/report.html)
+# ---------------------------------------------------------------------------
+
+def _meta_html(meta: Optional[Dict]) -> str:
     meta_items = ""
     if meta:
         for k, v in meta.items():
             meta_items += (f'<div class="meta-item"><span class="meta-label">'
                            f'{html.escape(str(k))}</span>'
                            f'<span class="meta-value">{html.escape(str(v))}</span></div>')
+    return meta_items or '<p class="muted">No run metadata supplied.</p>'
 
-    # Top hits rows
+
+def _top_hits_rows(ranked_ligands: List[Tuple[Dict, float]], top_n: int) -> str:
     top_rows = ""
-    top_names = set()
     for i, (lig, affinity) in enumerate(ranked_ligands[:top_n], 1):
-        top_names.add(str(lig.get(outputs.COL_LIGAND, 'Unknown')))
         conf_class, conf_text = _confidence(affinity)
         top_rows += f"""
             <tr class="top-row">
@@ -685,15 +692,17 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                 <td>{html.escape(str(lig.get(outputs.COL_BINDING_MODES, '0')))}</td>
                 <td class="{conf_class}">{conf_text}</td>
             </tr>"""
+    return top_rows
 
-    # All results rows
+
+def _all_results_rows(data: _ReportData, top_n: int) -> str:
+    """Every row of ranking.csv; the top hits are highlighted."""
+    top_names = {str(lig.get(outputs.COL_LIGAND, 'Unknown'))
+                 for lig, _ in data.ranked_ligands[:top_n]}
     all_rows = ""
-    for lig, av in zip(ligands, scores):
+    for lig, av in zip(data.ligands, data.scores):
         raw = str(lig.get(outputs.COL_AFFINITY, '')).strip()
-        if av is not None:
-            conf_class, conf_text = _confidence(av)
-        else:
-            conf_class, conf_text = "bad", "N/A"
+        conf_class = _confidence(av)[0] if av is not None else "bad"
         cls = "top-row" if str(lig.get(outputs.COL_LIGAND, '')) in top_names else ""
         all_rows += f"""
             <tr class="{cls}">
@@ -705,19 +714,22 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
                 <td>{html.escape(str(lig.get(outputs.COL_LOGP, '-')))}</td>
                 <td>{html.escape(str(lig.get(outputs.COL_STATUS, '-')))}</td>
             </tr>"""
+    return all_rows
 
-    # Scorer concordance over the screen (consensus_summary.json).
-    agreement_section = ""
-    if scorer_agreement and scorer_agreement.get("rho") is not None:
-        _rho = float(scorer_agreement["rho"])
-        _n = int(scorer_agreement.get("n", 0))
-        _abs = abs(_rho)
-        _strength = next((label for cutoff, label in RHO_STRENGTH_BANDS
-                          if _abs >= cutoff), "negligible")
-        _direction = ("concordant" if _rho > 0 else
-                      "discordant" if _rho < 0 else "uncorrelated")
-        _scoring = html.escape(str(scorer_agreement.get("scoring") or "vinardo"))
-        agreement_section = f"""
+
+def _agreement_html(scorer_agreement: Optional[Dict]) -> str:
+    """Scorer concordance over the screen (consensus_summary.json)."""
+    if not (scorer_agreement and scorer_agreement.get("rho") is not None):
+        return ""
+    _rho = float(scorer_agreement["rho"])
+    _n = int(scorer_agreement.get("n", 0))
+    _abs = abs(_rho)
+    _strength = next((label for cutoff, label in RHO_STRENGTH_BANDS
+                      if _abs >= cutoff), "negligible")
+    _direction = ("concordant" if _rho > 0 else
+                  "discordant" if _rho < 0 else "uncorrelated")
+    _scoring = html.escape(str(scorer_agreement.get("scoring") or "vinardo"))
+    return f"""
             <div class="section" id="agreement">
                 <h2>Scorer Agreement (Vina vs SMINA rescoring)</h2>
                 <p class="muted"><em>Spearman rank correlation between the Vina score of
@@ -732,148 +744,105 @@ def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
             </div>
 """
 
-    viewer_section = _build_viewer_section(
-        ranked_ligands, poses_dir, receptor_pdbqt, output_file, grid_box=grid_box,
-        base_dir=os.path.dirname(os.path.abspath(results_csv)), top_n=top_n)
+
+def _clusters_html(clusters: Dict) -> str:
+    if not clusters:
+        return "<p class='muted'><em>No docked structures available for clustering.</em></p>\n"
+    text = ""
+    for ligand, ligand_clusters in clusters.items():
+        text += f"<h3>{html.escape(str(ligand))}</h3>\n<ul>\n"
+        for cluster in ligand_clusters:
+            poses = cluster['poses']
+            text += f"  <li>Cluster {cluster['id']}: {len(poses)} poses"
+            if poses:
+                affs = [p['affinity'] for p in poses if p['affinity'] is not None]
+                if affs:
+                    text += f" (Affinity: {min(affs):.2f} to {max(affs):.2f})"
+            text += "</li>\n"
+        text += "</ul>\n"
+    return text
+
+
+def _render_report(data: _ReportData, viewer_section: str, meta: Optional[Dict],
+                   scorer_agreement: Optional[Dict], rmsd_threshold: float,
+                   top_n: int) -> str:
+    """The report page: templates/report.html with every section filled in."""
     # The table of contents links the viewer only when the report has one
     # (no section without an in-window hit).
     viewer_toc = ('\n                <li><a href="#viewer">3D Viewer</a></li>'
                   if 'id="viewer"' in viewer_section else "")
+    # No wall-clock time: identical runs write identical reports (the run's
+    # start and end times are in run_manifest.json).
+    n_scored = len(data.valid_affinities)
+    return _fill(_template("report.html"), {
+        "__VS_CSS__": _REPORT_CSS(bool(data.ranked_ligands)),
+        "__VS_VIEWER_TOC__": viewer_toc,
+        "__VS_VERSION__": __version__,
+        "__VS_META__": _meta_html(meta),
+        "__VS_STAT_LIGANDS__": _stat_card(len(data.ligands), "Ligands Screened"),
+        "__VS_STAT_BEST__": _stat_card(data.best_affinity, "Best Binder (kcal/mol)"),
+        "__VS_STAT_AVERAGE__": _stat_card(data.avg_affinity, "Average Affinity"),
+        "__VS_STAT_STRONG__": _stat_card(f"{data.strong_binders}/{n_scored}",
+                                         f"Score &lt; {STRONG_BINDER_CUTOFF:g} kcal/mol"),
+        "__VS_STAT_SCORED__": _stat_card(f"{data.success_rate:.1f}%", "Scored ligands"),
+        "__VS_STAT_OUT_OF_WINDOW__": _stat_card(data.out_of_window_count,
+                                                "Outside the accepted window"),
+        "__VS_STAT_FAILED__": _stat_card(data.failed_count, "Failed"),
+        "__VS_AGREEMENT__": _agreement_html(scorer_agreement),
+        "__VS_TOP_COUNT__": str(min(top_n, len(data.ranked_ligands))),
+        "__VS_TOP_ROWS__": _top_hits_rows(data.ranked_ligands, top_n),
+        "__VS_VIEWER__": viewer_section,
+        "__VS_HISTOGRAM__": _svg_histogram(data.valid_affinities),
+        "__VS_SCATTER__": _scatter_chart(data.scatter_data),
+        "__VS_ALL_ROWS__": _all_results_rows(data, top_n),
+        "__VS_RMSD_THRESHOLD__": f"{rmsd_threshold:g}",
+        "__VS_CLUSTERS__": _clusters_html(data.clusters),
+        "__VS_GUIDE__": _interpretation_items(),
+        "__VS_SCRIPT__": _template("report.js"),
+    })
 
-    html_content = f"""<!DOCTYPE html>
-<html lang="en" data-theme="light">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Virtual Screening Results Report</title>
-    <style>{css}</style>
-</head>
-<body>
-    <button id="theme-toggle" class="float-btn" type="button">Theme</button>
-    <button id="print-btn" class="float-btn no-print" type="button" onclick="window.print()">PDF</button>
-    <div class="layout">
-        <nav class="toc">
-            <h3>Contents</h3>
-            <ul>
-                <li><a href="#summary">Summary</a></li>
-                <li><a href="#top">Top Hits</a></li>{viewer_toc}
-                <li><a href="#dist">Affinity Distribution</a></li>
-                <li><a href="#scatter">MW vs Affinity</a></li>
-                <li><a href="#all">All Results</a></li>
-                <li><a href="#clusters">Pose Clustering</a></li>
-                <li><a href="#guide">Interpretation</a></li>
-            </ul>
-        </nav>
-        <main>
-            <div class="header">
-                <h1>Virtual Screening Results Report</h1>
-                <p>AutoDocker {version} · run times and settings in run_manifest.json</p>
-            </div>
 
-            <div class="section" id="summary">
-                <h2>Run Metadata</h2>
-                <div class="meta-grid">{meta_items or '<p class="muted">No run metadata supplied.</p>'}</div>
-                <h2 style="margin-top:18px;">Key Statistics</h2>
-                <div class="stat-grid">
-                    {_stat_card(len(ligands), "Ligands Screened")}
-                    {_stat_card(best_affinity, "Best Binder (kcal/mol)")}
-                    {_stat_card(avg_affinity, "Average Affinity")}
-                    {_stat_card(f"{strong_binders}/{len(valid_affinities)}", f"Score &lt; {STRONG_BINDER_CUTOFF:g} kcal/mol")}
-                    {_stat_card(f"{success_rate:.1f}%", "Scored ligands")}
-                    {_stat_card(out_of_window_count, "Outside the accepted window")}
-                    {_stat_card(failed_count, "Failed")}
-                </div>
-            </div>
+def generate_html_report(results_csv: str, poses_dir: str, output_file: str,
+                          receptor_pdbqt: Optional[str] = None,
+                          meta: Optional[Dict] = None,
+                          grid_file: Optional[str] = None,
+                          scorer_agreement: Optional[Dict] = None,
+                          rmsd_threshold: float = defaults.RMSD_THRESHOLD,
+                          top_n: int = defaults.TOP_N) -> bool:
+    """Write a single-file HTML screening report.
 
-            {agreement_section}
+    ``top_n`` ligands (``--top-n``, as in Top_hits.txt) are shown in the 3D
+    viewer and the top-hits table; the all-results table lists every ligand.
 
-            <div class="section" id="top">
-                <h2>Top {min(top_n, len(ranked_ligands))} Hits</h2>
-                <table>
-                    <thead><tr><th>#</th><th>Ligand Name</th><th>Affinity (kcal/mol)</th><th>Poses</th><th>Score band</th></tr></thead>
-                    <tbody>{top_rows}
-                    </tbody>
-                </table>
-            </div>
+    Includes a table of contents, run metadata, summary statistics, an
+    interactive NGL 3D viewer (with the docking box when ``grid_file`` is
+    supplied), an affinity histogram, a molecular-weight vs affinity scatter
+    plot, a sortable/filterable results table, pose clustering and an
+    interpretation guide. The written file needs no network or server (NGL
+    and the structures are inlined); see ``_fetch_ngljs`` for where NGL
+    comes from while the report is generated.
 
-            {viewer_section}
+    A row counts as scored when its Status is OK/WEAK (or, without a status,
+    its Binding_Affinity is a negative number). OUT_OF_WINDOW rows are counted
+    separately and left out of the statistics, charts and top hits; FAILED
+    rows count as failed. Relative Docked_File paths are resolved against the
+    directory of ``results_csv``. ``scorer_agreement`` is the consensus
+    summary ({"rho", "n"} and optionally "scoring").
+    """
+    logger.info("[*] Generating HTML report...")
+    try:
+        data = _report_data(results_csv, poses_dir, grid_file, rmsd_threshold)
+    except _NoReport as e:
+        logger.warning(str(e))
+        if os.path.exists(output_file):
+            os.remove(output_file)  # never leave a stale report from an earlier run
+        return False
 
-            <div class="section" id="dist">
-                <h2>Affinity Distribution</h2>
-                <p class="muted"><em>Histogram of binding affinities across all docked ligands (kcal/mol).</em></p>
-                {_svg_histogram(valid_affinities)}
-            </div>
-
-            <div class="section" id="scatter">
-                <h2>Molecular Weight vs Affinity</h2>
-                <p class="muted"><em>Each point is a ligand; click a top hit's point to load it in the 3D viewer.</em></p>
-                {_scatter_chart(scatter_data)}
-            </div>
-
-            <div class="section" id="all">
-                <h2>All Results</h2>
-                <input id="results-search" type="text" placeholder="Filter ligands…" class="no-print">
-                <table id="all-results">
-                    <thead>
-                    <tr>
-                        <th class="sortable">Ligand</th>
-                        <th class="sortable">Affinity</th>
-                        <th class="sortable">Poses</th>
-                        <th class="sortable">SimScore</th>
-                        <th class="sortable">MW</th>
-                        <th class="sortable">LogP</th>
-                        <th class="sortable">Status</th>
-                    </tr>
-                    </thead>
-                    <tbody>{all_rows}
-                    </tbody>
-                </table>
-            </div>
-
-            <div class="section" id="clusters">
-                <h2>Pose Clustering</h2>
-                <p class="muted"><em>Greedy grouping of each ligand's docked modes by heavy-atom
-                RMSD (threshold {rmsd_threshold:g} Å). The RMSD pairs atoms by file order without
-                superposition and is not symmetry-corrected, so symmetric groups can split clusters.</em></p>
-"""
-
-    if clusters:
-        for ligand, ligand_clusters in clusters.items():
-            html_content += f"<h3>{html.escape(str(ligand))}</h3>\n<ul>\n"
-            for cluster in ligand_clusters:
-                poses = cluster['poses']
-                html_content += f"  <li>Cluster {cluster['id']}: {len(poses)} poses"
-                if poses:
-                    affs = [p['affinity'] for p in poses if p['affinity'] is not None]
-                    if affs:
-                        html_content += f" (Affinity: {min(affs):.2f} to {max(affs):.2f})"
-                html_content += "</li>\n"
-            html_content += "</ul>\n"
-    else:
-        html_content += "<p class='muted'><em>No docked structures available for clustering.</em></p>\n"
-
-    html_content += f"""
-            </div>
-
-            <div class="section" id="guide">
-                <h2>Interpretation Guide</h2>
-                <p class="muted">Score bands used for the colours in this report. They are
-                heuristics for sorting a screen: docking scores are not calibrated binding free
-                energies, and hits need experimental or orthogonal validation.</p>
-                <ul>
-                    {_interpretation_items()}
-                </ul>
-            </div>
-
-            <div class="section" style="text-align:center; color:var(--muted);">
-                <p><small>Report generated by AutoDocker {version}</small></p>
-            </div>
-        </main>
-    </div>
-    <script>{_template("report.js")}</script>
-</body>
-</html>
-"""
+    viewer_section = _build_viewer_section(
+        data.ranked_ligands, poses_dir, receptor_pdbqt, output_file, grid_box=data.grid_box,
+        base_dir=os.path.dirname(os.path.abspath(results_csv)), top_n=top_n)
+    html_content = _render_report(data, viewer_section, meta, scorer_agreement,
+                                  rmsd_threshold, top_n)
 
     try:
         with open(output_file, 'w', encoding='utf-8') as f:

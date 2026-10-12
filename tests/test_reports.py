@@ -352,7 +352,7 @@ class TestNglIntegrity:
 
     def test_templates_ship_with_package(self):
         from vspipeline import report
-        for name in ("report.css", "report.js", "viewer.html"):
+        for name in ("report.css", "report.html", "report.js", "viewer.html"):
             assert os.path.isfile(os.path.join(report.TEMPLATE_DIR, name))
 
 
