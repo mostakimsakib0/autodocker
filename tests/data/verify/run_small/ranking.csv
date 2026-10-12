@@ -1,0 +1,4 @@
+Ligand,Binding_Affinity,SimScore,Binding_Modes,Mode_Coverage,MW,LogP,HBA,HBD,TPSA,Rotors,ZINC_URL,Docked_File,Status,Engine,Minimized
+acetaminophen,-5.124,0.25,3,1.0,151.163,1.4236,3.0,2.0,49.33,2.0,,docked/acetaminophen_out.pdbqt,OK,Vina,yes
+phenylethanol,-4.437,0.25,3,1.0,122.164,1.2214,1.0,1.0,20.23,2.0,,docked/phenylethanol_out.pdbqt,OK,Vina,yes
+butanoic_acid,-3.579,,1,0.3333333333333333,88.1051,0.8711,2.0,1.0,37.3,2.0,,docked/butanoic_acid_out.pdbqt,WEAK,Vina,yes

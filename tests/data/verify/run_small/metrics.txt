@@ -1,0 +1,30 @@
+======================================================================
+METRICS SUMMARY
+======================================================================
+
+SUMMARY STATISTICS
+----------------------------------------------------------------------
+Total compounds: 3
+Successful dockings: 3
+Out-of-window results: 0
+Failed dockings: 0
+Best affinity: -5.12 kcal/mol
+Worst affinity: -3.58 kcal/mol
+Mean affinity: -4.38 kcal/mol
+
+DETAILED METRICS
+----------------------------------------------------------------------
+Ligand                         Affinity     SimScore     Modes    MW         LogP     Status
+----------------------------------------------------------------------
+acetaminophen                       -5.12        0.25       3    151.16    1.42  OK
+phenylethanol                       -4.44        0.25       3    122.16    1.22  OK
+butanoic_acid                       -3.58           -       1     88.11    0.87  WEAK
+
+======================================================================
+INTERPRETATION GUIDE:
+  Affinity: Lower (more negative) = stronger predicted binding
+  SimScore: mean of the fractions of non-best modes with Vina rmsd_lb < 1.6 A and rmsd_ub < 3.2 A; '-' = undefined (single mode)
+  Mode coverage: generated modes / requested modes
+  Modes: Number of distinct binding poses found
+  OUT_OF_WINDOW: valid engine score outside the accepted window
+======================================================================
