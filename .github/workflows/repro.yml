@@ -3,7 +3,9 @@ name: Reproducibility
 # The paper's cross-machine and cross-architecture check: the 1HSG
 # case-study screen (--chain all --pockets 2, inputs in .github/repro/1hsg)
 # rerun away from the authors' laptop and compared with the laptop result
-# (.github/repro/1hsg/expected). Started by hand only:
+# (.github/repro/1hsg/expected). Runs on a push to feature/repro-runs that
+# changes these files (workflow_dispatch needs the file on the default
+# branch), or by hand once it is there:
 #   gh workflow run repro.yml -r <branch> [-f image_run_id=<run>]
 #
 #   plan      read build-info.json of the image built by a Benchmarks run
@@ -20,6 +22,11 @@ name: Reproducibility
 # host.txt) as artifact repro-explicit_<machine>, the layout of
 # AutoDocker_Paper/results_2.0/repro/explicit_<machine>.
 on:
+  push:
+    branches: [feature/repro-runs]
+    paths:
+      - '.github/workflows/repro.yml'
+      - '.github/repro/**'
   workflow_dispatch:
     inputs:
       image_run_id:
@@ -37,7 +44,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE_RUN_ID: ${{ inputs.image_run_id }}
+  # The default also applies to push-triggered runs (no inputs).
+  IMAGE_RUN_ID: ${{ inputs.image_run_id || '38227673333' }}
 
 jobs:
   plan:
@@ -53,7 +61,7 @@ jobs:
         with:
           name: build-info
           path: ${{ runner.temp }}/build-info
-          run-id: ${{ inputs.image_run_id }}
+          run-id: ${{ env.IMAGE_RUN_ID }}
           github-token: ${{ github.token }}
 
       - name: Read commit and image ID
@@ -92,7 +100,7 @@ jobs:
         with:
           name: image
           path: ${{ runner.temp }}/image
-          run-id: ${{ inputs.image_run_id }}
+          run-id: ${{ env.IMAGE_RUN_ID }}
           github-token: ${{ github.token }}
 
       - name: Load image
