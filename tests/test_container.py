@@ -11,6 +11,7 @@ import pytest
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 ACLMGR_C = os.path.join(ROOT, "tools", "aclmgr.c")
+ACLMGR_ENV_H = os.path.join(ROOT, "tools", "aclmgr.env.h")
 ENTRY_SH = os.path.join(ROOT, "autodocker", "entry.sh")
 README = os.path.join(ROOT, "README.md")
 
@@ -21,8 +22,8 @@ def _read(path):
 
 
 def _forwarded_env():
-    """Names in aclmgr.c's forwarded_env[] list."""
-    source = _read(ACLMGR_C)
+    """Names in aclmgr's forwarded_env[] list (tools/aclmgr.env.h)."""
+    source = _read(ACLMGR_ENV_H)
     body = re.search(r"forwarded_env\[\]\s*=\s*\{(.*?)\};", source, re.S).group(1)
     body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
     return set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', body))
