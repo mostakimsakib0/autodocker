@@ -50,8 +50,14 @@ Reference: `97a3f16`.
 
 Without RDKit, 2D ligands get 3D coordinates from `obabel --gen3d`, which is not
 reproducible. The pipeline logs a warning and records the fallback in
-`run_manifest.json`. `requirements.txt` needs `rdkit==2023.9.3` (and `pillow`) plus
+`run_manifest.json`. Without RDKit, a 2D PDB ligand whose bond orders cannot be
+read is also docked, when it should be rejected. `requirements.txt` needs `rdkit==2023.9.3` (and `pillow`) plus
 exact pins for all transitive packages.
+
+Until then, 4 tests fail in CI because RDKit is missing:
+`tests/test_charges.py::test_fix_charges_real_benzene_keeps_coordinates` and
+three in `tests/test_ligand_fixes.py` (seeded 3D coordinates for 2D
+MOL2 and PDB ligands, and rejection of a 2D PDB without bond orders).
 
 Reference: `f021b13`, `557ff1f` (`requirements.txt`).
 
