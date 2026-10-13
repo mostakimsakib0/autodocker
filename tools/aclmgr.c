@@ -5,50 +5,30 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include "aclmgr.env.h"
 
 #define  DROP_USER  "dockuser"
 #define  DROP_GROUP "dockuser"
 
-extern char **environ;
-
-/* setpriv --reset-env clears the environment for the unprivileged child, so
- * the pipeline's own settings (README "Environment variables", plus any VS_*
- * knob) are forwarded explicitly through /usr/bin/env. */
-static const char* const forwarded_env[] = {
-	"ADMET", "BINDING_MODES", "CHAIN", "ENERGY_RANGE", "EXHAUST",
-	"EXHAUSTIVENESS", "INPUT", "LIGAND_MODE", "LIGS", "MAX_WORKERS",
-	"NO_MINIMIZE", "PADDING", "PDB", "POCKETS", "PROCESSES", "PUBCHEM_REST",
-	"RESUME", "TIMEOUT", "TOP_N", NULL
-};
-
-static bool is_forwarded(const char* entry)
-{
-	const char* eq = strchr(entry, '=');
-	if (!eq) return false;
-	size_t name_len = (size_t) (eq - entry);
-
-	if (name_len > 3 && strncmp(entry, "VS_", 3) == 0) return true;
-	for (size_t i = 0; forwarded_env[i] != NULL; i++)
-		if (strlen(forwarded_env[i]) == name_len
-		    && strncmp(entry, forwarded_env[i], name_len) == 0)
-			return true;
-	return false;
-}
-
 bool is_rootless = false;
 volatile sig_atomic_t caught = 0;
 
-static const char* const drop_caps_runner[]  = {
-	"/usr/bin/setpriv",
-	"--reuid", DROP_USER,
-	"--regid", DROP_GROUP,
-	"--init-groups", "--nnp",
-	"--inh-caps=-all",
-	"--ambient-caps=-all",
-	"--bounding-set=-all",
-	"--reset-env", "--"
-};
-static const size_t drop_caps_len = sizeof(drop_caps_runner) / sizeof(drop_caps_runner[0]);
+#define PREARGS(name, ...) \
+	static const char* const name##_args[]  = { \
+		__VA_ARGS__ \
+	}; \
+	static const size_t name##_len = sizeof(name##_args) / sizeof(name##_args[0])
+
+PREARGS(drop_caps,
+        "/usr/bin/setpriv",
+        "--reuid", DROP_USER,
+        "--regid", DROP_GROUP,
+        "--init-groups", "--nnp",
+        "--inh-caps=-all",
+        "--ambient-caps=-all",
+        "--bounding-set=-all",
+        "--reset-env", "--"
+       );
 
 int direct_run(const char* args[])
 {
@@ -72,7 +52,7 @@ int dropcap_run(const char* args[], size_t length)
 
 	dropcap_args[drop_caps_len + length] = NULL;
 	for(size_t i = 0; i < drop_caps_len; i++) {
-		dropcap_args[i] = drop_caps_runner[i];
+		dropcap_args[i] = drop_caps_args[i];
 
 		if(i < length)
 			dropcap_args[drop_caps_len + i] = args[i];
@@ -84,7 +64,32 @@ int dropcap_run(const char* args[], size_t length)
 	return direct_run(dropcap_args);
 }
 
-int run(bool drop_caps, const char* args[])
+int run_with_env(bool drop_caps, size_t length, const char* args[], const char* envs[])
+{
+
+	if (! drop_caps) return direct_run(args);
+
+	if(envs == NULL) return -1; // dropcap must have envp
+
+	size_t env_count = 1; // /usr/bin/env takes one slot
+	for (size_t i = 0; envs[i] != NULL; i++)
+		if (is_forwarded(envs[i])) env_count++;
+
+	const char* cmdline[env_count + length + 1];
+
+	cmdline[0] = "/usr/bin/env";
+	cmdline[env_count + length] = NULL;
+
+	for (size_t i = 0, j = 1; envs[i] != NULL; i++)
+		if (is_forwarded(envs[i])) cmdline[j++] = envs[i];
+
+	for(size_t i = 0; i < length; i++)
+		cmdline[env_count + i] = args[i];
+
+	return dropcap_run(cmdline, env_count + length);
+}
+
+int run(bool drop_caps, const char* args[], const char* envs[])
 {
 
 	size_t i = 0;
@@ -98,9 +103,7 @@ int run(bool drop_caps, const char* args[])
 
 	pid_t pid = -1;
 
-	if (drop_caps) pid = dropcap_run(args, i);
-	else pid = direct_run(args);
-
+	pid = run_with_env(drop_caps, i, args, envs);
 	if (pid == -1) return 1;
 
 	int status;
@@ -129,38 +132,30 @@ static void handle_sigint(int sig)
 }
 
 
-int run_child_with_args(int argc, char** argv)
+int run_child_with_args(int argc, char** argv, char** envp)
 {
 
 	static const char* pre_chown[]  = {"/usr/bin/chown", "-R", DROP_USER":"DROP_GROUP, "/workspace", NULL};
 	static const char* post_chown[] = {"/usr/bin/chown", "-R", "root:root", "/workspace", NULL};
 
-	size_t env_count = 0;
-	for (char** e = environ; *e != NULL; e++)
-		if (is_forwarded(*e)) env_count++;
+	const char* cmdline[argc + 1];
+	cmdline[0] = "/autodocker/entry.sh";
+	cmdline[argc] = NULL;
 
-	/* /usr/bin/env NAME=value... /autodocker/entry.sh args... NULL */
-	const char* cmdline[1 + env_count + argc + 1];
-	size_t n = 0;
-	cmdline[n++] = "/usr/bin/env";
-	for (char** e = environ; *e != NULL; e++)
-		if (is_forwarded(*e)) cmdline[n++] = *e;
-	cmdline[n++] = "/autodocker/entry.sh";
 	for(size_t i = 1; i < argc; i++)
-		cmdline[n++] = argv[i];
-	cmdline[n] = NULL;
+		cmdline[i] = argv[i];
 
 	if (is_rootless)
-		run(false, pre_chown);
+		run(false, pre_chown, NULL);
 
-	int ret = run(true, cmdline);
+	int ret = run(true, cmdline, (const char**) envp);
 
 	if (is_rootless)
-		run(false, post_chown);
+		run(false, post_chown, NULL);
 	return ret;
 }
 
-int main(int argc, char** argv)
+int main(int argc, char** argv, char** envp)
 {
 	signal(SIGINT, handle_sigint);
 	signal(SIGTERM, handle_sigint);
@@ -185,14 +180,13 @@ int main(int argc, char** argv)
 	}
 
 	static char* const debug_shell[] = {"/usr/bin/bash", "-i", NULL};
-	for(size_t i = 1; i < argc; i++) {
+	for(size_t i = 1; i < argc; i++)
 		if(strcmp(argv[i], "--root") == 0
-		   ||strcmp(argv[i], "-r") == 0)
+		   ||i == 1 && strcmp(argv[i], "-r") == 0)
 			execv("/usr/bin/bash", debug_shell);
-		;
-	}
 
-	if(run_child_with_args(argc, argv) == 0) printf("OK.\n");
+	size_t ret = run_child_with_args(argc, argv, envp);
+	if(ret == 0) printf("OK.\n");
 	else printf("ERROR.\n");
-	return 0;
+	return ret;
 }
