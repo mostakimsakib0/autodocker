@@ -23,6 +23,7 @@ affiliations:
     index: 1
 date: 13 October 2026
 bibliography: paper.bib
+---
 
 # Summary
 
