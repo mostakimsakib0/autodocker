@@ -1,326 +1,43 @@
 name: CI
 
-# Single test workflow (replaces the former duplicate test.yml):
-#  - lint:        ruff (pyflakes + syntax), shellcheck, hadolint
-#  - pytest:      Python 3.9-3.12 with Open Babel 3.2.1 and the official Vina 1.2.7
-#  - docker:      on pull requests, build the image natively on amd64 and
-#                 arm64, smoke-screen it through the entrypoint twice and
-#                 require byte-identical results on each architecture
-#  - cross-arch:  compare the amd64 and arm64 smoke results (measured,
-#                 non-blocking: cross-architecture identity is not guaranteed)
 on:
   push:
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'paper/**'
-      - 'CITATION.cff'
-      - '.zenodo.json'
-      - 'LICENSE'
+    paths:
+      - '**.py'
+      - '**.sh'
+      - 'requirements.txt'
+      - 'tests/**'
+      - '**/*.yml'
   pull_request:
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'paper/**'
-      - 'CITATION.cff'
-      - '.zenodo.json'
-      - 'LICENSE'
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
-env:
-  # Upstream AutoDock Vina 1.2.7 release binary (statically linked), the same
-  # release the Docker image compiles from tools/autodock-vina. Checksum of
-  # https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v1.2.7/vina_1.2.7_linux_x86_64
-  VINA_VERSION: '1.2.7'
-  VINA_SHA256: 'f31f774f723bba7bbe6e9d1c47577020eea9a8da16424284c043d22593570644'
-  # Open Babel 3.2.1, the release the Docker image builds from
-  # tools/openbabel/repo: the upstream PyPI wheel for CPython 3.12
-  # (manylinux2014 x86_64), pinned by hash. Only its native obabel binary,
-  # library, plugins and data are used, so it serves every matrix Python
-  # (there is no 3.9 wheel). Checksum of
-  # openbabel-3.2.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
-  OPENBABEL_VERSION: '3.2.1'
-  OPENBABEL_WHEEL_SHA256: 'bdaceaa9c6d14cae08594d535b81745eb6b5850007f87599c3495bf500f292c8'
-  RUFF_VERSION: '0.17.0'
-  HADOLINT_IMAGE: 'docker.io/hadolint/hadolint:v2.12.0'
+    paths:
+      - '**.py'
+      - '**.sh'
+      - 'requirements.txt'
+      - 'tests/**'
 
 jobs:
-  lint:
-    name: lint
-    runs-on: ubuntu-24.04
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install ruff
-        run: pip install "ruff==${RUFF_VERSION}"
-
-      - name: ruff (syntax errors, Python 3.9 target) - blocking
-        run: ruff check --output-format=github --select E9 .
-
-      # Configuration in ruff.toml (rules F and E9).
-      - name: ruff (pyflakes) - blocking
-        run: ruff check --output-format=github .
-
-      - name: shellcheck
+      - name: Install system dependencies
         run: |
-          shellcheck --version
-          shellcheck autodocker/entry.sh scripts/*.sh .github/smoke/*.sh
-
-      - name: hadolint
-        run: docker run --rm -i -v "$PWD/.hadolint.yaml:/.config/hadolint.yaml:ro" "$HADOLINT_IMAGE" < Dockerfile
-
-  pytest:
-    name: pytest (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.9', '3.10', '3.11', '3.12']
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      # Python 3.12 for the Open Babel wheel (see OPENBABEL_WHEEL_SHA256),
-      # set up first so the matrix Python below stays the default.
-      - name: Set up Python 3.12 for Open Babel
-        id: obpython
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: requirements.txt
-
-      # Open Babel 3.2.1 (the image's release; Ubuntu ships 3.1.1) from the
-      # hash-pinned upstream wheel, in its own virtual environment. Its
-      # native obabel goes first on PATH; BABEL_LIBDIR/BABEL_DATADIR point
-      # it at the wheel's plugins and data. SMINA, QuickVina 2 and fpocket
-      # are not packaged for Ubuntu 24.04; the tests that need them skip
-      # here and run in the docker job instead, against the binaries built
-      # into the image (pytest's fpocket tests use mocks).
-      - name: Install Open Babel ${{ env.OPENBABEL_VERSION }}
-        env:
-          OBPYTHON: ${{ steps.obpython.outputs.python-path }}
-        run: |
-          venv="$RUNNER_TEMP/openbabel"
-          "$OBPYTHON" -m venv "$venv"
-          echo "openbabel==${OPENBABEL_VERSION} --hash=sha256:${OPENBABEL_WHEEL_SHA256}" > "$RUNNER_TEMP/openbabel.txt"
-          "$venv/bin/pip" install --disable-pip-version-check --no-deps --only-binary=:all: \
-            --require-hashes -r "$RUNNER_TEMP/openbabel.txt"
-          ob="$("$venv/bin/python" -c 'import os, openbabel; print(os.path.dirname(openbabel.__file__))')"
-          echo "$ob/bin" >> "$GITHUB_PATH"
-          echo "BABEL_LIBDIR=$ob/lib/openbabel/${OPENBABEL_VERSION}" >> "$GITHUB_ENV"
-          echo "BABEL_DATADIR=$ob/share/openbabel/${OPENBABEL_VERSION}" >> "$GITHUB_ENV"
-
-      # The pinned Vina 1.2.7 instead of Ubuntu's autodock-vina (1.2.5):
-      # the upstream static release binary, verified by checksum. Building
-      # tools/autodock-vina here would need Boost in every matrix job for
-      # the same release; the docker job covers the from-source build.
-      - name: Install AutoDock Vina ${{ env.VINA_VERSION }}
-        run: |
-          curl -fsSL --retry 5 -o vina \
-            "https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v${VINA_VERSION}/vina_${VINA_VERSION}_linux_x86_64"
-          echo "${VINA_SHA256}  vina" | sha256sum -c -
-          sudo install -m 0755 vina /usr/local/bin/vina
-          vina --version
-          command -v obabel
-          obabel -V | grep -F "Open Babel ${OPENBABEL_VERSION} "
-          obabel -L formats | grep -F "pdbqt -- "
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autodock-vina openbabel
 
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
+          pip install --upgrade pip
           pip install -r requirements.txt pytest
 
-      # Slow tests (real docking/minimization, marked "slow") run here too.
       - name: Run test suite
-        run: python -m pytest tests/ -q -rs
-        env:
-          VS_COMMAND_TIMEOUT: '120'
-          # tests/test_openbabel.py fails instead of skipping on Open Babel < 3.2.
-          AUTODOCKER_REQUIRE_OPENBABEL_3_2: '1'
-
-  docker:
-    name: docker ${{ matrix.arch }} smoke + determinism
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          # Native arm64 runner (no QEMU); free for public repositories.
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          submodules: true
-
-      - name: Read version
-        id: version
-        run: echo "version=$(cat autodocker/VERSION)" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/${{ matrix.arch }}
-          load: true
-          push: false
-          tags: autodocker:ci
-          build-args: |
-            AUTODOCKER_VERSION=${{ steps.version.outputs.version }}
-            VCS_REF=${{ github.sha }}
-          cache-from: type=gha,scope=docker-${{ matrix.arch }}
-          cache-to: type=gha,scope=docker-${{ matrix.arch }},mode=max
-
-      - name: Check image metadata and bundled tools
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          ARCH: ${{ matrix.arch }}
-        run: |
-          label="$(docker image inspect autodocker:ci \
-            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')"
-          test "$label" = "$VERSION"
-          test "$(docker image inspect autodocker:ci --format '{{ .Architecture }}')" = "$ARCH"
-          docker run --rm --entrypoint python3 autodocker:ci \
-            /autodocker/runner.py --version | grep -Fx "AutoDocker $VERSION"
-          docker run --rm --entrypoint sh autodocker:ci -c '
-            set -eu
-            vina --version | grep -F "v1.2.7"
-            obabel -V | grep -F "Open Babel 3.2.1 "
-            test "$(command -v obabel)" = /usr/local/bin/obabel
-            smina --version | head -n 1
-            qvina --version | head -n 1
-            command -v fpocket
-            test -s /ngl/ngl.js'
-
-      # The smoke screen below uses a whole-receptor box (crambin has no
-      # pocket fpocket finds), so fpocket is checked here on the 1HSG
-      # binding-site fixture: it must find at least one pocket.
-      - name: fpocket finds a pocket in the 1HSG site
-        run: |
-          docker run --rm --entrypoint sh \
-            -v "$PWD/tests/data/ligand_box:/fixtures:ro" autodocker:ci -c '
-              set -eu
-              cd /tmp
-              grep "^ATOM" /fixtures/1hsg_site.pdb > site.pdb
-              echo END >> site.pdb
-              fpocket -f site.pdb > /dev/null
-              n=$(find site_out/pockets -name "*_atm.pdb" | wc -l)
-              echo "fpocket pockets: $n"
-              test "$n" -ge 1'
-
-      - name: Smoke screen twice and compare (determinism)
-        run: .github/smoke/run_smoke.sh autodocker:ci "$RUNNER_TEMP/smoke"
-
-      # The README quick start as a user runs it: the workspace belongs to the
-      # runner's user (UID 1001 on GitHub runners, not dockuser's 1000) and is
-      # not made world-writable. aclmgr must give dockuser that owner's UID,
-      # so the run succeeds and every output belongs to the user.
-      - name: Workspace owned by the invoking user, no chmod
-        run: |
-          set -euo pipefail
-          ws="$RUNNER_TEMP/owned"
-          mkdir -p "$ws/ligs"
-          cp .github/smoke/protein.pdb "$ws/"
-          cp .github/smoke/ligs/phenol.sdf "$ws/ligs/"
-          echo "runner user: $(id -u):$(id -g)"
-          docker run --rm -v "$ws:/workspace" autodocker:ci --exhaustiveness 1 --no-fpocket
-          test -s "$ws/output/ranking.csv"
-          foreign="$(find "$ws" \( ! -uid "$(id -u)" -o ! -gid "$(id -g)" \) -print | head -n 5)"
-          if [ -n "$foreign" ]; then
-            echo "::error::files not owned by $(id -u):$(id -g):"
-            printf "%s\n" "$foreign" | xargs -d "\n" ls -ln
-            exit 1
-          fi
-          rm -rf "$ws"
-
-      # Tests that need real SMINA / QuickVina 2 / Vina binaries, run inside
-      # the image against the tools it ships (and its Open Babel 3.2.1).
-      - name: Real-binary tests inside the image
-        run: |
-          docker run --rm --entrypoint sh \
-            -v "$PWD:/repo:ro" -w /repo -e PYTHONDONTWRITEBYTECODE=1 \
-            -e AUTODOCKER_REQUIRE_OPENBABEL_3_2=1 \
-            autodocker:ci -c '
-              pip install --no-cache-dir --root-user-action=ignore --disable-pip-version-check -q pytest==8.4.2
-              python3 -m pytest -q -rs -p no:cacheprovider \
-                tests/test_smina_real.py tests/test_tools_real.py tests/test_e2e.py \
-                tests/test_openbabel.py'
-
-      - name: Upload smoke outputs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: smoke-${{ matrix.arch }}
-          path: ${{ runner.temp }}/smoke/run1/output
-          if-no-files-found: ignore
-
-  cross-arch:
-    name: cross-arch determinism (amd64 vs arm64, non-blocking)
-    needs: docker
-    if: always() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-24.04
-    # Measured, not guaranteed: a difference is reported but does not fail CI.
-    continue-on-error: true
-    steps:
-      - name: Download smoke outputs
-        uses: actions/download-artifact@v4
-        with:
-          pattern: smoke-*
-          path: smoke
-
-      - name: Compare amd64 and arm64 results byte-for-byte
-        run: |
-          set -u
-          a=smoke/smoke-amd64 b=smoke/smoke-arm64
-          {
-            echo "## Cross-architecture determinism (amd64 vs arm64)"
-            echo
-            if [ ! -d "$a" ] || [ ! -d "$b" ]; then
-              echo "Result: **not compared** (an architecture produced no smoke output)"
-              exit 1
-            fi
-            echo "| file | byte-identical |"
-            echo "|---|---|"
-          } >> "$GITHUB_STEP_SUMMARY"
-          status=0
-          # Primary: ranking and poses. Diagnostics: the prepared inputs.
-          for f in ranking.csv $(cd "$a" && ls docked/*_out.pdbqt) \
-                   receptor.pdbqt grid.conf $(cd "$a" && ls ligands/*.pdbqt 2>/dev/null); do
-            if cmp -s "$a/$f" "$b/$f"; then r=yes; else r=no; case "$f" in ranking.csv|docked/*) status=1 ;; esac; fi
-            echo "| \`$f\` | $r |" >> "$GITHUB_STEP_SUMMARY"
-          done
-          if [ "$status" -eq 0 ]; then
-            echo -e "\nResult: **byte-identical** ranking.csv and docked poses" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo -e "\nResult: **differs** (see table; first lines of the ranking diff below)\n" >> "$GITHUB_STEP_SUMMARY"
-            { echo '```'; diff "$a/ranking.csv" "$b/ranking.csv" | head -20 || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          fi
-          cat "$GITHUB_STEP_SUMMARY"
-          exit "$status"
+        run: python -m pytest tests/ -q

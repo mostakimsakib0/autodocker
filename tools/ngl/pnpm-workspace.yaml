@@ -1,10 +1,3 @@
 ignoreScripts: true
 optional: false
-# Only ngl's prebuilt dist/ is copied into the image, so its runtime
-# dependencies (three, molstar, ...) are not installed at all.
-overrides:
-  ngl>three: '-'
-  ngl>molstar: '-'
-  ngl>signals: '-'
-  ngl>chroma-js: '-'
-  ngl>sprintf-js: '-'
+confirmModulesPurge: false
