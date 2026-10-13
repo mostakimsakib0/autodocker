@@ -218,7 +218,7 @@ EOF
 
 FROM builder AS aclmgr_builder
 WORKDIR /src
-COPY tools/aclmgr.c .
+COPY tools/aclmgr.c tools/aclmgr.*.h .
 RUN gcc aclmgr.c -o aclmgr
 RUN strip aclmgr
 
