@@ -1,6 +1,6 @@
 #!/bin/sh
 cd "$(realpath "$(dirname "$0")")"
-sed -nE 's/^FROM .+ AS\s+([^_]+)(_builder)$/\1\2 \1-builder/p' Dockerfile |
-	while read -r stage tag; do
-		podman build --target "$stage" -t "${PWD##*/}:$tag" .
-	done
+sed -nE 's/^FROM .+ AS\s+([^_]+)_builder$/Tool: \1/p' Dockerfile
+while read -rp 'Tool? ' tool; do
+	podman build --target "${tool}_builder" -t "${PWD##*/}:$tool-builder" .
+done
