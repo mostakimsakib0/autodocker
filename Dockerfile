@@ -81,7 +81,7 @@ RUN strip fpocket/repo/bin/*
 
 FROM builder AS aclmgr_builder
 WORKDIR /src
-COPY tools/aclmgr.c tools/aclmgr.*.h .
+COPY tools/aclmgr/* ./
 RUN gcc aclmgr.c -o aclmgr
 RUN strip aclmgr
 
