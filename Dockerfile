@@ -4,8 +4,10 @@
 FROM docker.io/debian:bookworm-slim AS base_builder
 
 ENV DEBIAN_FRONTEND=noninteractive
-COPY tools/builder/* /scripts/
+COPY tools/builder/apt.sh /scripts/
 RUN /scripts/apt.sh --init builder
+# copy other tools
+COPY --exclude=apt.sh tools/builder/* /scripts/
 
 # ============================================================
 # Stage 1 — Build Rootless Mode ACL Manager
