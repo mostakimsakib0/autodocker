@@ -13,17 +13,23 @@ try_patch()
 
 	if patch --dry-run -d "$tree" "$@" < "$patch"; then
 		patch -d "$tree" "$@" < "$patch"
+	else
+		echo "ERROR: '$patch' is outdated." >&2
+		return 1
 	fi
 }
 
 test -d "$1/repo" || die "Target repo for patching does not exist"
 test -d "$1/patches" || die "Patch tree does not exist"
 
+i=0
 for patch in "$1/patches"/*.patch; do
 	! test "$1/patches/*.patch" = "$patch" || {
 		echo >&2 "Empty patch tree"
 		break
 	}
 
-	try_patch "$1/repo" "$patch" -p1
+	try_patch "$1/repo" "$patch" -p1 || i=$((i + 1))
 done
+
+exit "$i"

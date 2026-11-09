@@ -1,40 +1,41 @@
 # ============================================================
 # Stage 0 — Build Image Base
 # ============================================================
-FROM docker.io/debian:bookworm-slim AS builder
+FROM docker.io/debian:bookworm-slim AS base_builder
 
 ENV DEBIAN_FRONTEND=noninteractive
-COPY scripts/apt.sh /scripts/apt.sh
-COPY scripts/shlib.sh /scripts/shlib.sh
-COPY scripts/patch.sh /scripts/patch.sh
+COPY tools/builder/* /scripts/
+RUN /scripts/apt.sh --init builder
 
-RUN <<EOF
-set -eu
-apt-get update
-apt-get install \
-	-y --no-install-recommends \
-build-essential git
-EOF
+# ============================================================
+# Stage 1 — Build Rootless Mode ACL Manager
+# ============================================================
+
+FROM base_builder AS aclmgr_builder
+WORKDIR /src
+COPY tools/aclmgr/* ./
+RUN gcc aclmgr.c -o aclmgr
+RUN strip aclmgr
 
 # ============================================================
 # Stage 1 — Build AutoDock Vina
 # ============================================================
-FROM builder AS vina_builder
+FROM base_builder AS vina_builder
 
 WORKDIR /src
 COPY tools/autodock-vina ./autodock-vina
-RUN /scripts/apt.sh dev autodock-vina/deps
+RUN /scripts/apt.sh dev autodock-vina
 RUN make -j"$(nproc)" -C autodock-vina/repo/build/linux/release
 RUN strip autodock-vina/repo/build/linux/release/vina
 
 # ============================================================
 # Stage 1 — Build SMINA
 # ============================================================
-FROM builder AS smina_builder
+FROM base_builder AS smina_builder
 
 WORKDIR /src
 COPY tools/smina ./smina
-RUN /scripts/apt.sh dev smina/deps
+RUN /scripts/apt.sh dev smina
 RUN cmake -S smina/repo -B smina/build
 RUN make -j"$(nproc)" -C smina/build
 RUN strip smina/build/fromsmina smina/build/tosmina smina/build/smina
@@ -43,10 +44,10 @@ RUN /scripts/shlib.sh boost smina/build/fromsmina smina/build/tosmina smina/buil
 # ============================================================
 # Stage 1 — Build QuickVina2
 # ============================================================
-FROM builder AS qvina_builder
+FROM base_builder AS qvina_builder
 WORKDIR /src
 COPY tools/qvina ./qvina
-RUN /scripts/apt.sh dev qvina/deps
+RUN /scripts/apt.sh dev qvina
 RUN make -j"$(nproc)" -C qvina/repo/build/linux/release
 RUN <<EOF
 strip qvina/repo/build/linux/release/vina
@@ -67,23 +68,13 @@ RUN mv node_modules/ngl/dist ngl
 # Stage 1 — Build FPocket
 # ============================================================
 
-FROM builder AS fpocket_builder
+FROM base_builder AS fpocket_builder
 WORKDIR /src
 COPY tools/fpocket ./fpocket
 RUN /scripts/patch.sh fpocket
-RUN /scripts/apt.sh dev fpocket/deps
+RUN /scripts/apt.sh dev fpocket
 RUN make -j"$(nproc)" -C fpocket/repo CXX=g++
 RUN strip fpocket/repo/bin/*
-
-# ============================================================
-# Stage 1 — Build Rootless Mode ACL Manager
-# ============================================================
-
-FROM builder AS aclmgr_builder
-WORKDIR /src
-COPY tools/aclmgr/* ./
-RUN gcc aclmgr.c -o aclmgr
-RUN strip aclmgr
 
 # ============================================================
 # Stage 1.5 — Accumulate deps
@@ -109,13 +100,8 @@ LABEL org.opencontainers.image.title="AutoDocker" \
       org.opencontainers.image.version="1.1.4"
 
 COPY --from=deps /deps /deps
-COPY scripts/apt.sh /apt.sh
-RUN <<EOF
-export DEBIAN_FRONTEND=noninteractive
-apt update
-/apt.sh run /deps
-rm -f /apt.sh
-EOF
+COPY tools/builder/apt.sh /apt.sh
+RUN /apt.sh --init run .
 
 COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir --root-user-action=ignore -r /requirements.txt
