@@ -3,7 +3,6 @@
 # ============================================================
 FROM docker.io/debian:bookworm-slim AS base_builder
 
-ENV DEBIAN_FRONTEND=noninteractive
 COPY tools/builder/apt.sh /scripts/
 RUN /scripts/apt.sh --init builder
 # copy other tools
@@ -15,9 +14,8 @@ COPY --exclude=apt.sh tools/builder/* /scripts/
 
 FROM base_builder AS aclmgr_builder
 WORKDIR /src
-COPY tools/aclmgr/* ./
-RUN gcc aclmgr.c -o aclmgr
-RUN strip aclmgr
+COPY tools/aclmgr ./aclmgr
+RUN /scripts/buildpkg.sh aclmgr
 
 # ============================================================
 # Stage 1 — Build AutoDock Vina
@@ -137,8 +135,7 @@ COPY --from=fpocket_builder \
 COPY --from=ngl_builder \
     src/ngl /ngl
 
-COPY --from=aclmgr_builder \
-	src/aclmgr /autodocker/aclmgr
+COPY --from=aclmgr_builder /pkg/ /
 
 RUN useradd --create-home --uid 1000 dockuser
 RUN mkdir -p /workspace && chown -R dockuser:dockuser /workspace /autodocker
