@@ -46,11 +46,7 @@ COPY tools/qvina/deps ./qvina/deps
 RUN /scripts/apt.sh dev qvina
 
 COPY --exclude=deps tools/qvina ./qvina
-RUN make -j"$(nproc)" -C qvina/repo/build/linux/release
-RUN <<EOF
-strip qvina/repo/build/linux/release/vina
-mv qvina/repo/build/linux/release/vina qvina/repo/build/linux/release/qvina
-EOF
+RUN /scripts/buildpkg.sh qvina
 
 # ============================================================
 # Stage 1 — Build NGL
@@ -115,9 +111,7 @@ COPY --from=smina_builder \
     /src/smina/build/fromsmina \
     /usr/local/bin/
 
-COPY --from=qvina_builder \
-    /src/qvina/repo/build/linux/release/qvina \
-    /usr/local/bin/qvina
+COPY --from=qvina_builder /pkg/ /
 
 COPY --from=fpocket_builder \
     /src/fpocket/repo/bin/fpocket \
