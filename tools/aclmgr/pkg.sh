@@ -1,4 +1,10 @@
-gcc aclmgr.c -o aclmgr
-strip aclmgr
+build()
+{
+	gcc aclmgr.c -o aclmgr
+	strip aclmgr
+}
 
-install -Dm755 aclmgr "$PKG/autodocker/aclmgr"
+package()
+{
+	addbin aclmgr autodocker/aclmgr
+}
