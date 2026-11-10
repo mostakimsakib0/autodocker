@@ -35,9 +35,7 @@ COPY tools/smina/deps ./smina/deps
 RUN /scripts/apt.sh dev smina
 
 COPY --exclude=deps tools/smina ./smina
-RUN cmake -S smina/repo -B smina/build
-RUN make -j"$(nproc)" -C smina/build
-RUN strip smina/build/fromsmina smina/build/tosmina smina/build/smina
+RUN /scripts/buildpkg.sh smina
 RUN /scripts/shlib.sh boost smina/build/fromsmina smina/build/tosmina smina/build/smina > deps
 
 # ============================================================
