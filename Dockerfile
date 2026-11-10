@@ -7,13 +7,13 @@ COPY tools/builder/apt.sh /scripts/
 RUN /scripts/apt.sh --init builder
 # copy other tools
 COPY --exclude=apt.sh tools/builder/* /scripts/
+WORKDIR /src
 
 # ============================================================
 # Stage 1 — Build Rootless Mode ACL Manager
 # ============================================================
 
 FROM base_builder AS aclmgr_builder
-WORKDIR /src
 COPY tools/aclmgr ./aclmgr
 RUN /scripts/buildpkg.sh aclmgr
 
@@ -21,20 +21,20 @@ RUN /scripts/buildpkg.sh aclmgr
 # Stage 1 — Build AutoDock Vina
 # ============================================================
 FROM base_builder AS vina_builder
-
-WORKDIR /src
-COPY tools/autodock-vina ./autodock-vina
+COPY tools/autodock-vina/deps ./autodock-vina/deps
 RUN /scripts/apt.sh dev autodock-vina
+
+COPY --exclude=deps tools/autodock-vina ./autodock-vina
 RUN /scripts/buildpkg.sh autodock-vina
 
 # ============================================================
 # Stage 1 — Build SMINA
 # ============================================================
 FROM base_builder AS smina_builder
-
-WORKDIR /src
-COPY tools/smina ./smina
+COPY tools/smina/deps ./smina/deps
 RUN /scripts/apt.sh dev smina
+
+COPY --exclude=deps tools/smina ./smina
 RUN cmake -S smina/repo -B smina/build
 RUN make -j"$(nproc)" -C smina/build
 RUN strip smina/build/fromsmina smina/build/tosmina smina/build/smina
@@ -44,9 +44,10 @@ RUN /scripts/shlib.sh boost smina/build/fromsmina smina/build/tosmina smina/buil
 # Stage 1 — Build QuickVina2
 # ============================================================
 FROM base_builder AS qvina_builder
-WORKDIR /src
-COPY tools/qvina ./qvina
+COPY tools/qvina/deps ./qvina/deps
 RUN /scripts/apt.sh dev qvina
+
+COPY --exclude=deps tools/qvina ./qvina
 RUN make -j"$(nproc)" -C qvina/repo/build/linux/release
 RUN <<EOF
 strip qvina/repo/build/linux/release/vina
@@ -68,10 +69,11 @@ RUN mv node_modules/ngl/dist ngl
 # ============================================================
 
 FROM base_builder AS fpocket_builder
-WORKDIR /src
-COPY tools/fpocket ./fpocket
-RUN /scripts/patch.sh fpocket
+COPY tools/fpocket/deps ./fpocket/deps
 RUN /scripts/apt.sh dev fpocket
+
+COPY --exclude=deps tools/fpocket ./fpocket
+RUN /scripts/patch.sh fpocket
 RUN make -j"$(nproc)" -C fpocket/repo CXX=g++
 RUN strip fpocket/repo/bin/*
 
