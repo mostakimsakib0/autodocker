@@ -10,6 +10,11 @@ addbin()
 	install -TDm755 "$1" "$PKG/$2"
 }
 
+addfile()
+{
+	install -TDm644 "$1" "$PKG/$2"
+}
+
 set -eu
 cd "$1" || die "source dir not present"
 test -f pkg.sh || die "pkg script does not exist"
@@ -21,9 +26,9 @@ export DESTDIR="$PKG"
 . "$PWD/pkg.sh"
 (
 	set -x
-	build      
+	build
 )
 (
 	set -x
-	package      
+	package
 )
