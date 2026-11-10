@@ -53,10 +53,10 @@ RUN /scripts/buildpkg.sh qvina
 # ============================================================
 # Pinned to a fixed pnpm release (not :latest) so builds are reproducible.
 FROM ghcr.io/pnpm/pnpm:12.8.0 AS ngl_builder
+COPY --from=base_builder /scripts /scripts
 WORKDIR /src
-COPY tools/ngl .
-RUN pnpm install
-RUN mv node_modules/ngl/dist ngl
+COPY tools/ngl ./ngl
+RUN /scripts/buildpkg.sh ngl
 
 # ============================================================
 # Stage 1 — Build FPocket
@@ -116,8 +116,7 @@ COPY --from=fpocket_builder \
     /src/fpocket/repo/plugins/LINUXAMD64/molfile/ \
     /usr/local/lib/
 
-COPY --from=ngl_builder \
-    src/ngl /ngl
+COPY --from=ngl_builder /pkg/ /
 
 COPY --from=aclmgr_builder /pkg/ /
 
