@@ -103,14 +103,8 @@ RUN pip install --no-cache-dir --root-user-action=ignore -r /requirements.txt
 
 COPY autodocker /autodocker
 
-COPY --from=vina_builder /pkg/ /
-
-COPY --from=smina_builder \
-    /src/smina/build/smina \
-    /src/smina/build/tosmina \
-    /src/smina/build/fromsmina \
-    /usr/local/bin/
-
+COPY --from=vina_builder  /pkg/ /
+COPY --from=smina_builder /pkg/ /
 COPY --from=qvina_builder /pkg/ /
 
 COPY --from=fpocket_builder \
