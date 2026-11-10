@@ -25,8 +25,7 @@ FROM base_builder AS vina_builder
 WORKDIR /src
 COPY tools/autodock-vina ./autodock-vina
 RUN /scripts/apt.sh dev autodock-vina
-RUN make -j"$(nproc)" -C autodock-vina/repo/build/linux/release
-RUN strip autodock-vina/repo/build/linux/release/vina
+RUN /scripts/buildpkg.sh autodock-vina
 
 # ============================================================
 # Stage 1 — Build SMINA
@@ -108,10 +107,7 @@ RUN pip install --no-cache-dir --root-user-action=ignore -r /requirements.txt
 
 COPY autodocker /autodocker
 
-COPY --from=vina_builder \
-    /src/autodock-vina/repo/build/linux/release/vina \
-    /usr/local/bin/vina
-
+COPY --from=vina_builder /pkg/ /
 
 COPY --from=smina_builder \
     /src/smina/build/smina \
