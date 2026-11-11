@@ -1,3 +1,8 @@
 dev cmake
-dev zlib1g-dev
-dev libgomp1
+dev libcairo2-dev
+dev libcoordgen-dev
+dev libxml2-dev
+dev libboost-all-dev
+dev libeigen3-dev
+dev rapidjson-dev
+dev libmaeparser-dev

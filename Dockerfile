@@ -20,6 +20,18 @@ COPY tools/aclmgr ./aclmgr
 RUN /scripts/buildpkg.sh aclmgr
 
 # ============================================================
+# Stage 1 — Build OpenBabel
+# ============================================================
+FROM base_builder AS babel_builder
+COPY tools/openbabel/deps ./openbabel/deps
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+	/scripts/apt.sh dev openbabel
+
+COPY --exclude=deps tools/openbabel ./openbabel
+RUN /scripts/buildpkg.sh openbabel
+
+# ============================================================
 # Stage 1 — Build AutoDock Vina
 # ============================================================
 FROM base_builder AS vina_builder
