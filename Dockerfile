@@ -4,7 +4,9 @@
 FROM docker.io/debian:bookworm-slim AS base_builder
 
 COPY tools/builder/apt.sh /scripts/
-RUN /scripts/apt.sh --init builder
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+	/scripts/apt.sh --init builder
 # copy other tools
 COPY --exclude=apt.sh tools/builder/* /scripts/
 WORKDIR /src
@@ -22,7 +24,9 @@ RUN /scripts/buildpkg.sh aclmgr
 # ============================================================
 FROM base_builder AS vina_builder
 COPY tools/autodock-vina/deps ./autodock-vina/deps
-RUN /scripts/apt.sh dev autodock-vina
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+	/scripts/apt.sh dev autodock-vina
 
 COPY --exclude=deps tools/autodock-vina ./autodock-vina
 RUN /scripts/buildpkg.sh autodock-vina
@@ -32,7 +36,9 @@ RUN /scripts/buildpkg.sh autodock-vina
 # ============================================================
 FROM base_builder AS smina_builder
 COPY tools/smina/deps ./smina/deps
-RUN /scripts/apt.sh dev smina
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+	/scripts/apt.sh dev smina
 
 COPY --exclude=deps tools/smina ./smina
 RUN /scripts/buildpkg.sh smina
@@ -43,7 +49,9 @@ RUN /scripts/shlib.sh boost smina/build/fromsmina smina/build/tosmina smina/buil
 # ============================================================
 FROM base_builder AS qvina_builder
 COPY tools/qvina/deps ./qvina/deps
-RUN /scripts/apt.sh dev qvina
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+	/scripts/apt.sh dev qvina
 
 COPY --exclude=deps tools/qvina ./qvina
 RUN /scripts/buildpkg.sh qvina
@@ -64,7 +72,9 @@ RUN /scripts/buildpkg.sh ngl
 
 FROM base_builder AS fpocket_builder
 COPY tools/fpocket/deps ./fpocket/deps
-RUN /scripts/apt.sh dev fpocket
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+	/scripts/apt.sh dev fpocket
 
 COPY --exclude=deps tools/fpocket ./fpocket
 RUN /scripts/patch.sh fpocket
@@ -96,7 +106,9 @@ LABEL org.opencontainers.image.title="AutoDocker" \
 
 COPY --from=deps /deps /deps
 COPY tools/builder/apt.sh /apt.sh
-RUN /apt.sh --init run .
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+	/apt.sh --init run .
 
 COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir --root-user-action=ignore -r /requirements.txt

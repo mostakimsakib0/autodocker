@@ -22,7 +22,6 @@ case "$env" in
 			sed -nE '/^'"$env"'/s/^'"$env"'[[:space:]]+//p' "$tool/deps"
 		done | (
 			add $(xargs)
-			rm -rf /var/lib/apt/lists/*
 			rm "$0"
 		)
 		;;
