@@ -15,6 +15,11 @@ addfile()
 	install -TDm644 "$1" "$PKG/$2"
 }
 
+addtree()
+{
+	cp -av --no-preserve=ownership "$1/" "$PKG/$2/"
+}
+
 set -eu
 cd "$1" || die "source dir not present"
 test -f pkg.sh || die "pkg script does not exist"
