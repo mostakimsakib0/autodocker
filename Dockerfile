@@ -78,8 +78,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 COPY --exclude=deps tools/fpocket ./fpocket
 RUN /scripts/patch.sh fpocket
-RUN make -j"$(nproc)" -C fpocket/repo CXX=g++
-RUN strip fpocket/repo/bin/*
+RUN /scripts/buildpkg.sh fpocket
 
 # ============================================================
 # Stage 1.5 — Accumulate deps
@@ -118,18 +117,8 @@ COPY autodocker /autodocker
 COPY --from=vina_builder  /pkg/ /
 COPY --from=smina_builder /pkg/ /
 COPY --from=qvina_builder /pkg/ /
-
-COPY --from=fpocket_builder \
-    /src/fpocket/repo/bin/fpocket \
-    /src/fpocket/repo/bin/dpocket \
-    /src/fpocket/repo/bin/tpocket \
-    /usr/local/bin/
-COPY --from=fpocket_builder \
-    /src/fpocket/repo/plugins/LINUXAMD64/molfile/ \
-    /usr/local/lib/
-
+COPY --from=fpocket_builder /pkg/ /
 COPY --from=ngl_builder /pkg/ /
-
 COPY --from=aclmgr_builder /pkg/ /
 
 COPY scripts/setup-container.sh /setup.sh
