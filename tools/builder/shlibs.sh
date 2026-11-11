@@ -67,8 +67,8 @@ done
 if (($# == 0)); then
 	set -- /dev/stdout
 else
-	mkdir -p /deps
-	set -- "/deps/$1" "/src/$1/deps"
+	mkdir -p "/deps/$1"
+	set -- "/deps/$1/deps" "/src/$1/deps"
 fi
 
 # Collect dependencies referenced by graph root

@@ -37,3 +37,5 @@ export DESTDIR="$PKG"
 	set -x
 	package
 )
+
+/scripts/shlibs.sh "$1"

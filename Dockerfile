@@ -54,7 +54,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 COPY --exclude=deps tools/smina ./smina
 RUN /scripts/buildpkg.sh smina
-RUN /scripts/shlib.sh boost smina/build/fromsmina smina/build/tosmina smina/build/smina > deps
 
 # ============================================================
 # Stage 1 — Build QuickVina2
@@ -97,10 +96,11 @@ RUN /scripts/buildpkg.sh fpocket
 # ============================================================
 FROM docker.io/debian:bookworm-slim as deps
 
-WORKDIR /acc
-COPY deps base
-COPY --from=smina_builder /src/deps smina
-RUN cat * > /deps
+WORKDIR /deps
+COPY --from=smina_builder   /deps ./
+COPY --from=qvina_builder   /deps ./
+COPY --from=fpocket_builder /deps ./
+
 # ============================================================
 # Stage 2 — Minimal runtime image
 # ============================================================
@@ -115,17 +115,11 @@ LABEL org.opencontainers.image.title="AutoDocker" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="1.1.4"
 
-COPY --from=deps /deps /deps
 COPY tools/builder/apt.sh /apt.sh
+COPY --from=deps /deps/ /deps/
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-	/apt.sh --init run .
-
-COPY requirements.txt /requirements.txt
-RUN pip install --no-cache-dir --root-user-action=ignore -r /requirements.txt
-
-COPY autodocker /autodocker
-
+	/apt.sh --init run /deps/*
 COPY --from=vina_builder  /pkg/ /
 COPY --from=smina_builder /pkg/ /
 COPY --from=qvina_builder /pkg/ /
@@ -134,6 +128,10 @@ COPY --from=ngl_builder /pkg/ /
 COPY --from=aclmgr_builder /pkg/ /
 
 COPY scripts/setup-container.sh /setup.sh
+
+COPY requirements.txt /requirements.txt
+RUN pip install --no-cache-dir --root-user-action=ignore -r /requirements.txt
+COPY autodocker /autodocker
 RUN /setup.sh
 
 WORKDIR /workspace
