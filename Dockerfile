@@ -132,8 +132,8 @@ COPY --from=ngl_builder /pkg/ /
 
 COPY --from=aclmgr_builder /pkg/ /
 
-RUN useradd --create-home --uid 1000 dockuser
-RUN mkdir -p /workspace && chown -R dockuser:dockuser /workspace /autodocker
+COPY scripts/setup-container.sh /setup.sh
+RUN /setup.sh
 
 WORKDIR /workspace
 VOLUME ["/workspace"]
