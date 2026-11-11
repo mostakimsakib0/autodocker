@@ -68,10 +68,13 @@ if (($# == 0)); then
 	set -- /dev/stdout
 else
 	mkdir -p /deps
-	set -- "/deps/$1"
+	set -- "/deps/$1" "/src/$1/deps"
 fi
 
 # Collect dependencies referenced by graph root
-for pkg in "${!candidates[@]}"; do
-	((${referenced[$pkg]:-0})) || echo "run $pkg"
-done | sort -u > "$1"
+{
+	(($# < 2)) || [[ ! -f $2 ]] || sed -nE '/^run\s+/p' "$2"
+	for pkg in "${!candidates[@]}"; do
+		((${referenced[$pkg]:-0})) || echo "run $pkg"
+	done
+} | sort -u > "$1"
