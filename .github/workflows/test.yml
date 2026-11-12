@@ -19,6 +19,9 @@ jobs:
       with:
         submodules: true
 
+    - name: Setup Checkout
+      run: sh scripts/setup-checkout.sh
+
     - name: Install system dependencies
       run: |
         sudo apt-get update

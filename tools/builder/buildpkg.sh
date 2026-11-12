@@ -20,8 +20,10 @@ addtree()
 	cp -av --no-preserve=ownership "$1/" "$PKG/$2/"
 }
 
-set -eu
+PKGVER='#default'
 
+set -eu
+test 1 -eq "$#" || die "Incorrect number of arguments\nUsage: $0 <buildtree>"
 cd "$1" || die "Source directory does not exist"
 test -f pkg.sh || die "Package script does not exist"
 
@@ -55,3 +57,24 @@ fi
 ) || die "Package failed..."
 
 /scripts/shlibs.sh "$1"
+
+pkgver=$(
+	{
+		if ! test -d repo/.git; then
+			exit
+		fi
+
+		cd repo || exit
+		git describe --tags --long 2> /dev/null ||
+			printf "r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+	} | sed -E -e "$PKGVER" -e 's/([^-]*-g)/r\1/;s/-/./g' -e 's/^[^r0-9]*//g' -e '/^r\.$/d'
+)
+
+if test -n "$pkgver"; then
+	test -d "/deps/$1" || {
+		rm -f "/deps/$1"
+		mkdir -p "/deps/$1"
+	}
+	echo "$1: $pkgver" >&2
+	echo "$pkgver" > "/deps/$1/version"
+fi

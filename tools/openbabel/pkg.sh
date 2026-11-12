@@ -1,3 +1,5 @@
+PKGVER='s/openbabel-//;s/-/./;s/\.([0-9]+)\.(g[0-9a-f]+)$/-\1-\2/'
+
 build()
 {
 	cmake -B build -S repo \
