@@ -48,10 +48,12 @@ RUN /scripts/buildpkg.sh autodock-vina
 # ============================================================
 FROM base_builder AS smina_builder
 COPY tools/smina/deps ./smina/deps
+COPY --from=babel_builder /deps/ ./
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-	/scripts/apt.sh dev smina
+	/scripts/apt.sh dev smina openbabel
 
+COPY --from=babel_builder /pkg/ /
 COPY --exclude=deps tools/smina ./smina
 RUN /scripts/buildpkg.sh smina
 
@@ -98,6 +100,7 @@ FROM docker.io/debian:bookworm-slim as deps
 
 WORKDIR /deps
 COPY --from=smina_builder   /deps ./
+COPY --from=babel_builder   /deps ./
 COPY --from=qvina_builder   /deps ./
 COPY --from=fpocket_builder /deps ./
 
