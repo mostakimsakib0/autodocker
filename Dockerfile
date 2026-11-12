@@ -90,13 +90,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 	/scripts/apt.sh dev fpocket
 
 COPY --exclude=deps tools/fpocket ./fpocket
-RUN /scripts/patch.sh fpocket
 RUN /scripts/buildpkg.sh fpocket
 
 # ============================================================
 # Stage 1.5 — Accumulate deps
 # ============================================================
-FROM docker.io/debian:bookworm-slim as deps
+FROM docker.io/debian:bookworm-slim AS deps
 
 WORKDIR /deps
 COPY --from=smina_builder   /deps ./

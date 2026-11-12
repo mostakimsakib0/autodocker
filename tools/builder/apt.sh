@@ -16,7 +16,7 @@ fi
 env="$1"
 shift
 case "$env" in
-	builder) add build-essential git ;;
+	builder) add build-essential git quilt ;;
 	*)
 		for tool in "$@"; do
 			sed -nE '/^'"$env"'/s/^'"$env"'[[:space:]]+//p' "$tool/deps"
