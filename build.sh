@@ -14,9 +14,11 @@ list
 while read -rp 'Tool? ' tool; do
 	case "$tool" in
 		all)
-			list   | while read -r _ all; do build "$all"; done
+			list | while read -r _ all; do build "$all"; done
+			podman build -t "${PWD##*/}:latest" .
 			break
 			;;
 		*) build "$tool" ;;
 	esac
+	list
 done
