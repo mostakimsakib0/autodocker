@@ -1,6 +1,6 @@
 build()
 {
-	make "-j$(nproc)" -C repo/build/linux/release
+	make -j"$NPROC" -C repo/build/linux/release
 	strip repo/build/linux/release/vina
 }
 

@@ -1,6 +1,6 @@
 build()
 {
-	make -j"$(nproc)" -C repo
+	make -j"$NPROC" -C repo
 	strip repo/bin/*
 }
 

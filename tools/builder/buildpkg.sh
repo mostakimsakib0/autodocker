@@ -28,6 +28,7 @@ cd "$1" || die "Source directory does not exist"
 test -f pkg.sh || die "Package script does not exist"
 
 readonly PKG=/pkg
+readonly NPROC=$(nproc)
 export DESTDIR="$PKG"
 
 if test -f "$PWD/patches/series"; then

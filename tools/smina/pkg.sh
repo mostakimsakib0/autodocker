@@ -1,7 +1,8 @@
 build()
 {
 	cmake -S repo -B build
-	make -j"$(nproc)" -C build
+	cmake --build build -j"$NPROC"
+
 	strip build/fromsmina build/tosmina build/smina
 }
 

@@ -6,7 +6,7 @@ build()
 		-DCMAKE_INSTALL_PREFIX=/usr/local \
 		-DCMAKE_SKIP_RPATH=TRUE
 
-	cmake --build build -j $(nproc)
+	cmake --build build -j"$NPROC"
 }
 
 package()
